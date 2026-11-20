@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "crates/shunt-plugin-sdk",
     "crates/shunt-core",
+    "crates/shunt-plugins",
+    "crates/shunt-config",
+    "crates/shunt-cli",
 ]
 
 [workspace.package]
@@ -14,6 +17,8 @@ repository = "https://github.com/shunt-rs/shunt"
 [workspace.dependencies]
 shunt-plugin-sdk = { path = "crates/shunt-plugin-sdk" }
 shunt-core = { path = "crates/shunt-core" }
+shunt-plugins = { path = "crates/shunt-plugins" }
+shunt-config = { path = "crates/shunt-config" }
 
 arc-swap = "1"
 bytes = "1"

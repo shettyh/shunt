@@ -1,0 +1,21 @@
+[package]
+name = "shunt-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI binary for Shunt: `shunt check`, `shunt run`, and `shunt dev`"
+
+[[bin]]
+name = "shunt"
+path = "src/main.rs"
+
+[dependencies]
+shunt-plugin-sdk.workspace = true
+shunt-core.workspace = true
+shunt-config.workspace = true
+shunt-plugins.workspace = true
+
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

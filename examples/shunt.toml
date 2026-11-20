@@ -1,0 +1,48 @@
+[server]
+listen = "127.0.0.1:8080"
+drain_timeout_ms = 15000
+
+[admin]
+enabled = true
+listen = "127.0.0.1:9090"
+
+[[plugins]]
+name = "request-id"
+
+[[plugins]]
+name = "metrics"
+
+[[plugins]]
+name = "access-log"
+
+[[upstreams]]
+name = "api_backend"
+endpoints = ["http://127.0.0.1:3000"]
+connect_timeout_ms = 2000
+
+[[routes]]
+id = "public_api"
+path_prefix = "/api"
+strip_prefix = "/api"
+upstream = "api_backend"
+max_attempts = 2
+response_headers_timeout_ms = 10000
+idle_chunk_timeout_ms = 30000
+
+[[routes.plugins]]
+name = "cors"
+[routes.plugins.config]
+allow_origins = ["*"]
+
+[[routes.plugins]]
+name = "rate-limit"
+id = "public-rl"
+[routes.plugins.config]
+requests_per_second = 50.0
+burst = 100
+key = "client_ip"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+response_set = { "x-powered-by" = "shunt" }
