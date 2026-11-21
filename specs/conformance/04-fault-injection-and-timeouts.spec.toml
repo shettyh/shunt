@@ -14,7 +14,15 @@ name = "metrics"
 [[upstreams]]
 name = "flaky"
 endpoints = ["http://127.0.0.1:1"]
-connect_timeout_ms = 1000
+connect_timeout_ms = 5000
+
+[[routes]]
+id = "connect_check"
+path_prefix = "/connect"
+upstream = "flaky"
+max_attempts = 2
+response_headers_timeout_ms = 5000
+idle_chunk_timeout_ms = 5000
 
 [[routes]]
 id = "fast_timeout"
@@ -52,7 +60,7 @@ use_mocks = ["refused"]
 
 [cases.request]
 method = "GET"
-path = "/fast/check"
+path = "/connect/check"
 
 [cases.expect]
 status = 502
@@ -63,7 +71,7 @@ use_mocks = ["refused", "healthy_backup"]
 
 [cases.request]
 method = "GET"
-path = "/fast/retry"
+path = "/connect/retry"
 
 [cases.expect]
 status = 200

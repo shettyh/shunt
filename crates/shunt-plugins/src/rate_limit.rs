@@ -188,6 +188,24 @@ impl BucketTable {
         }
     }
 
+    fn try_reserve_slot(&self, cap: usize) -> bool {
+        let mut cur = self.entry_count.load(Ordering::Acquire);
+        loop {
+            if cur >= cap {
+                return false;
+            }
+            match self.entry_count.compare_exchange_weak(
+                cur,
+                cur + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+
     /// Checks and consumes 1 token for `key` under `(rps, burst)` while enforcing
     /// `max_entries` and `idle_ttl`.
     pub fn check_and_consume(
@@ -219,13 +237,7 @@ impl BucketTable {
                 }
             }
 
-            if self
-                .entry_count
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
-                    (c < cap).then_some(c + 1)
-                })
-                .is_ok()
-            {
+            if self.try_reserve_slot(cap) {
                 let mut bucket = TokenBucket::new(burst, now);
                 let res = bucket.try_consume(rps, f64::from(burst), now);
                 map.insert(key, bucket);
@@ -279,13 +291,7 @@ impl BucketTable {
         let mut bucket = TokenBucket::new(burst, now);
         let res = bucket.try_consume(rps, f64::from(burst), now);
 
-        if self
-            .entry_count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
-                (c < cap).then_some(c + 1)
-            })
-            .is_ok()
-        {
+        if self.try_reserve_slot(cap) {
             map.insert(key, bucket);
         } else if let Some(oldest_key) = oldest_key_in_map(&map)
             && map.remove(&oldest_key).is_some()

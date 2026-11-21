@@ -75,11 +75,19 @@ impl ManualClock {
     /// Advances the clock forward by `delta` (saturating at `u64::MAX` nanoseconds).
     pub fn advance(&self, delta: Duration) {
         let add_nanos = delta.as_nanos().min(u64::MAX as u128) as u64;
-        let _ = self
-            .now_nanos
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
-                Some(cur.saturating_add(add_nanos))
-            });
+        let mut cur = self.now_nanos.load(Ordering::Acquire);
+        loop {
+            let next = cur.saturating_add(add_nanos);
+            match self.now_nanos.compare_exchange_weak(
+                cur,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => cur = actual,
+            }
+        }
     }
 
     /// Advances the clock forward by `ms` milliseconds.

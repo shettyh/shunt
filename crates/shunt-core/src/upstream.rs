@@ -179,19 +179,25 @@ impl EndpointState {
         let threshold_u16 = threshold.clamp(1, u16::MAX as usize) as u16;
         let cooldown_ms = cooldown.as_millis().min(UNHEALTHY_UNTIL_MASK as u128) as u64;
 
-        let _ = self
-            .health
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
-                let (cur_failures, cur_until) = unpack_health(cur);
-                let next_failures = cur_failures.saturating_add(1);
-                let next_until = if next_failures >= threshold_u16 {
-                    let candidate = now_ms.saturating_add(cooldown_ms).min(UNHEALTHY_UNTIL_MASK);
-                    cur_until.max(candidate)
-                } else {
-                    cur_until
-                };
-                Some(pack_health(next_failures, next_until))
-            });
+        let mut cur = self.health.load(Ordering::Acquire);
+        loop {
+            let (cur_failures, cur_until) = unpack_health(cur);
+            let next_failures = cur_failures.saturating_add(1);
+            let next_until = if next_failures >= threshold_u16 {
+                let candidate = now_ms.saturating_add(cooldown_ms).min(UNHEALTHY_UNTIL_MASK);
+                cur_until.max(candidate)
+            } else {
+                cur_until
+            };
+            let next = pack_health(next_failures, next_until);
+            match self
+                .health
+                .compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => break,
+                Err(actual) => cur = actual,
+            }
+        }
     }
 }
 

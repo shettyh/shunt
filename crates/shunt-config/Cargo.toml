@@ -31,3 +31,6 @@ tracing.workspace = true
 proptest.workspace = true
 shunt-plugins.workspace = true
 rcgen.workspace = true
+
+[lints]
+workspace = true
