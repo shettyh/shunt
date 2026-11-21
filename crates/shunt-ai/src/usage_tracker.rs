@@ -607,11 +607,7 @@ fn contains_first_token(val: &Value) -> bool {
     }
 
     // Anthropic streaming chunk (in case ai-usage-tracker runs before ai-provider-adapter)
-    if val.get("type").and_then(Value::as_str) == Some("content_block_delta") {
-        return true;
-    }
-
-    false
+    val.get("type").and_then(Value::as_str) == Some("content_block_delta")
 }
 
 fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {
