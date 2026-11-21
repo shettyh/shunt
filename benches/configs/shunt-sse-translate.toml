@@ -29,8 +29,9 @@ claude-bench = [{ provider = "anthropic", upstream = "anthropic_mock", model = "
 
 [[routes.plugins]]
 name = "ai-provider-adapter"
-[routes.plugins.config.anthropic]
-api_key = "sk-ant-bench"
+[routes.plugins.config.providers.anthropic]
+dialect = "anthropic"
+auth = { type = "header", header = "x-api-key", api_key = "sk-ant-bench" }
 
 [[routes.plugins]]
 name = "ai-usage-tracker"

@@ -864,6 +864,7 @@ async fn check_expectations(
         let needs_call = up_exp.method.is_some()
             || up_exp.path.is_some()
             || !up_exp.headers.is_empty()
+            || !up_exp.headers_contains.is_empty()
             || !up_exp.headers_present.is_empty()
             || !up_exp.headers_absent.is_empty()
             || up_exp.body_contains.is_some()
@@ -901,6 +902,20 @@ async fn check_expectations(
                 if got.map(String::as_str) != Some(hv.as_str()) {
                     failures.push(format!(
                         "{step_label}: upstream `{}` header `{hk}` expected `{hv}`, got `{got:?}`",
+                        up_exp.upstream
+                    ));
+                }
+            }
+
+            for (hk, needle) in &up_exp.headers_contains {
+                let got = call
+                    .headers
+                    .get(&hk.to_ascii_lowercase())
+                    .map(String::as_str)
+                    .unwrap_or("");
+                if !got.contains(needle.as_str()) {
+                    failures.push(format!(
+                        "{step_label}: upstream `{}` header `{hk}` expected to contain `{needle}`, got `{got}`",
                         up_exp.upstream
                     ));
                 }

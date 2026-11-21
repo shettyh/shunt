@@ -222,6 +222,7 @@ async fn build_mock_response(spec: &MockResponseSpec) -> Response<ReceiverStream
     let mut builder = Response::builder().status(status);
 
     let is_sse = !spec.sse_raw.is_empty();
+    let is_eventstream = !spec.aws_eventstream.is_empty();
     let mut has_ct = false;
     for (k, v) in &spec.headers {
         if k.eq_ignore_ascii_case("content-type") {
@@ -238,6 +239,8 @@ async fn build_mock_response(spec: &MockResponseSpec) -> Response<ReceiverStream
     if !has_ct {
         if is_sse {
             builder = builder.header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8");
+        } else if is_eventstream {
+            builder = builder.header(header::CONTENT_TYPE, "application/vnd.amazon.eventstream");
         } else if spec.json.is_some() {
             builder = builder.header(header::CONTENT_TYPE, "application/json");
         }
@@ -245,6 +248,30 @@ async fn build_mock_response(spec: &MockResponseSpec) -> Response<ReceiverStream
 
     let raw_chunks: Vec<Vec<u8>> = if !spec.sse_raw.is_empty() {
         spec.sse_raw.iter().map(|s| s.as_bytes().to_vec()).collect()
+    } else if !spec.aws_eventstream.is_empty() {
+        spec.aws_eventstream
+            .iter()
+            .map(|frame| {
+                let payload = frame
+                    .json
+                    .as_ref()
+                    .and_then(|v| serde_json::to_vec(v).ok())
+                    .unwrap_or_default();
+                let type_header = if frame.message_type == "exception" {
+                    (":exception-type", frame.event_type.as_str())
+                } else {
+                    (":event-type", frame.event_type.as_str())
+                };
+                shunt_ai::encode_eventstream_frame(
+                    &[
+                        (":message-type", frame.message_type.as_str()),
+                        type_header,
+                        (":content-type", "application/json"),
+                    ],
+                    &payload,
+                )
+            })
+            .collect()
     } else if !spec.chunks.is_empty() {
         spec.chunks.iter().map(|s| s.as_bytes().to_vec()).collect()
     } else if let Some(val) = &spec.json {

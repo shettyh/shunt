@@ -82,12 +82,14 @@ name = "ai-provider-adapter"
 [routes.plugins.config]
 response_headers = true
 
-[routes.plugins.config.openai]
-api_key = "env:OPENAI_API_KEY"
+[routes.plugins.config.providers.openai]
+dialect = "openai_compatible"
+auth = { type = "bearer", api_key = "env:OPENAI_API_KEY" }
 include_stream_usage = true
 
-[routes.plugins.config.anthropic]
-api_key = "env:ANTHROPIC_API_KEY"
+[routes.plugins.config.providers.anthropic]
+dialect = "anthropic"
+auth = { type = "header", header = "x-api-key", api_key = "env:ANTHROPIC_API_KEY" }
 anthropic_version = "2023-06-01"
 default_max_tokens = 4096
 

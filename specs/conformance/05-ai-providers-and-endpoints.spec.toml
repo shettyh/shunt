@@ -1,0 +1,394 @@
+[spec]
+name = "ai-providers-and-endpoints"
+config = "../../examples/shunt-ai-multi-provider.toml"
+
+[env]
+OPENAI_API_KEY = "sk-test-openai-key"
+ANTHROPIC_API_KEY = "sk-test-anthropic-key"
+GROQ_API_KEY = "gsk-test-groq-key"
+AZURE_OPENAI_API_KEY = "az-test-azure-key"
+GEMINI_API_KEY = "AIza-test-gemini-key"
+VERTEX_ACCESS_TOKEN = "ya29.test-vertex-token"
+AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"
+AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+# --- Mocks ---
+
+[[mocks]]
+upstream = "ollama"
+name = "ollama_chat"
+status = 200
+json = { id = "chatcmpl-ollama-1", object = "chat.completion", model = "llama3.2", choices = [{ index = 0, message = { role = "assistant", content = "Hello from local Ollama!" }, finish_reason = "stop" }], usage = { prompt_tokens = 8, completion_tokens = 5, total_tokens = 13 } }
+
+[[mocks]]
+upstream = "groq"
+name = "groq_chat"
+status = 200
+json = { id = "chatcmpl-groq-1", object = "chat.completion", model = "llama-3.3-70b-versatile", choices = [{ index = 0, message = { role = "assistant", content = "Blazing fast Groq!" }, finish_reason = "stop" }], usage = { prompt_tokens = 6, completion_tokens = 4, total_tokens = 10 } }
+
+[[mocks]]
+upstream = "groq"
+name = "groq_429"
+status = 429
+json = { error = { message = "groq rate limited" } }
+
+[[mocks]]
+upstream = "azure"
+name = "azure_chat"
+status = 200
+json = { id = "chatcmpl-azure-1", object = "chat.completion", model = "gpt-4o-mini-deploy", choices = [{ index = 0, message = { role = "assistant", content = "Served by Azure OpenAI!" }, finish_reason = "stop" }], usage = { prompt_tokens = 9, completion_tokens = 6, total_tokens = 15 } }
+
+[[mocks]]
+upstream = "openai"
+name = "openai_embeddings"
+status = 200
+json = { object = "list", data = [{ object = "embedding", index = 0, embedding = [0.1, 0.2, 0.3] }], model = "text-embedding-3-small", usage = { prompt_tokens = 5, total_tokens = 5 } }
+
+[[mocks]]
+upstream = "openai"
+name = "openai_429"
+status = 429
+json = { error = { message = "openai overloaded" } }
+
+[[mocks]]
+upstream = "gemini"
+name = "gemini_json"
+status = 200
+json = { responseId = "gem_resp_1", modelVersion = "gemini-2.5-flash", candidates = [{ content = { role = "model", parts = [{ text = "Hello from Gemini!" }] }, finishReason = "STOP" }], usageMetadata = { promptTokenCount = 10, candidatesTokenCount = 4, totalTokenCount = 14 } }
+
+[[mocks]]
+upstream = "gemini"
+name = "gemini_sse"
+chunk_split_bytes = 13
+sse_raw = [
+  "data: {\"responseId\":\"gem_s1\",\"modelVersion\":\"gemini-2.5-flash\",\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Streamed \"}]}}]}\n\n",
+  "data: {\"responseId\":\"gem_s1\",\"modelVersion\":\"gemini-2.5-flash\",\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Gemini!\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":3,\"totalTokenCount\":10}}\n\n"
+]
+
+[[mocks]]
+upstream = "gemini"
+name = "gemini_batch_embeddings"
+status = 200
+json = { embeddings = [{ values = [0.11, 0.22] }, { values = [0.33, 0.44] }] }
+
+[[mocks]]
+upstream = "gemini"
+name = "gemini_429"
+status = 429
+json = { error = { code = 429, message = "quota exceeded", status = "RESOURCE_EXHAUSTED" } }
+
+[[mocks]]
+upstream = "vertex"
+name = "vertex_json"
+status = 200
+json = { responseId = "vtx_1", modelVersion = "gemini-2.5-pro", candidates = [{ content = { role = "model", parts = [{ text = "Hello from Vertex AI!" }] }, finishReason = "STOP" }], usageMetadata = { promptTokenCount = 12, candidatesTokenCount = 5, totalTokenCount = 17 } }
+
+[[mocks]]
+upstream = "bedrock"
+name = "bedrock_converse_json"
+status = 200
+json = { output = { message = { role = "assistant", content = [{ text = "Hello from Bedrock Converse!" }] } }, stopReason = "end_turn", usage = { inputTokens = 14, outputTokens = 6, totalTokens = 20 } }
+
+[[mocks]]
+upstream = "bedrock"
+name = "bedrock_converse_stream"
+chunk_split_bytes = 11
+aws_eventstream = [
+  { event_type = "messageStart", json = { role = "assistant" } },
+  { event_type = "contentBlockDelta", json = { contentBlockIndex = 0, delta = { text = "Hello from " } } },
+  { event_type = "contentBlockDelta", json = { contentBlockIndex = 0, delta = { text = "Bedrock Stream!" } } },
+  { event_type = "messageStop", json = { stopReason = "end_turn" } },
+  { event_type = "metadata", json = { usage = { inputTokens = 12, outputTokens = 5, totalTokens = 17 } } }
+]
+
+# --- Cases ---
+
+[[cases]]
+name = "GET /v1/models and GET /v1/models/{id} synthesize catalog with zero upstream hops"
+use_mocks = ["ollama_chat"]
+
+[[cases.steps]]
+name = "list models"
+[cases.steps.request]
+method = "GET"
+path = "/v1/models"
+[cases.steps.expect]
+status = 200
+json_path = { "/object" = "list", "/data/0/id" = "anthropic.claude-3-5-sonnet-20241022-v2:0", "/data/0/owned_by" = "bedrock" }
+body_contains = "\"embed-default\""
+[[cases.steps.expect.upstream_calls]]
+upstream = "ollama"
+count = 0
+
+[[cases.steps]]
+name = "retrieve configured model by id"
+[cases.steps.request]
+method = "GET"
+path = "/v1/models/local"
+[cases.steps.expect]
+status = 200
+json_path = { "/id" = "local", "/object" = "model", "/owned_by" = "ollama" }
+
+[[cases.steps]]
+name = "retrieve URL-encoded Bedrock model id"
+[cases.steps.request]
+method = "GET"
+path = "/v1/models/anthropic.claude-3-5-sonnet-20241022-v2%3A0"
+[cases.steps.expect]
+status = 200
+json_path = { "/id" = "anthropic.claude-3-5-sonnet-20241022-v2:0", "/owned_by" = "bedrock" }
+
+[[cases.steps]]
+name = "retrieve unknown model returns 404 OpenAI error"
+[cases.steps.request]
+method = "GET"
+path = "/v1/models/does-not-exist"
+[cases.steps.expect]
+status = 404
+json_path = { "/error/code" = "model_not_found" }
+
+[[cases]]
+name = "Ollama (no auth, include_stream_usage=false) and Groq (custom chat_path) OpenAI-compatible providers"
+use_mocks = ["ollama_chat", "groq_chat"]
+
+[[cases.steps]]
+name = "local alias routes to Ollama without Authorization header"
+[cases.steps.request]
+method = "POST"
+path = "/v1/chat/completions"
+headers = { "authorization" = "Bearer client-secret-must-be-stripped" }
+json = { model = "local", stream = false, messages = [{ role = "user", content = "hi ollama" }] }
+[cases.steps.expect]
+status = 200
+headers = { "x-shunt-provider" = "ollama", "x-shunt-model" = "llama3.2" }
+json_path = { "/choices/0/message/content" = "Hello from local Ollama!" }
+[[cases.steps.expect.upstream_calls]]
+upstream = "ollama"
+count = 1
+path = "/v1/chat/completions"
+headers_absent = ["authorization"]
+json_path = { "/model" = "llama3.2" }
+
+[[cases.steps]]
+name = "fast alias routes to Groq with custom /openai/v1/chat/completions path"
+[cases.steps.request]
+method = "POST"
+path = "/v1/chat/completions"
+json = { model = "fast", stream = false, messages = [{ role = "user", content = "hi groq" }] }
+[cases.steps.expect]
+status = 200
+headers = { "x-shunt-provider" = "groq", "x-shunt-model" = "llama-3.3-70b-versatile" }
+json_path = { "/choices/0/message/content" = "Blazing fast Groq!" }
+[[cases.steps.expect.upstream_calls]]
+upstream = "groq"
+count = 1
+path = "/openai/v1/chat/completions"
+headers = { "authorization" = "Bearer gsk-test-groq-key" }
+json_path = { "/model" = "llama-3.3-70b-versatile" }
+
+[[cases]]
+name = "Groq 429 fails over to Azure OpenAI with deployment URI and api-key header"
+use_mocks = ["groq_429", "azure_chat"]
+
+[cases.request]
+method = "POST"
+path = "/v1/chat/completions"
+json = { model = "fast", stream = false, messages = [{ role = "user", content = "azure fallback" }] }
+
+[cases.expect]
+status = 200
+headers = { "x-shunt-provider" = "azure", "x-shunt-model" = "gpt-4o-mini-deploy", "x-shunt-attempt" = "2" }
+json_path = { "/choices/0/message/content" = "Served by Azure OpenAI!" }
+metrics_delta = { "shunt_ai_failovers_total" = 1 }
+snapshot_redacts = ["az-test-azure-key", "gsk-test-groq-key"]
+
+[[cases.expect.upstream_calls]]
+upstream = "azure"
+count = 1
+path = "/openai/deployments/gpt-4o-mini-deploy/chat/completions?api-version=2024-10-21"
+headers = { "api-key" = "az-test-azure-key" }
+headers_absent = ["authorization"]
+
+[[cases]]
+name = "POST /v1/embeddings routes to OpenAI and fails over to Gemini batchEmbedContents"
+use_mocks = ["openai_embeddings", "gemini_batch_embeddings"]
+
+[[cases.steps]]
+name = "OpenAI embeddings passthrough with prompt_tokens tracking"
+[cases.steps.request]
+method = "POST"
+path = "/v1/embeddings"
+json = { model = "embed-default", input = "hello world" }
+[cases.steps.expect]
+status = 200
+headers = { "x-shunt-provider" = "openai", "x-shunt-model" = "text-embedding-3-small" }
+json_path = { "/object" = "list", "/data/0/embedding/1" = 0.2, "/usage/prompt_tokens" = 5 }
+metrics_delta = { "shunt_ai_tokens_total" = 5 }
+[[cases.steps.expect.upstream_calls]]
+upstream = "openai"
+count = 1
+path = "/v1/embeddings"
+json_path = { "/model" = "text-embedding-3-small" }
+
+[[cases.steps]]
+name = "Gemini batch embeddings translation"
+[cases.steps.request]
+method = "POST"
+path = "/v1/embeddings"
+json = { model = "gemini-embedding-001", input = ["alpha", "beta"] }
+[cases.steps.expect]
+status = 200
+headers = { "x-shunt-provider" = "gemini" }
+json_path = { "/object" = "list", "/data/0/embedding/0" = 0.11, "/data/1/embedding/1" = 0.44 }
+[[cases.steps.expect.upstream_calls]]
+upstream = "gemini"
+count = 1
+path = "/v1beta/models/gemini-embedding-001:batchEmbedContents"
+headers = { "x-goog-api-key" = "AIza-test-gemini-key" }
+json_path = { "/requests/0/content/parts/0/text" = "alpha", "/requests/1/content/parts/0/text" = "beta" }
+
+[[cases.steps]]
+name = "Anthropic embeddings returns 400 unsupported_endpoint"
+[cases.steps.request]
+method = "POST"
+path = "/v1/embeddings"
+json = { model = "claude-3-5-sonnet-20241022", input = "nope" }
+[cases.steps.expect]
+status = 400
+json_path = { "/error/code" = "unsupported_endpoint" }
+
+[[cases.steps]]
+name = "Bedrock embeddings returns 501 unsupported_endpoint"
+[cases.steps.request]
+method = "POST"
+path = "/v1/embeddings"
+json = { model = "anthropic.claude-3-5-sonnet-20241022-v2:0", input = "nope" }
+[cases.steps.expect]
+status = 501
+json_path = { "/error/code" = "unsupported_endpoint" }
+
+[[cases.steps]]
+name = "Capability-filtered chat-only model rejects /v1/embeddings up front"
+[cases.steps.request]
+method = "POST"
+path = "/v1/embeddings"
+json = { model = "local", input = "filtered out" }
+[cases.steps.expect]
+status = 400
+json_path = { "/error/code" = "unsupported_endpoint" }
+
+[[cases]]
+name = "Google Gemini AI Studio (JSON + fragmented SSE) and Vertex AI translation"
+use_mocks = ["gemini_json", "vertex_json"]
+
+[[cases.steps]]
+name = "AI Studio non-streaming chat with x-goog-api-key header"
+[cases.steps.request]
+method = "POST"
+path = "/v1/chat/completions"
+json = { model = "gemini-2.5-flash", stream = false, messages = [{ role = "system", content = "Be helpful" }, { role = "user", content = "Hi Gemini" }] }
+[cases.steps.expect]
+status = 200
+headers = { "x-shunt-provider" = "gemini" }
+json_path = { "/choices/0/message/content" = "Hello from Gemini!", "/usage/prompt_tokens" = 10, "/usage/completion_tokens" = 4 }
+snapshot_redacts = ["AIza-test-gemini-key", "ya29.test-vertex-token"]
+[[cases.steps.expect.upstream_calls]]
+upstream = "gemini"
+count = 1
+path = "/v1beta/models/gemini-2.5-flash:generateContent"
+headers = { "x-goog-api-key" = "AIza-test-gemini-key" }
+headers_absent = ["authorization"]
+json_path = { "/systemInstruction/parts/0/text" = "Be helpful", "/contents/0/parts/0/text" = "Hi Gemini" }
+
+[[cases.steps]]
+name = "Vertex AI chat uses GCP project/location URI and Bearer auth"
+[cases.steps.request]
+method = "POST"
+path = "/v1/chat/completions"
+json = { model = "vertex/pro", stream = false, messages = [{ role = "user", content = "Hi Vertex" }] }
+[cases.steps.expect]
+status = 200
+headers = { "x-shunt-provider" = "vertex", "x-shunt-model" = "gemini-2.5-pro" }
+json_path = { "/choices/0/message/content" = "Hello from Vertex AI!", "/usage/total_tokens" = 17 }
+[[cases.steps.expect.upstream_calls]]
+upstream = "vertex"
+count = 1
+path = "/v1/projects/my-gcp-project/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent"
+headers = { "authorization" = "Bearer ya29.test-vertex-token" }
+
+[[cases]]
+name = "Google Gemini live SSE translation across fragmented chunks"
+use_mocks = ["gemini_sse"]
+
+[cases.request]
+method = "POST"
+path = "/v1/chat/completions"
+json = { model = "gemini-2.5-flash", stream = true, messages = [{ role = "user", content = "stream" }] }
+
+[cases.expect]
+status = 200
+headers = { "x-shunt-provider" = "gemini" }
+headers_contains = { "content-type" = "text/event-stream" }
+sse_contains_text = "Streamed Gemini!"
+sse_ends_with = "[DONE]"
+metrics_delta = { "shunt_ai_tokens_total" = 10 }
+
+[[cases.expect.upstream_calls]]
+upstream = "gemini"
+count = 1
+path = "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+headers = { "x-goog-api-key" = "AIza-test-gemini-key" }
+
+[[cases]]
+name = "AWS Bedrock Converse JSON with pure-Rust SigV4 signing"
+use_mocks = ["bedrock_converse_json"]
+
+[cases.request]
+method = "POST"
+path = "/v1/chat/completions"
+json = { model = "anthropic.claude-3-5-sonnet-20241022-v2:0", stream = false, max_tokens = 256, messages = [{ role = "system", content = "System prompt" }, { role = "user", content = "Hi Bedrock" }] }
+
+[cases.expect]
+status = 200
+headers = { "x-shunt-provider" = "bedrock", "x-shunt-model" = "anthropic.claude-3-5-sonnet-20241022-v2:0" }
+json_path = { "/choices/0/message/content" = "Hello from Bedrock Converse!", "/usage/prompt_tokens" = 14, "/usage/completion_tokens" = 6 }
+snapshot_redacts = ["wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"]
+
+[[cases.expect.upstream_calls]]
+upstream = "bedrock"
+count = 1
+path = "/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/converse"
+headers_present = ["authorization", "x-amz-date", "x-amz-content-sha256"]
+headers_contains = { "authorization" = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/" }
+json_path = { "/system/0/text" = "System prompt", "/inferenceConfig/maxTokens" = 256, "/messages/0/content/0/text" = "Hi Bedrock" }
+
+[[cases]]
+name = "Cross-cloud failover: OpenAI 429 -> Gemini 429 -> AWS Bedrock binary ConverseStream -> live OpenAI SSE"
+use_mocks = ["openai_429", "gemini_429", "bedrock_converse_stream"]
+
+[cases.request]
+method = "POST"
+path = "/v1/chat/completions"
+json = { model = "smart", stream = true, messages = [{ role = "user", content = "cross-cloud rescue" }] }
+
+[cases.expect]
+status = 200
+headers = { "x-shunt-provider" = "bedrock", "x-shunt-attempt" = "3" }
+headers_contains = { "content-type" = "text/event-stream" }
+sse_contains_text = "Hello from Bedrock Stream!"
+sse_ends_with = "[DONE]"
+metrics_delta = { "shunt_ai_failovers_total" = 2, "shunt_ai_tokens_total" = 17 }
+
+[[cases.expect.upstream_calls]]
+upstream = "openai"
+count = 1
+
+[[cases.expect.upstream_calls]]
+upstream = "gemini"
+count = 1
+
+[[cases.expect.upstream_calls]]
+upstream = "bedrock"
+count = 1
+path = "/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/converse-stream"
+headers_contains = { "authorization" = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/" }

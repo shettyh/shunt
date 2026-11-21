@@ -12,6 +12,7 @@ This directory contains Request for Comments (RFC) design documents for **Shunt*
 | [0004](./0004-shunt-ai-plugin-pack.md) | `shunt-ai`: Multi-Provider AI Gateway as a Pure Plugin Pack | Implemented | `shunt-ai` |
 | [0005](./0005-benchmarks-and-hardening.md) | Benchmark Harness vs. Envoy & Caddy & Hardening | Implemented | `benches/`, `shunt-core`, `shunt-config` |
 | [0006](./0006-verification-and-spec-testing.md) | Layered Verification, Property Testing & Spec-Driven TOML Testing | Implemented | `shunt-plugin-sdk`, `shunt-core`, `shunt-config`, `shunt-plugins`, `shunt-ai`, `shunt-test`, `shunt-cli`, `specs/`, `fuzz/` |
+| [0007](./0007-generalized-ai-providers-and-endpoints.md) | Generalized AI Providers & Expanded OpenAI Endpoints | Implemented | `shunt-ai`, `shunt-plugin-sdk`, `shunt-core`, `shunt-test`, `fuzz` |
 
 ## Status Definitions
 

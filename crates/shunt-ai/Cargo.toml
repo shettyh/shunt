@@ -5,13 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Multi-provider AI router & gateway plugin pack for Shunt (OpenAI + Anthropic), built 100% on shunt-plugin-sdk"
+description = "Generalized multi-provider AI router & gateway plugin pack for Shunt (OpenAI-compatible, Anthropic, Azure OpenAI, Gemini, Bedrock), built 100% on shunt-plugin-sdk"
 
 [dependencies]
 shunt-plugin-sdk.workspace = true
 
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

@@ -3,6 +3,9 @@ use std::time::Duration;
 
 use proptest::prelude::*;
 use serde_json::{Value, json};
+use shunt_ai::aws_eventstream::{AwsEventStreamDecoder, encode_eventstream_frame};
+use shunt_ai::dialects::bedrock::{BedrockStreamTranslator, openai_to_bedrock_converse_request};
+use shunt_ai::dialects::gemini::{GeminiSseTranslator, openai_to_gemini_request};
 use shunt_ai::failover::{FailoverCircuitState, compute_cooldown};
 use shunt_ai::sse::SseParser;
 use shunt_ai::translate::{AnthropicSseTranslator, openai_to_anthropic_request};
@@ -493,5 +496,260 @@ proptest! {
                 }
             }
         }
+    }
+}
+
+proptest! {
+    #[test]
+    fn gemini_sse_translator_preserves_text_tools_and_usage_across_arbitrary_splits(
+        texts in prop::collection::vec("[a-zA-Z0-9 .,!?]{1,20}", 1..8),
+        tool_name in "[a-z_]{1,12}",
+        prompt_tokens in 1u64..10_000,
+        cand_tokens in 1u64..10_000,
+        chunk_sizes in prop::collection::vec(1usize..19, 1..64),
+    ) {
+        let mut raw_sse = String::new();
+        let expected_text: String = texts.concat();
+
+        for t in &texts {
+            raw_sse.push_str(&format!(
+                "data: {}\n\n",
+                json!({
+                    "responseId": "gem_prop_1",
+                    "modelVersion": "gemini-2.5-flash",
+                    "candidates": [{
+                        "content": { "role": "model", "parts": [{ "text": t }] }
+                    }]
+                })
+            ));
+        }
+
+        raw_sse.push_str(&format!(
+            "data: {}\n\n",
+            json!({
+                "responseId": "gem_prop_1",
+                "modelVersion": "gemini-2.5-flash",
+                "candidates": [{
+                    "content": {
+                        "role": "model",
+                        "parts": [{ "functionCall": { "name": tool_name, "args": { "k": "v" } } }]
+                    },
+                    "finishReason": "STOP"
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": prompt_tokens,
+                    "candidatesTokenCount": cand_tokens,
+                    "totalTokenCount": prompt_tokens + cand_tokens
+                }
+            })
+        ));
+
+        let mut tr = GeminiSseTranslator::new("gemini-2.5-flash");
+        let mut out_bytes = Vec::new();
+        for c in partition_bytes(raw_sse.as_bytes(), &chunk_sizes) {
+            out_bytes.extend_from_slice(&tr.push_chunk(&c));
+        }
+        out_bytes.extend_from_slice(&tr.finish());
+
+        let out_str = String::from_utf8(out_bytes).expect("Gemini SSE output must be valid UTF-8");
+        prop_assert!(out_str.ends_with("data: [DONE]\n\n"));
+
+        let mut parser = SseParser::new();
+        let mut events = parser.push(out_str.as_bytes());
+        events.extend(parser.finish());
+        prop_assert_eq!(events.last().unwrap().data.as_str(), "[DONE]");
+
+        let mut got_text = String::new();
+        let mut got_tool_name = None;
+        let mut got_finish = None;
+        let mut got_usage = None;
+
+        for ev in &events[..events.len() - 1] {
+            let v: Value = serde_json::from_str(&ev.data).expect("chunk must be valid JSON");
+            if let Some(u) = v.get("usage") {
+                got_usage = Some((
+                    u["prompt_tokens"].as_u64().unwrap(),
+                    u["completion_tokens"].as_u64().unwrap(),
+                ));
+            }
+            if let Some(choices) = v.get("choices").and_then(Value::as_array) {
+                for ch in choices {
+                    if let Some(fr) = ch.get("finish_reason").and_then(Value::as_str) {
+                        got_finish = Some(fr.to_owned());
+                    }
+                    if let Some(delta) = ch.get("delta") {
+                        if let Some(c) = delta.get("content").and_then(Value::as_str) {
+                            got_text.push_str(c);
+                        }
+                        if let Some(tcs) = delta.get("tool_calls").and_then(Value::as_array) {
+                            for tc in tcs {
+                                if let Some(n) = tc["function"]["name"].as_str() {
+                                    got_tool_name = Some(n.to_owned());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        prop_assert_eq!(got_text, expected_text);
+        prop_assert_eq!(got_tool_name.as_deref(), Some(tool_name.as_str()));
+        prop_assert_eq!(got_finish.as_deref(), Some("tool_calls"));
+        prop_assert_eq!(got_usage, Some((prompt_tokens, cand_tokens)));
+    }
+
+    #[test]
+    fn aws_eventstream_decoder_chunk_split_invariance(
+        payloads in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..64), 1..10),
+        chunk_sizes in prop::collection::vec(1usize..13, 1..64),
+    ) {
+        let mut wire = Vec::new();
+        for (i, p) in payloads.iter().enumerate() {
+            let ev_type = format!("ev_{i}");
+            wire.extend_from_slice(&encode_eventstream_frame(
+                &[(":message-type", "event"), (":event-type", &ev_type)],
+                p,
+            ));
+        }
+
+        let mut whole = AwsEventStreamDecoder::new();
+        let whole_msgs = whole.push(&wire).expect("valid encoded stream must decode");
+        prop_assert_eq!(whole.buffered_len(), 0);
+        prop_assert_eq!(whole_msgs.len(), payloads.len());
+
+        let mut chunked = AwsEventStreamDecoder::new();
+        let mut chunked_msgs = Vec::new();
+        for c in partition_bytes(&wire, &chunk_sizes) {
+            chunked_msgs.extend(chunked.push(&c).expect("chunked decode must succeed"));
+        }
+        prop_assert_eq!(chunked.buffered_len(), 0);
+        prop_assert_eq!(&whole_msgs, &chunked_msgs);
+
+        let mut byte_by_byte = AwsEventStreamDecoder::new();
+        let mut b_msgs = Vec::new();
+        for &b in &wire {
+            b_msgs.extend(byte_by_byte.push(&[b]).expect("1-byte decode must succeed"));
+        }
+        prop_assert_eq!(byte_by_byte.buffered_len(), 0);
+        prop_assert_eq!(whole_msgs, b_msgs);
+    }
+
+    #[test]
+    fn bedrock_stream_translator_preserves_text_tools_and_usage_across_arbitrary_splits(
+        texts in prop::collection::vec("[a-zA-Z0-9 .,!?]{1,20}", 1..8),
+        tool_arg_parts in prop::collection::vec("[a-z0-9{}:\", ]{1,12}", 1..4),
+        input_tokens in 1u64..10_000,
+        output_tokens in 1u64..10_000,
+        chunk_sizes in prop::collection::vec(1usize..15, 1..64),
+    ) {
+        let expected_text: String = texts.concat();
+        let expected_args: String = tool_arg_parts.concat();
+
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&encode_eventstream_frame(
+            &[(":message-type", "event"), (":event-type", "messageStart")],
+            br#"{"role":"assistant"}"#,
+        ));
+        for t in &texts {
+            let p = serde_json::to_vec(&json!({
+                "contentBlockIndex": 0,
+                "delta": { "text": t }
+            }))
+            .unwrap();
+            wire.extend_from_slice(&encode_eventstream_frame(
+                &[(":message-type", "event"), (":event-type", "contentBlockDelta")],
+                &p,
+            ));
+        }
+        wire.extend_from_slice(&encode_eventstream_frame(
+            &[(":message-type", "event"), (":event-type", "contentBlockStart")],
+            br#"{"contentBlockIndex":1,"start":{"toolUse":{"toolUseId":"tu_prop","name":"calc"}}}"#,
+        ));
+        for part in &tool_arg_parts {
+            let p = serde_json::to_vec(&json!({
+                "contentBlockIndex": 1,
+                "delta": { "toolUse": { "input": part } }
+            }))
+            .unwrap();
+            wire.extend_from_slice(&encode_eventstream_frame(
+                &[(":message-type", "event"), (":event-type", "contentBlockDelta")],
+                &p,
+            ));
+        }
+        wire.extend_from_slice(&encode_eventstream_frame(
+            &[(":message-type", "event"), (":event-type", "messageStop")],
+            br#"{"stopReason":"tool_use"}"#,
+        ));
+        let meta = serde_json::to_vec(&json!({
+            "usage": {
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "totalTokens": input_tokens + output_tokens
+            }
+        }))
+        .unwrap();
+        wire.extend_from_slice(&encode_eventstream_frame(
+            &[(":message-type", "event"), (":event-type", "metadata")],
+            &meta,
+        ));
+
+        let mut tr = BedrockStreamTranslator::new("anthropic.claude-3-5-sonnet-20241022-v2:0");
+        let mut out_bytes = Vec::new();
+        for c in partition_bytes(&wire, &chunk_sizes) {
+            out_bytes.extend_from_slice(&tr.push_chunk(&c));
+        }
+        out_bytes.extend_from_slice(&tr.finish());
+
+        let out_str = String::from_utf8(out_bytes).expect("Bedrock SSE output must be valid UTF-8");
+        prop_assert!(out_str.ends_with("data: [DONE]\n\n"));
+
+        let mut parser = SseParser::new();
+        let mut events = parser.push(out_str.as_bytes());
+        events.extend(parser.finish());
+        prop_assert_eq!(events.last().unwrap().data.as_str(), "[DONE]");
+
+        let mut got_text = String::new();
+        let mut got_args = String::new();
+        let mut got_usage = None;
+        for ev in &events[..events.len() - 1] {
+            let v: Value = serde_json::from_str(&ev.data).expect("chunk must be valid JSON");
+            if let Some(u) = v.get("usage") {
+                got_usage = Some((
+                    u["prompt_tokens"].as_u64().unwrap(),
+                    u["completion_tokens"].as_u64().unwrap(),
+                ));
+            }
+            if let Some(choices) = v.get("choices").and_then(Value::as_array) {
+                for ch in choices {
+                    if let Some(delta) = ch.get("delta") {
+                        if let Some(c) = delta.get("content").and_then(Value::as_str) {
+                            got_text.push_str(c);
+                        }
+                        if let Some(tcs) = delta.get("tool_calls").and_then(Value::as_array) {
+                            for tc in tcs {
+                                if let Some(a) = tc["function"]["arguments"].as_str() {
+                                    got_args.push_str(a);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        prop_assert_eq!(got_text, expected_text);
+        prop_assert_eq!(got_args, expected_args);
+        prop_assert_eq!(got_usage, Some((input_tokens, output_tokens)));
+    }
+
+    #[test]
+    fn gemini_bedrock_and_eventstream_never_panic_on_arbitrary_bytes(
+        raw in prop::collection::vec(any::<u8>(), 0..256),
+    ) {
+        let _ = openai_to_gemini_request(&raw);
+        let _ = openai_to_bedrock_converse_request(&raw);
+        let mut dec = AwsEventStreamDecoder::new();
+        let _ = dec.push(&raw);
     }
 }

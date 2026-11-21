@@ -171,6 +171,7 @@ pub async fn handle_websocket_upgrade(
         uri: canonical_head.uri,
         headers: canonical_head.headers,
         body: None,
+        endpoint_uri: Some(base_uri.clone()),
     };
 
     if mask.contains(HookMask::ON_UPSTREAM_REQUEST) {

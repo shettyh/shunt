@@ -43,7 +43,21 @@ pub enum MockFault {
     ConnectRefused,
 }
 
-/// Scripted HTTP / SSE response served by a mock upstream.
+/// Single AWS EventStream frame specification for mocking binary Bedrock streams.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AwsEventStreamFrameSpec {
+    pub event_type: String,
+    #[serde(default = "default_event_message_type")]
+    pub message_type: String,
+    #[serde(default)]
+    pub json: Option<Value>,
+}
+
+fn default_event_message_type() -> String {
+    "event".to_owned()
+}
+
+/// Scripted HTTP / SSE / EventStream response served by a mock upstream.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct MockResponseSpec {
@@ -53,6 +67,8 @@ pub struct MockResponseSpec {
     pub json: Option<Value>,
     /// Raw SSE frames to stream (automatically sets `content-type: text/event-stream`).
     pub sse_raw: Vec<String>,
+    /// Binary AWS EventStream frames to encode & stream (sets `content-type: application/vnd.amazon.eventstream`).
+    pub aws_eventstream: Vec<AwsEventStreamFrameSpec>,
     /// Arbitrary raw chunks to stream sequentially.
     pub chunks: Vec<String>,
     /// Optional byte chunking size to simulate fragmented TCP frames.
@@ -193,6 +209,7 @@ pub struct UpstreamCallExpect {
     pub method: Option<String>,
     pub path: Option<String>,
     pub headers: BTreeMap<String, String>,
+    pub headers_contains: BTreeMap<String, String>,
     pub headers_present: Vec<String>,
     pub headers_absent: Vec<String>,
     pub body_contains: Option<String>,
