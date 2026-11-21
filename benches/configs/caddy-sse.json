@@ -1,0 +1,25 @@
+{
+  "admin": { "disabled": true },
+  "logging": { "logs": { "default": { "level": "ERROR" } } },
+  "apps": {
+    "http": {
+      "servers": {
+        "bench": {
+          "listen": ["127.0.0.1:18081"],
+          "automatic_https": { "disable": true },
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "flush_interval": -1,
+                  "upstreams": [{ "dial": "127.0.0.1:18080" }]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

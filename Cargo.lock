@@ -848,6 +848,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "shunt-bench"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "clap",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "tokio",
+]
+
+[[package]]
 name = "shunt-cli"
 version = "0.1.0"
 dependencies = [

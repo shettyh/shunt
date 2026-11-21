@@ -1,7 +1,7 @@
 # RFC 0005: Benchmark Harness vs. Envoy & Caddy & Hardening
 
-- **Status:** Draft
-- **Crates:** `benches/` (Phase 4)
+- **Status:** Implemented
+- **Crates:** `benches/shunt-bench`, `shunt-core`, `shunt-config`
 
 ## Summary
 

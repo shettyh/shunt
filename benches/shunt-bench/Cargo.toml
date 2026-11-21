@@ -1,0 +1,20 @@
+[package]
+name = "shunt-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reproducible mock upstream and HTTP/SSE load generator for benchmarking Shunt vs. Envoy & Caddy"
+
+[[bin]]
+name = "shunt-bench"
+path = "src/main.rs"
+
+[dependencies]
+bytes.workspace = true
+clap.workspace = true
+http.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+tokio.workspace = true

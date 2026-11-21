@@ -1,0 +1,48 @@
+{
+  "admin": { "disabled": true },
+  "logging": { "logs": { "default": { "level": "ERROR" } } },
+  "apps": {
+    "http": {
+      "servers": {
+        "bench": {
+          "listen": ["127.0.0.1:18081"],
+          "automatic_https": { "disable": true },
+          "routes": [
+            {
+              "match": [
+                {
+                  "header": {
+                    "Authorization": ["Bearer bench-secret-token"]
+                  }
+                }
+              ],
+              "handle": [
+                {
+                  "handler": "headers",
+                  "response": {
+                    "set": {
+                      "X-Request-Id": ["{http.request.uuid}"]
+                    }
+                  }
+                },
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [{ "dial": "127.0.0.1:18080" }]
+                }
+              ]
+            },
+            {
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 401,
+                  "body": "{\"error\":\"unauthorized\"}"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

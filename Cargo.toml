@@ -7,6 +7,7 @@ members = [
     "crates/shunt-ai",
     "crates/shunt-config",
     "crates/shunt-cli",
+    "benches/shunt-bench",
 ]
 
 [workspace.package]

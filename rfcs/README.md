@@ -10,7 +10,7 @@ This directory contains Request for Comments (RFC) design documents for **Shunt*
 | [0002](./0002-atomic-snapshots-and-state-lifecycle.md) | Atomic Snapshots, Pool Reuse & State Lifecycle | Implemented | `shunt-core`, `shunt-plugin-sdk` |
 | [0003](./0003-config-ir-and-admin-plane.md) | Config IR, Hot Reload, Admin API & Dev Ergonomics | Implemented | `shunt-config`, `shunt-plugins`, `shunt-cli` |
 | [0004](./0004-shunt-ai-plugin-pack.md) | `shunt-ai`: Multi-Provider AI Gateway as a Pure Plugin Pack | Implemented | `shunt-ai` |
-| [0005](./0005-benchmarks-and-hardening.md) | Benchmark Harness vs. Envoy & Caddy & Hardening | Draft | `benches/` |
+| [0005](./0005-benchmarks-and-hardening.md) | Benchmark Harness vs. Envoy & Caddy & Hardening | Implemented | `benches/`, `shunt-core`, `shunt-config` |
 
 ## Status Definitions
 

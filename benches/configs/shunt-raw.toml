@@ -1,0 +1,20 @@
+# Workload 1: Raw HTTP/1.1 & HTTP/2 passthrough (0 plugins, HookMask::EMPTY)
+[server]
+listen = "127.0.0.1:18081"
+drain_timeout_ms = 5000
+
+[admin]
+enabled = false
+
+[[upstreams]]
+name = "bench_upstream"
+endpoints = ["http://127.0.0.1:18080"]
+connect_timeout_ms = 5000
+pool_max_idle_per_host = 512
+
+[[routes]]
+id = "raw_passthrough"
+path_prefix = "/"
+upstream = "bench_upstream"
+max_attempts = 1
+allow_websockets = false

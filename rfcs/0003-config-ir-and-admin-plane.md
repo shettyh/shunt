@@ -72,7 +72,7 @@ Three reload triggers feed the exact same `ReloadController::reload()` path:
 Every built-in plugin depends strictly on `shunt-plugin-sdk` (never `shunt-core`):
 - `request-id` — propagates or generates `x-request-id` and attaches `RequestId` to `ctx.extensions`.
 - `bearer-auth` — constant-time token comparison with `env:VAR` secret indirection and `AuthSubject` extension.
-- `rate-limit` — token-bucket limiter keyed by `client_ip`, `auth_subject`, `header:<name>`, or `global`, backed by `StateStore` so buckets survive reloads.
+- `rate-limit` — token-bucket limiter keyed by `client_ip`, `header` (`key_header`), or `global`, backed by `StateStore` so buckets survive reloads.
 - `cors` — preflight `OPTIONS` short-circuiting and origin/credential header injection.
 - `header-rewrite` — declarative request/response header set/add/remove.
 - `metrics` — Prometheus request counters, latency/TTFB histograms, byte counters, and stream-abort counters.

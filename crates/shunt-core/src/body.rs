@@ -204,7 +204,14 @@ impl TrackedPassthroughBody {
 impl Drop for TrackedPassthroughBody {
     fn drop(&mut self) {
         if self.on_finish.is_some() {
-            self.fire_finish(Some("downstream client disconnected mid-stream".to_owned()), true);
+            if self.is_end_stream() {
+                self.fire_finish(None, false);
+            } else {
+                self.fire_finish(
+                    Some("downstream client disconnected mid-stream".to_owned()),
+                    true,
+                );
+            }
         }
     }
 }
@@ -231,6 +238,9 @@ impl Body for TrackedPassthroughBody {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
                     self.bytes_sent += data.len() as u64;
+                }
+                if self.is_end_stream() {
+                    self.fire_finish(None, false);
                 }
                 Poll::Ready(Some(Ok(frame)))
             }

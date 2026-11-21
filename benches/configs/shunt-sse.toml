@@ -1,0 +1,22 @@
+# Workload 3a: High-concurrency SSE streaming passthrough (1,000+ concurrent streams)
+[server]
+listen = "127.0.0.1:18081"
+drain_timeout_ms = 10000
+
+[admin]
+enabled = false
+
+[[upstreams]]
+name = "bench_upstream"
+endpoints = ["http://127.0.0.1:18080"]
+connect_timeout_ms = 5000
+pool_max_idle_per_host = 2048
+
+[[routes]]
+id = "sse_passthrough"
+path_prefix = "/"
+upstream = "bench_upstream"
+max_attempts = 1
+response_headers_timeout_ms = 30000
+idle_chunk_timeout_ms = 30000
+allow_websockets = false

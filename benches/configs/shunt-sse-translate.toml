@@ -1,0 +1,38 @@
+# Workload 3b: High-concurrency SSE streaming with live Anthropic -> OpenAI translation + usage tracking
+[server]
+listen = "127.0.0.1:18081"
+drain_timeout_ms = 10000
+
+[admin]
+enabled = false
+
+[[upstreams]]
+name = "anthropic_mock"
+endpoints = ["http://127.0.0.1:18080"]
+connect_timeout_ms = 5000
+pool_max_idle_per_host = 2048
+
+[[routes]]
+id = "ai_sse_translate"
+path_exact = "/v1/chat/completions"
+methods = ["POST"]
+upstream = "anthropic_mock"
+max_attempts = 1
+response_headers_timeout_ms = 30000
+idle_chunk_timeout_ms = 30000
+allow_websockets = false
+
+[[routes.plugins]]
+name = "ai-model-router"
+[routes.plugins.config.models]
+claude-bench = [{ provider = "anthropic", upstream = "anthropic_mock", model = "claude-bench" }]
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+[routes.plugins.config.anthropic]
+api_key = "sk-ant-bench"
+
+[[routes.plugins]]
+name = "ai-usage-tracker"
+[routes.plugins.config]
+log_usage = false
