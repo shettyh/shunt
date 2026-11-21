@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use shunt_plugin_sdk::{
     BuildContext, Clock, DistributedStore, Flow, HookMask, HookResult, HttpPlugin,
     PluginBuildError, PluginConfig, PluginFactory, RequestCtx, ResponseHead, UpstreamSelection,
@@ -70,6 +70,15 @@ struct TargetHealthEntry {
     cooldown_until: Option<Duration>,
 }
 
+/// Point-in-time provider/model cooldown snapshot for read-only inspection APIs.
+#[derive(Debug, Clone, Serialize)]
+pub struct CooldownSnapshot {
+    pub target: String,
+    pub consecutive_failures: usize,
+    pub in_cooldown: bool,
+    pub remaining_ms: u64,
+}
+
 /// Shared cooldown circuit-breaker state stored inside `StateStore` across reloads.
 #[derive(Debug, Default)]
 pub struct FailoverCircuitState {
@@ -77,6 +86,34 @@ pub struct FailoverCircuitState {
 }
 
 impl FailoverCircuitState {
+    pub fn snapshot_cooldowns(&self, now: Duration) -> Vec<CooldownSnapshot> {
+        let guard = self.targets.read().expect("FailoverCircuitState poisoned");
+        let mut out: Vec<CooldownSnapshot> = guard
+            .iter()
+            .filter_map(|(target, entry)| {
+                let remaining = entry
+                    .cooldown_until
+                    .and_then(|until| until.checked_sub(now));
+                let in_cooldown = remaining.is_some_and(|r| !r.is_zero());
+                if !in_cooldown && entry.consecutive_failures == 0 {
+                    return None;
+                }
+                Some(CooldownSnapshot {
+                    target: target.clone(),
+                    consecutive_failures: entry.consecutive_failures,
+                    in_cooldown,
+                    remaining_ms: remaining.map(|d| d.as_millis() as u64).unwrap_or(0),
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.in_cooldown
+                .cmp(&a.in_cooldown)
+                .then_with(|| b.remaining_ms.cmp(&a.remaining_ms))
+                .then_with(|| a.target.cmp(&b.target))
+        });
+        out
+    }
     pub fn is_in_cooldown(&self, key: &str, now: Duration) -> bool {
         let guard = self.targets.read().expect("FailoverCircuitState poisoned");
         guard

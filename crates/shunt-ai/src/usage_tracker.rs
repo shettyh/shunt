@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use shunt_plugin_sdk::{
     BuildContext, Bytes, Flow, HookMask, HookResult, HttpPlugin, PluginBuildError, PluginConfig,
@@ -76,7 +76,7 @@ struct AiMetricsData {
 }
 
 /// Point-in-time aggregate counters from [`AiMetrics`] (useful for programmatic checks/tests).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct AiMetricsSnapshot {
     pub total_requests: u64,
     pub total_prompt_tokens: u64,
@@ -85,6 +85,27 @@ pub struct AiMetricsSnapshot {
     pub total_cost_usd: f64,
     pub total_cache_hits: u64,
     pub total_cache_misses: u64,
+}
+
+/// Per-(provider, model) rollup rendered for read-only Admin Inspector dashboards.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AiModelBreakdown {
+    pub provider: String,
+    pub model: String,
+    pub requests: u64,
+    pub error_requests: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cost_usd: f64,
+    pub avg_ttft_ms: Option<f64>,
+    pub avg_duration_ms: Option<f64>,
+}
+
+/// Detailed point-in-time AI usage summary for read-only inspection APIs.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AiDetailedMetricsSnapshot {
+    pub totals: AiMetricsSnapshot,
+    pub models: Vec<AiModelBreakdown>,
 }
 
 /// Thread-safe Prometheus-compatible AI metrics store updated by [`AiUsageTrackerPlugin`]
@@ -241,6 +262,133 @@ impl AiMetrics {
             total_cost_usd: nano_usd_to_usd(total_cost_nano),
             total_cache_hits,
             total_cache_misses,
+        }
+    }
+
+    /// Returns aggregate totals plus per-(provider, model) breakdowns for Admin Inspector APIs.
+    pub fn detailed_snapshot(&self) -> AiDetailedMetricsSnapshot {
+        let data = self.inner.read().expect("AiMetrics lock poisoned");
+
+        let total_requests = data.requests_total.values().copied().sum();
+        let total_prompt_tokens = data
+            .tokens_total
+            .iter()
+            .filter(|((_, _, k), _)| *k == "prompt")
+            .map(|(_, &v)| v)
+            .sum();
+        let total_completion_tokens = data
+            .tokens_total
+            .iter()
+            .filter(|((_, _, k), _)| *k == "completion")
+            .map(|(_, &v)| v)
+            .sum();
+        let total_failovers = data.failovers_total.values().copied().sum();
+        let total_cost_nano: u64 = data
+            .cost_nano_usd_total
+            .values()
+            .copied()
+            .fold(0u64, u64::saturating_add);
+        let total_cache_hits = data
+            .cache_requests_total
+            .iter()
+            .filter(|((status, _, _), _)| *status == "hit")
+            .map(|(_, &v)| v)
+            .sum();
+        let total_cache_misses = data
+            .cache_requests_total
+            .iter()
+            .filter(|((status, _, _), _)| *status == "miss")
+            .map(|(_, &v)| v)
+            .sum();
+
+        #[derive(Default)]
+        struct Accum {
+            requests: u64,
+            error_requests: u64,
+            prompt_tokens: u64,
+            completion_tokens: u64,
+            cost_nano: u64,
+            ttft_sum_secs: f64,
+            ttft_count: u64,
+            dur_sum_secs: f64,
+            dur_count: u64,
+        }
+
+        let mut by_model: BTreeMap<(String, String), Accum> = BTreeMap::new();
+        for ((provider, model, _stream, status), &count) in &data.requests_total {
+            let entry = by_model
+                .entry((provider.clone(), model.clone()))
+                .or_default();
+            entry.requests += count;
+            if *status == 0 || *status >= 400 {
+                entry.error_requests += count;
+            }
+        }
+        for ((provider, model, kind), &count) in &data.tokens_total {
+            let entry = by_model
+                .entry((provider.clone(), model.clone()))
+                .or_default();
+            if *kind == "prompt" {
+                entry.prompt_tokens += count;
+            } else if *kind == "completion" {
+                entry.completion_tokens += count;
+            }
+        }
+        for ((provider, model, _key, _team), &nano) in &data.cost_nano_usd_total {
+            let entry = by_model
+                .entry((provider.clone(), model.clone()))
+                .or_default();
+            entry.cost_nano = entry.cost_nano.saturating_add(nano);
+        }
+        for ((provider, model, _stream), hist) in &data.ttft_seconds {
+            let entry = by_model
+                .entry((provider.clone(), model.clone()))
+                .or_default();
+            entry.ttft_sum_secs += hist.sum;
+            entry.ttft_count += hist.count;
+        }
+        for ((provider, model, _stream), hist) in &data.duration_seconds {
+            let entry = by_model
+                .entry((provider.clone(), model.clone()))
+                .or_default();
+            entry.dur_sum_secs += hist.sum;
+            entry.dur_count += hist.count;
+        }
+
+        let mut models: Vec<AiModelBreakdown> = by_model
+            .into_iter()
+            .map(|((provider, model), a)| AiModelBreakdown {
+                provider,
+                model,
+                requests: a.requests,
+                error_requests: a.error_requests,
+                prompt_tokens: a.prompt_tokens,
+                completion_tokens: a.completion_tokens,
+                cost_usd: nano_usd_to_usd(a.cost_nano),
+                avg_ttft_ms: (a.ttft_count > 0)
+                    .then(|| (a.ttft_sum_secs / a.ttft_count as f64) * 1000.0),
+                avg_duration_ms: (a.dur_count > 0)
+                    .then(|| (a.dur_sum_secs / a.dur_count as f64) * 1000.0),
+            })
+            .collect();
+        models.sort_by(|a, b| {
+            b.requests
+                .cmp(&a.requests)
+                .then_with(|| a.provider.cmp(&b.provider))
+                .then_with(|| a.model.cmp(&b.model))
+        });
+
+        AiDetailedMetricsSnapshot {
+            totals: AiMetricsSnapshot {
+                total_requests,
+                total_prompt_tokens,
+                total_completion_tokens,
+                total_failovers,
+                total_cost_usd: nano_usd_to_usd(total_cost_nano),
+                total_cache_hits,
+                total_cache_misses,
+            },
+            models,
         }
     }
 
@@ -602,30 +750,32 @@ impl HttpPlugin for AiUsageTrackerPlugin {
         let meta = ctx.get_ext::<AiRequestMeta>();
         let cache_status = ctx.get_ext::<AiCacheStatus>();
 
-        // On an exact-match AI cache hit, annotate the active OTel span with GenAI metadata
-        // without double-counting upstream inference requests/tokens in `AiMetrics::record`.
+        // On an exact-match AI cache hit, annotate the active OTel span & inspector trace with
+        // GenAI metadata without double-counting upstream inference requests/tokens in `AiMetrics::record`.
         if let Some(AiCacheStatus::Hit {
             provider,
             served_model,
         }) = cache_status
         {
-            if let Some(span) = ctx.get_ext::<SpanHandle>() {
+            if ctx.has_trace_collectors() {
                 let op = meta
                     .map(|m| genai_operation_name(m.endpoint))
                     .unwrap_or("chat");
                 let requested_model = meta
                     .map(|m| m.requested_model.as_str())
                     .unwrap_or(served_model.as_str());
-                span.set_name(format!("{op} {requested_model}"));
-                span.set_str("gen_ai.operation.name", op);
-                span.set_str("gen_ai.provider.name", provider.as_str());
-                span.set_str("gen_ai.request.model", requested_model);
-                span.set_str("gen_ai.response.model", served_model.as_str());
-                span.set_str("shunt.ai.cache_status", "hit");
+                if let Some(span) = ctx.get_ext::<SpanHandle>() {
+                    span.set_name(format!("{op} {requested_model}"));
+                }
+                ctx.annotate_str("gen_ai.operation.name", op);
+                ctx.annotate_str("gen_ai.provider.name", provider.as_str());
+                ctx.annotate_str("gen_ai.request.model", requested_model);
+                ctx.annotate_str("gen_ai.response.model", served_model.as_str());
+                ctx.annotate_str("shunt.ai.cache_status", "hit");
                 if let Some(policy) = ctx.get_ext::<AiKeyPolicy>() {
-                    span.set_str("shunt.ai.key_id", policy.key_id.as_str());
+                    ctx.annotate_str("shunt.ai.key_id", policy.key_id.as_str());
                     if let Some(team) = &policy.team {
-                        span.set_str("shunt.ai.team", team.as_str());
+                        ctx.annotate_str("shunt.ai.team", team.as_str());
                     }
                 }
             }
@@ -692,43 +842,45 @@ impl HttpPlugin for AiUsageTrackerPlugin {
 
         self.metrics.record(&report);
 
-        if let Some(span) = ctx.get_ext::<SpanHandle>() {
+        if ctx.has_trace_collectors() {
             let op = meta
                 .map(|m| genai_operation_name(m.endpoint))
                 .unwrap_or("chat");
-            span.set_name(format!("{op} {}", report.requested_model));
-            span.set_str("gen_ai.operation.name", op);
-            span.set_str("gen_ai.provider.name", report.provider.as_str());
-            span.set_str("gen_ai.request.model", report.requested_model.as_str());
-            span.set_str("gen_ai.response.model", report.served_model.as_str());
+            if let Some(span) = ctx.get_ext::<SpanHandle>() {
+                span.set_name(format!("{op} {}", report.requested_model));
+            }
+            ctx.annotate_str("gen_ai.operation.name", op);
+            ctx.annotate_str("gen_ai.provider.name", report.provider.as_str());
+            ctx.annotate_str("gen_ai.request.model", report.requested_model.as_str());
+            ctx.annotate_str("gen_ai.response.model", report.served_model.as_str());
             if let Some(p) = report.prompt_tokens {
-                span.set_int("gen_ai.usage.input_tokens", p.min(i64::MAX as u64) as i64);
+                ctx.annotate_int("gen_ai.usage.input_tokens", p.min(i64::MAX as u64) as i64);
             }
             if let Some(c) = report.completion_tokens {
-                span.set_int("gen_ai.usage.output_tokens", c.min(i64::MAX as u64) as i64);
+                ctx.annotate_int("gen_ai.usage.output_tokens", c.min(i64::MAX as u64) as i64);
             }
             if let Some(cached) = report.cached_prompt_tokens {
-                span.set_int(
+                ctx.annotate_int(
                     "gen_ai.usage.cache_read.input_tokens",
                     cached.min(i64::MAX as u64) as i64,
                 );
             }
-            span.set_bool("shunt.ai.stream", report.stream);
+            ctx.annotate_bool("shunt.ai.stream", report.stream);
             if let Some(ttft) = report.ttft {
-                span.set_float("shunt.ai.ttft_ms", ttft.as_secs_f64() * 1000.0);
+                ctx.annotate_float("shunt.ai.ttft_ms", ttft.as_secs_f64() * 1000.0);
             }
-            span.set_int("shunt.ai.failovers", report.failover_events.len() as i64);
+            ctx.annotate_int("shunt.ai.failovers", report.failover_events.len() as i64);
             if let Some(m) = meta {
-                span.set_str("shunt.ai.routing_strategy", m.routing_strategy.as_str());
+                ctx.annotate_str("shunt.ai.routing_strategy", m.routing_strategy.as_str());
             }
             if let Some(cs) = cache_status {
-                span.set_str("shunt.ai.cache_status", cs.as_str());
+                ctx.annotate_str("shunt.ai.cache_status", cs.as_str());
             }
             if let Some(k) = &report.key_id {
-                span.set_str("shunt.ai.key_id", k.as_str());
+                ctx.annotate_str("shunt.ai.key_id", k.as_str());
             }
             if let Some(t) = &report.team {
-                span.set_str("shunt.ai.team", t.as_str());
+                ctx.annotate_str("shunt.ai.team", t.as_str());
             }
         }
 

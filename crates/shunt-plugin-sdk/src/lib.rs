@@ -33,6 +33,6 @@ pub use state::{
 };
 pub use telemetry::{
     InMemoryTelemetrySink, ParsedTraceparent, SpanHandle, SpanKind, SpanRecord, SpanStatusCode,
-    SpanValue, TelemetrySink, TraceContext, current_unix_nanos, encode_hex_lower, generate_span_id,
-    generate_trace_id,
+    SpanValue, TelemetrySink, TraceAnnotations, TraceContext, current_unix_nanos, encode_hex_lower,
+    generate_span_id, generate_trace_id,
 };

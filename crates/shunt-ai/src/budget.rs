@@ -6,7 +6,7 @@ use serde::Deserialize;
 use shunt_plugin_sdk::{
     BufferedResponse, BuildContext, Bytes, Clock, DistributedStore, FailurePolicy, Flow,
     HeaderName, HeaderValue, HookMask, HookResult, HttpPlugin, PluginBuildError, PluginConfig,
-    PluginFactory, RequestCtx, RequestSummary, ResponseHead, SpanHandle, StatusCode,
+    PluginFactory, RequestCtx, RequestSummary, ResponseHead, StatusCode,
 };
 use tracing::{info, warn};
 
@@ -638,9 +638,7 @@ impl HttpPlugin for AiBudgetPlugin {
         self.metrics
             .record_cost(&provider, served_model, key_label, team_label, cost_nano);
 
-        if let Some(span) = ctx.get_ext::<SpanHandle>() {
-            span.set_float("shunt.ai.cost_usd", nano_usd_to_usd(cost_nano));
-        }
+        ctx.annotate_float("shunt.ai.cost_usd", nano_usd_to_usd(cost_nano));
 
         info!(
             request_id = summary.request_id,

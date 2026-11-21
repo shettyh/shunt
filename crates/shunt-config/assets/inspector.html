@@ -1,0 +1,1169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shunt — Read-Only Admin Inspector</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --bg-elev: #111622;
+    --bg-card: #151c2c;
+    --bg-hover: #1b2438;
+    --border: #232e47;
+    --text: #e6edf7;
+    --muted: #8b9bb8;
+    --accent: #38bdf8;
+    --accent-dim: rgba(56, 189, 248, 0.14);
+    --green: #34d399;
+    --green-dim: rgba(52, 211, 153, 0.14);
+    --amber: #fbbf24;
+    --amber-dim: rgba(251, 191, 36, 0.15);
+    --red: #f87171;
+    --red-dim: rgba(248, 113, 113, 0.15);
+    --purple: #a78bfa;
+    --purple-dim: rgba(167, 139, 250, 0.15);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  code, pre, .mono { font-family: var(--mono); }
+
+  /* Header */
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: rgba(11, 14, 20, 0.94);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .logo {
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    background: linear-gradient(135deg, #38bdf8, #818cf8);
+    display: grid;
+    place-items: center;
+    font-weight: 800;
+    color: #0b0e14;
+    font-size: 14px;
+    letter-spacing: -0.04em;
+  }
+  .brand-title { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    background: var(--bg-elev);
+    color: var(--muted);
+  }
+  .pill.live { color: var(--green); border-color: rgba(52,211,153,0.35); background: var(--green-dim); }
+  .pill.warn { color: var(--amber); border-color: rgba(251,191,36,0.35); background: var(--amber-dim); }
+  .pill.err { color: var(--red); border-color: rgba(248,113,113,0.35); background: var(--red-dim); }
+  .pill.info { color: var(--accent); border-color: rgba(56,189,248,0.35); background: var(--accent-dim); }
+  .pill.purple { color: var(--purple); border-color: rgba(167,139,250,0.35); background: var(--purple-dim); }
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  .header-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  /* Layout */
+  main { max-width: 1440px; margin: 0 auto; padding: 16px 20px 40px; }
+
+  /* KPI Strip */
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .kpi {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 10px 13px;
+  }
+  .kpi-label {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .kpi-value {
+    font-family: var(--mono);
+    font-size: 19px;
+    font-weight: 700;
+    margin-top: 3px;
+    color: var(--text);
+  }
+  .kpi-sub {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+    font-family: var(--mono);
+  }
+
+  /* Tabs */
+  .tabs {
+    display: flex;
+    gap: 6px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 14px;
+    overflow-x: auto;
+  }
+  .tab {
+    background: none;
+    border: none;
+    color: var(--muted);
+    padding: 9px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    white-space: nowrap;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* Controls */
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  input[type="text"], select {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-family: var(--sans);
+  }
+  input[type="text"]:focus, select:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  button.btn {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 6px 11px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.btn:hover { background: var(--bg-hover); border-color: #334366; }
+  button.btn.active {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  /* Tables & Cards */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    overflow: hidden;
+    margin-bottom: 14px;
+  }
+  .card-header {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    background: rgba(17, 22, 34, 0.55);
+  }
+  .card-title { font-weight: 700; font-size: 13px; }
+  .card-body { padding: 12px 14px; }
+
+  .split {
+    display: grid;
+    grid-template-columns: minmax(0, 1.35fr) minmax(360px, 1fr);
+    gap: 14px;
+    align-items: start;
+  }
+  @media (max-width: 1040px) {
+    .split { grid-template-columns: 1fr; }
+  }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th {
+    text-align: left;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-elev);
+    position: sticky;
+    top: 0;
+  }
+  td {
+    padding: 7px 10px;
+    border-bottom: 1px solid rgba(35, 46, 71, 0.55);
+    vertical-align: middle;
+  }
+  tr.trace-row { cursor: pointer; }
+  tr.trace-row:hover { background: var(--bg-hover); }
+  tr.trace-row.selected { background: rgba(56, 189, 248, 0.11); }
+  .table-scroll { max-height: 560px; overflow: auto; }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .st-2xx { background: var(--green-dim); color: var(--green); }
+  .st-3xx { background: var(--accent-dim); color: var(--accent); }
+  .st-4xx { background: var(--amber-dim); color: var(--amber); }
+  .st-5xx { background: var(--red-dim); color: var(--red); }
+
+  /* Waterfall */
+  .wf-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+  .wf-item {
+    display: grid;
+    grid-template-columns: 170px 1fr 74px;
+    gap: 8px;
+    align-items: center;
+    font-size: 11.5px;
+  }
+  .wf-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .wf-hook { color: var(--muted); font-size: 10.5px; display: block; }
+  .wf-track {
+    height: 16px;
+    background: var(--bg-elev);
+    border-radius: 4px;
+    position: relative;
+    overflow: hidden;
+    border: 1px solid rgba(35, 46, 71, 0.7);
+  }
+  .wf-bar {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    border-radius: 3px;
+    min-width: 3px;
+  }
+  .wf-bar.hook { background: linear-gradient(90deg, #38bdf8, #6366f1); }
+  .wf-bar.ttfb { background: linear-gradient(90deg, #fbbf24, #f97316); }
+  .wf-bar.chunk { background: linear-gradient(90deg, #34d399, #10b981); }
+  .wf-dur { text-align: right; font-family: var(--mono); color: var(--text); }
+
+  /* Route & HookMask graph */
+  .route-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 13px 15px;
+    margin-bottom: 12px;
+  }
+  .pipeline {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+  }
+  .pipe-node {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 8px 10px;
+    min-width: 145px;
+    max-width: 280px;
+  }
+  .pipe-node.match { border-color: rgba(56, 189, 248, 0.45); }
+  .pipe-node.upstream { border-color: rgba(52, 211, 153, 0.45); }
+  .pipe-node.global { border-color: rgba(167, 139, 250, 0.4); }
+  .pipe-arrow {
+    align-self: center;
+    color: var(--muted);
+    font-weight: 700;
+    font-family: var(--mono);
+  }
+  .mask-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .mask-bit {
+    font-family: var(--mono);
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(56, 189, 248, 0.12);
+    color: #93c5fd;
+    border: 1px solid rgba(56, 189, 248, 0.28);
+  }
+  .mask-bit.buf {
+    background: var(--amber-dim);
+    color: var(--amber);
+    border-color: rgba(251, 191, 36, 0.35);
+  }
+  .mask-bit.stream {
+    background: var(--purple-dim);
+    color: var(--purple);
+    border-color: rgba(167, 139, 250, 0.35);
+  }
+  .mask-bit.empty {
+    background: var(--green-dim);
+    color: var(--green);
+    border-color: rgba(52, 211, 153, 0.35);
+  }
+
+  /* Bars */
+  .weight-bar {
+    height: 8px;
+    background: var(--bg-elev);
+    border-radius: 999px;
+    overflow: hidden;
+    display: flex;
+    margin: 8px 0;
+  }
+  .kv-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .kv-box {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 7px 9px;
+  }
+  .kv-k { font-size: 10.5px; color: var(--muted); text-transform: uppercase; }
+  .kv-v { font-family: var(--mono); font-size: 12px; margin-top: 2px; word-break: break-all; }
+  pre.code-box {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 12px;
+    overflow: auto;
+    max-height: 540px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    margin: 0;
+    color: #cbd5e1;
+  }
+  .empty {
+    padding: 28px 14px;
+    text-align: center;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="logo">S</div>
+    <div>
+      <div class="brand-title">Shunt Admin Inspector</div>
+    </div>
+    <span class="pill info">READ-ONLY</span>
+    <span id="sse-pill" class="pill warn"><span class="dot"></span><span id="sse-label">Connecting…</span></span>
+  </div>
+  <div class="header-meta">
+    <span class="pill" id="snap-pill">Snapshot v—</span>
+    <span class="pill" id="state-pill">state: —</span>
+    <span class="pill" id="tel-pill">telemetry: —</span>
+    <button class="btn" id="btn-refresh" title="Refresh snapshot, upstreams, status and metrics">Refresh</button>
+  </div>
+</header>
+
+<main>
+  <section class="kpi-grid" id="kpi-grid">
+    <div class="kpi"><div class="kpi-label">Recorded Requests</div><div class="kpi-value" id="kpi-total">0</div><div class="kpi-sub" id="kpi-buf">ring: 0 / —</div></div>
+    <div class="kpi"><div class="kpi-label">Error Rate</div><div class="kpi-value" id="kpi-err">0.0%</div><div class="kpi-sub" id="kpi-status-mix">2xx: 0 · 4xx: 0 · 5xx: 0</div></div>
+    <div class="kpi"><div class="kpi-label">Latency p50 / p99</div><div class="kpi-value" id="kpi-lat">—</div><div class="kpi-sub" id="kpi-ttfb">avg TTFB: —</div></div>
+    <div class="kpi"><div class="kpi-label">Routes / Upstreams</div><div class="kpi-value" id="kpi-topo">—</div><div class="kpi-sub" id="kpi-digest">digest: —</div></div>
+    <div class="kpi" id="kpi-ai-tokens-card" style="display:none"><div class="kpi-label">AI Tokens (In / Out)</div><div class="kpi-value" id="kpi-ai-tokens">0</div><div class="kpi-sub" id="kpi-ai-reqs">0 AI calls · 0 failovers</div></div>
+    <div class="kpi" id="kpi-ai-cost-card" style="display:none"><div class="kpi-label">AI Spend / Cache</div><div class="kpi-value" id="kpi-ai-cost">$0.0000</div><div class="kpi-sub" id="kpi-ai-cache">cache: 0 hits / 0 misses</div></div>
+  </section>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="traces">Live Trace Waterfall</button>
+    <button class="tab" data-tab="snapshot">Snapshot &amp; HookMask Graph</button>
+    <button class="tab" data-tab="upstreams">Upstreams &amp; Health</button>
+    <button class="tab" data-tab="ai">AI Runtime &amp; Cooldowns</button>
+    <button class="tab" data-tab="metrics">Prometheus Metrics</button>
+  </nav>
+
+  <!-- TAB 1: LIVE TRACES -->
+  <section class="panel active" id="panel-traces">
+    <div class="toolbar">
+      <input type="text" id="trace-search" placeholder="Filter by path, route, upstream, model, trace_id…" style="min-width:260px">
+      <select id="trace-status-filter">
+        <option value="all">All statuses</option>
+        <option value="2xx">2xx OK</option>
+        <option value="4xx">4xx Client Error</option>
+        <option value="5xx">5xx / Transport Error</option>
+      </select>
+      <button class="btn" id="btn-ai-only">AI Only</button>
+      <button class="btn" id="btn-pause">Pause Stream</button>
+      <button class="btn" id="btn-clear-view">Clear View</button>
+      <span class="muted" id="trace-count-label" style="color:var(--muted);margin-left:auto;font-family:var(--mono);font-size:11.5px">0 traces</span>
+    </div>
+
+    <div class="split">
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Recent Requests (newest first)</span>
+          <span style="color:var(--muted);font-size:11px">Click any row to inspect per-hook µs waterfall</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Status</th>
+                <th>Request</th>
+                <th>Route / Target</th>
+                <th>TTFB</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody id="trace-tbody">
+              <tr><td colspan="6" class="empty">Waiting for live requests on the gateway listener…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card" id="waterfall-card">
+        <div class="card-header">
+          <span class="card-title" id="wf-title">Trace Waterfall</span>
+          <span class="mono" style="font-size:11px;color:var(--muted)" id="wf-seq"></span>
+        </div>
+        <div class="card-body" id="wf-body">
+          <div class="empty">Select a request to inspect its hook timings, streaming chunks, and attributes.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- TAB 2: SNAPSHOT & HOOKMASK GRAPH -->
+  <section class="panel" id="panel-snapshot">
+    <div id="global-plugins-box"></div>
+    <div id="routes-graph-box"><div class="empty">Loading compiled snapshot…</div></div>
+  </section>
+
+  <!-- TAB 3: UPSTREAMS & HEALTH -->
+  <section class="panel" id="panel-upstreams">
+    <div id="upstreams-box"><div class="empty">Loading upstream pools…</div></div>
+  </section>
+
+  <!-- TAB 4: AI RUNTIME & COOLDOWNS -->
+  <section class="panel" id="panel-ai">
+    <div id="ai-box"><div class="empty">Loading AI runtime status…</div></div>
+  </section>
+
+  <!-- TAB 5: METRICS -->
+  <section class="panel" id="panel-metrics">
+    <div class="toolbar">
+      <input type="text" id="metrics-filter" placeholder="Filter Prometheus lines (e.g. shunt_ai, ttfb, cache)…" style="min-width:300px">
+      <button class="btn" id="btn-metrics-refresh">Reload /metrics</button>
+      <button class="btn" id="btn-metrics-copy">Copy</button>
+    </div>
+    <pre class="code-box" id="metrics-pre">Loading /metrics…</pre>
+  </section>
+</main>
+
+<script>
+(function () {
+  const state = {
+    traces: [],
+    selectedSeq: null,
+    paused: false,
+    aiOnly: false,
+    maxVisible: 500,
+    lastSeq: 0,
+    summary: null,
+    snapshot: null,
+    upstreams: null,
+    status: null,
+    metricsRaw: "",
+    es: null
+  };
+
+  const $ = (id) => document.getElementById(id);
+
+  function esc(s) {
+    return String(s ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function fmtUs(us) {
+    if (us === null || us === undefined) return "—";
+    if (us < 1000) return `${us}µs`;
+    if (us < 1_000_000) return `${(us / 1000).toFixed(1)}ms`;
+    return `${(us / 1_000_000).toFixed(2)}s`;
+  }
+
+  function fmtMs(ms) {
+    if (ms === null || ms === undefined) return "—";
+    if (ms < 1) return `${Math.round(ms * 1000)}µs`;
+    if (ms < 1000) return `${ms.toFixed(1)}ms`;
+    return `${(ms / 1000).toFixed(2)}s`;
+  }
+
+  function fmtBytes(b) {
+    if (b < 1024) return `${b} B`;
+    if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KiB`;
+    return `${(b / (1024 * 1024)).toFixed(2)} MiB`;
+  }
+
+  function fmtInt(n) {
+    return Number(n || 0).toLocaleString();
+  }
+
+  function statusClass(code) {
+    if (!code || code >= 500) return "st-5xx";
+    if (code >= 400) return "st-4xx";
+    if (code >= 300) return "st-3xx";
+    return "st-2xx";
+  }
+
+  function setSseBadge(cls, label) {
+    const pill = $("sse-pill");
+    pill.className = `pill ${cls}`;
+    $("sse-label").textContent = label;
+  }
+
+  /* Tab navigation */
+  function activateTab(name) {
+    const btn = document.querySelector(`.tab[data-tab="${name}"]`);
+    if (!btn) return;
+    document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+    document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
+    btn.classList.add("active");
+    $(`panel-${name}`).classList.add("active");
+    if (name === "metrics") fetchMetrics();
+  }
+  document.querySelectorAll(".tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const name = btn.dataset.tab;
+      if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
+      activateTab(name);
+    });
+  });
+  if (location.hash && location.hash.length > 1) {
+    activateTab(location.hash.slice(1));
+  }
+
+  $("btn-refresh").addEventListener("click", refreshAll);
+  $("btn-metrics-refresh").addEventListener("click", fetchMetrics);
+  $("btn-metrics-copy").addEventListener("click", () => {
+    if (navigator.clipboard) navigator.clipboard.writeText(state.metricsRaw);
+  });
+  $("metrics-filter").addEventListener("input", renderMetrics);
+  $("trace-search").addEventListener("input", renderTraceTable);
+  $("trace-status-filter").addEventListener("change", renderTraceTable);
+  $("btn-ai-only").addEventListener("click", () => {
+    state.aiOnly = !state.aiOnly;
+    $("btn-ai-only").classList.toggle("active", state.aiOnly);
+    renderTraceTable();
+  });
+  $("btn-pause").addEventListener("click", () => {
+    state.paused = !state.paused;
+    $("btn-pause").classList.toggle("active", state.paused);
+    $("btn-pause").textContent = state.paused ? "Resume Stream" : "Pause Stream";
+    if (state.paused) setSseBadge("warn", "Paused");
+    else setSseBadge("live", "Live SSE");
+  });
+  $("btn-clear-view").addEventListener("click", () => {
+    state.traces = [];
+    state.selectedSeq = null;
+    renderTraceTable();
+    renderWaterfall(null);
+  });
+
+  async function fetchJson(url) {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+    return res.json();
+  }
+
+  async function fetchMetrics() {
+    try {
+      const res = await fetch("/metrics", { cache: "no-store" });
+      state.metricsRaw = await res.text();
+      renderMetrics();
+    } catch (e) {
+      $("metrics-pre").textContent = `Error loading /metrics: ${e}`;
+    }
+  }
+
+  function renderMetrics() {
+    const q = $("metrics-filter").value.trim().toLowerCase();
+    const text = state.metricsRaw || "# No metrics emitted yet.";
+    if (!q) {
+      $("metrics-pre").textContent = text;
+      return;
+    }
+    const filtered = text
+      .split("\n")
+      .filter((line) => line.toLowerCase().includes(q))
+      .join("\n");
+    $("metrics-pre").textContent = filtered || `# No metric lines matching "${q}"`;
+  }
+
+  async function refreshAll() {
+    try {
+      const [snap, ups, st, tr] = await Promise.all([
+        fetchJson("/snapshot"),
+        fetchJson("/upstreams"),
+        fetchJson("/api/status"),
+        fetchJson("/api/traces").catch(() => null)
+      ]);
+      state.snapshot = snap;
+      state.upstreams = ups;
+      state.status = st;
+      if (tr) {
+        state.summary = tr.summary;
+        if (state.traces.length === 0 && Array.isArray(tr.traces)) {
+          for (const item of tr.traces) ingestTrace(item, false);
+          if (state.selectedSeq === null && state.traces.length > 0) {
+            state.selectedSeq = state.traces[0].seq;
+          }
+          renderTraceTable();
+          if (state.selectedSeq !== null) {
+            const found = state.traces.find((x) => x.seq === state.selectedSeq) || null;
+            renderWaterfall(found);
+          }
+        }
+      }
+      renderHeaderAndKpis();
+      renderSnapshotGraph();
+      renderUpstreams();
+      renderAiPanel();
+    } catch (err) {
+      console.error("refresh error:", err);
+    }
+  }
+
+  function ingestTrace(t, rerender = true) {
+    if (!t || typeof t.seq !== "number") return;
+    if (t.seq <= state.lastSeq) return;
+    state.lastSeq = t.seq;
+    if (state.paused) return;
+    state.traces.unshift(t);
+    if (state.traces.length > state.maxVisible) {
+      state.traces.length = state.maxVisible;
+    }
+    if (rerender) {
+      renderTraceTable();
+      if (state.selectedSeq === null) {
+        state.selectedSeq = t.seq;
+        renderWaterfall(t);
+      }
+    }
+  }
+
+  function connectSse() {
+    if (state.es) state.es.close();
+    const url = state.lastSeq > 0 ? `/api/traces/stream?after=${state.lastSeq}` : "/api/traces/stream";
+    const es = new EventSource(url);
+    state.es = es;
+    es.onopen = () => {
+      if (!state.paused) setSseBadge("live", "Live SSE");
+    };
+    es.addEventListener("trace", (ev) => {
+      try {
+        const trace = JSON.parse(ev.data);
+        ingestTrace(trace, true);
+        scheduleLiveSummaryRefresh();
+      } catch (_) {}
+    });
+    es.addEventListener("lagged", () => {
+      setSseBadge("warn", "Live SSE (lagged)");
+      setTimeout(() => { if (!state.paused) setSseBadge("live", "Live SSE"); }, 2500);
+    });
+    es.onerror = () => {
+      if (!state.paused) setSseBadge("err", "Reconnecting…");
+    };
+  }
+
+  let summaryTimer = null;
+  function scheduleLiveSummaryRefresh() {
+    if (summaryTimer) return;
+    summaryTimer = setTimeout(async () => {
+      summaryTimer = null;
+      try {
+        const [tr, st] = await Promise.all([
+          fetchJson("/api/traces?limit=0"),
+          fetchJson("/api/status")
+        ]);
+        state.summary = tr.summary;
+        state.status = st;
+        renderHeaderAndKpis();
+        renderAiPanel();
+      } catch (_) {}
+    }, 600);
+  }
+
+  function renderHeaderAndKpis() {
+    const snap = state.snapshot;
+    if (snap) {
+      $("snap-pill").textContent = `Snapshot v${snap.version} (${(snap.digest || "").slice(0, 10)})`;
+      $("state-pill").textContent = `state: ${snap.state_backend}`;
+      $("tel-pill").textContent = `telemetry: ${snap.telemetry_backend}`;
+      $("kpi-topo").textContent = `${snap.routes.length} / ${snap.upstreams.length}`;
+      $("kpi-digest").textContent = `digest: ${(snap.digest || "").slice(0, 12)}`;
+    }
+
+    const s = state.summary;
+    if (s) {
+      $("kpi-total").textContent = fmtInt(s.total_recorded);
+      $("kpi-buf").textContent = `ring: ${s.buffered} / ${s.capacity}`;
+      const rate = s.total_recorded > 0 ? ((s.total_errors / s.total_recorded) * 100).toFixed(1) : "0.0";
+      $("kpi-err").textContent = `${rate}%`;
+      $("kpi-err").style.color = Number(rate) > 0 ? "var(--red)" : "var(--green)";
+      $("kpi-status-mix").textContent = `2xx: ${s.status_2xx} · 4xx: ${s.status_4xx} · 5xx: ${s.status_5xx}`;
+      $("kpi-lat").textContent = s.p50_us != null ? `${fmtUs(s.p50_us)} / ${fmtUs(s.p99_us)}` : "—";
+      $("kpi-ttfb").textContent = `avg TTFB: ${fmtUs(s.avg_ttfb_us)}`;
+    }
+
+    const ai = state.status && state.status.extensions && state.status.extensions.ai;
+    const hasAi = ai && (
+      ai.totals.total_requests > 0 ||
+      ai.totals.total_cache_hits > 0 ||
+      (ai.cooldowns && ai.cooldowns.length > 0) ||
+      (ai.caches && ai.caches.length > 0)
+    );
+    $("kpi-ai-tokens-card").style.display = hasAi ? "" : "none";
+    $("kpi-ai-cost-card").style.display = hasAi ? "" : "none";
+    if (hasAi) {
+      $("kpi-ai-tokens").textContent = `${fmtInt(ai.totals.total_prompt_tokens)} / ${fmtInt(ai.totals.total_completion_tokens)}`;
+      $("kpi-ai-reqs").textContent = `${fmtInt(ai.totals.total_requests)} AI calls · ${fmtInt(ai.totals.total_failovers)} failovers`;
+      $("kpi-ai-cost").textContent = `$${Number(ai.totals.total_cost_usd || 0).toFixed(4)}`;
+      const hits = ai.totals.total_cache_hits || 0;
+      const misses = ai.totals.total_cache_misses || 0;
+      const hitPct = hits + misses > 0 ? ` (${((hits / (hits + misses)) * 100).toFixed(0)}%)` : "";
+      $("kpi-ai-cache").textContent = `cache: ${hits} hits / ${misses} misses${hitPct}`;
+    }
+  }
+
+  function isAiTrace(t) {
+    return t.attributes && Object.keys(t.attributes).some((k) => k.startsWith("gen_ai.") || k.startsWith("shunt.ai."));
+  }
+
+  function renderTraceTable() {
+    const q = $("trace-search").value.trim().toLowerCase();
+    const stFilter = $("trace-status-filter").value;
+
+    const filtered = state.traces.filter((t) => {
+      if (state.aiOnly && !isAiTrace(t)) return false;
+      if (stFilter === "2xx" && !(t.status >= 200 && t.status < 300)) return false;
+      if (stFilter === "4xx" && !(t.status >= 400 && t.status < 500)) return false;
+      if (stFilter === "5xx" && (t.status && t.status < 500)) return false;
+      if (q) {
+        const hay = [
+          t.method, t.path, t.route_id, t.upstream, t.trace_id,
+          t.attributes && t.attributes["gen_ai.request.model"],
+          t.attributes && t.attributes["gen_ai.provider.name"],
+          t.attributes && t.attributes["shunt.ai.cache_status"]
+        ].filter(Boolean).join(" ").toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+
+    $("trace-count-label").textContent = `${filtered.length} / ${state.traces.length} shown`;
+
+    const tbody = $("trace-tbody");
+    if (filtered.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="6" class="empty">No matching traces in buffer.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = filtered.map((t) => {
+      const st = t.status ? String(t.status) : "ERR";
+      const model = t.attributes && t.attributes["gen_ai.request.model"];
+      const cacheSt = t.attributes && t.attributes["shunt.ai.cache_status"];
+      const aiBadge = model
+        ? ` <span class="badge" style="background:var(--purple-dim);color:var(--purple)">${esc(model)}</span>`
+        : "";
+      const cacheBadge = cacheSt === "hit"
+        ? ` <span class="badge st-2xx">CACHE HIT</span>`
+        : "";
+      const selected = t.seq === state.selectedSeq ? "selected" : "";
+      return `<tr class="trace-row ${selected}" data-seq="${t.seq}">
+        <td class="mono" style="color:var(--muted)">#${t.seq}</td>
+        <td><span class="badge ${statusClass(t.status)}">${esc(st)}</span></td>
+        <td><span class="mono" style="font-weight:700">${esc(t.method)}</span> <span class="mono">${esc(t.path)}</span>${aiBadge}${cacheBadge}</td>
+        <td class="mono" style="color:var(--muted)">${esc(t.route_id || "—")} → ${esc(t.upstream || "short-circuit")}</td>
+        <td class="mono">${esc(fmtUs(t.ttfb_us))}</td>
+        <td class="mono" style="font-weight:600">${esc(fmtUs(t.total_us))}</td>
+      </tr>`;
+    }).join("");
+
+    tbody.querySelectorAll("tr.trace-row").forEach((tr) => {
+      tr.addEventListener("click", () => {
+        const seq = Number(tr.dataset.seq);
+        state.selectedSeq = seq;
+        const found = state.traces.find((x) => x.seq === seq) || null;
+        renderTraceTable();
+        renderWaterfall(found);
+      });
+    });
+  }
+
+  function renderWaterfall(t) {
+    if (!t) {
+      $("wf-title").textContent = "Trace Waterfall";
+      $("wf-seq").textContent = "";
+      $("wf-body").innerHTML = `<div class="empty">Select a request to inspect its hook timings, streaming chunks, and attributes.</div>`;
+      return;
+    }
+    $("wf-title").textContent = `${t.method} ${t.path}`;
+    $("wf-seq").textContent = `seq #${t.seq} · req #${t.request_id}`;
+
+    const total = Math.max(t.total_us || 1, 1);
+    const segments = [];
+    let cursor = 0;
+
+    for (const h of (t.hooks || [])) {
+      const isPostUpstream = h.hook === "on_response_headers" || h.hook === "on_complete";
+      if (isPostUpstream && t.ttfb_us != null && cursor < t.ttfb_us) {
+        const gap = Math.max(t.ttfb_us - cursor, 1);
+        segments.push({ label: "upstream TTFB", sub: t.upstream || "upstream", start: cursor, dur: gap, cls: "ttfb" });
+        cursor = t.ttfb_us;
+      }
+      segments.push({ label: h.plugin, sub: h.hook, start: cursor, dur: h.duration_us, cls: "hook" });
+      cursor += h.duration_us;
+    }
+    if (t.ttfb_us != null && !segments.some((s) => s.cls === "ttfb")) {
+      const start = Math.min(cursor, t.ttfb_us);
+      const dur = Math.max(t.ttfb_us - start, 1);
+      segments.push({ label: "upstream TTFB", sub: t.upstream || "upstream", start, dur, cls: "ttfb" });
+      cursor = Math.max(cursor, t.ttfb_us);
+    }
+    for (const c of (t.stream_chunks || [])) {
+      segments.push({
+        label: `${c.plugin} (${c.chunks} chunks)`,
+        sub: `${c.hook} · avg ${fmtUs(c.avg_us)}/chunk`,
+        start: Math.min(cursor, Math.max(total - c.total_us, 0)),
+        dur: c.total_us,
+        cls: "chunk"
+      });
+    }
+
+    const barsHtml = segments.length > 0
+      ? segments.map((seg) => {
+          const leftPct = Math.min((seg.start / total) * 100, 96);
+          const widthPct = Math.max(Math.min((seg.dur / total) * 100, 100 - leftPct), 1.2);
+          return `<div class="wf-item">
+            <div class="wf-label"><strong>${esc(seg.label)}</strong><span class="wf-hook mono">${esc(seg.sub)}</span></div>
+            <div class="wf-track"><div class="wf-bar ${seg.cls}" style="left:${leftPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%"></div></div>
+            <div class="wf-dur">${esc(fmtUs(seg.dur))}</div>
+          </div>`;
+        }).join("")
+      : `<div style="color:var(--muted);font-size:12px">No plugin hooks ran (fast-path passthrough).</div>`;
+
+    const attrEntries = Object.entries(t.attributes || {});
+    const attrsHtml = attrEntries.length > 0
+      ? `<h4 style="margin:14px 0 6px;font-size:12px;color:var(--muted);text-transform:uppercase">Trace Attributes</h4>
+         <table><thead><tr><th>Attribute</th><th>Value</th></tr></thead><tbody>
+         ${attrEntries.map(([k, v]) => `<tr><td class="mono" style="color:var(--accent)">${esc(k)}</td><td class="mono">${esc(typeof v === "object" ? JSON.stringify(v) : v)}</td></tr>`).join("")}
+         </tbody></table>`
+      : "";
+
+    const errHtml = t.error
+      ? `<div style="margin-bottom:10px;padding:8px 10px;border-radius:6px;background:var(--red-dim);border:1px solid rgba(248,113,113,0.4);color:var(--red)" class="mono">${esc(t.error)}</div>`
+      : "";
+
+    $("wf-body").innerHTML = `
+      ${errHtml}
+      <div class="kv-grid">
+        <div class="kv-box"><div class="kv-k">Status / Attempts</div><div class="kv-v"><span class="badge ${statusClass(t.status)}">${esc(t.status || "ERR")}</span> · ${t.attempts} attempt(s)</div></div>
+        <div class="kv-box"><div class="kv-k">Total / TTFB</div><div class="kv-v">${esc(fmtUs(t.total_us))} / ${esc(fmtUs(t.ttfb_us))}</div></div>
+        <div class="kv-box"><div class="kv-k">Route / Upstream</div><div class="kv-v">${esc(t.route_id || "—")} → ${esc(t.upstream || "none")}</div></div>
+        <div class="kv-box"><div class="kv-k">Payload (In / Out)</div><div class="kv-v">${esc(fmtBytes(t.request_bytes))} / ${esc(fmtBytes(t.response_bytes))}</div></div>
+        ${t.endpoint ? `<div class="kv-box"><div class="kv-k">Endpoint</div><div class="kv-v">${esc(t.endpoint)}</div></div>` : ""}
+        ${t.trace_id ? `<div class="kv-box"><div class="kv-k">W3C Trace ID</div><div class="kv-v">${esc(t.trace_id)}</div></div>` : ""}
+      </div>
+      <h4 style="margin:10px 0 6px;font-size:12px;color:var(--muted);text-transform:uppercase">Per-Hook Microsecond Waterfall</h4>
+      <div class="wf-list">${barsHtml}</div>
+      ${attrsHtml}
+    `;
+  }
+
+  function renderMaskBits(flags) {
+    if (!flags || flags.length === 0) {
+      return `<div class="mask-list"><span class="mask-bit empty">EMPTY (zero-alloc fast path)</span></div>`;
+    }
+    return `<div class="mask-list">${flags.map((f) => {
+      const cls = f === "request_body_buffered" ? "buf" : (f.includes("stream") ? "stream" : "");
+      return `<span class="mask-bit ${cls}">${esc(f)}</span>`;
+    }).join("")}</div>`;
+  }
+
+  function renderSnapshotGraph() {
+    const snap = state.snapshot;
+    if (!snap) return;
+
+    const globals = snap.global_plugins || [];
+    $("global-plugins-box").innerHTML = globals.length > 0
+      ? `<div class="card">
+          <div class="card-header"><span class="card-title">Global Plugins (${globals.length})</span><span style="color:var(--muted);font-size:11px">Secrets redacted</span></div>
+          <div class="card-body">
+            <div class="pipeline">${globals.map((p) => `
+              <div class="pipe-node global">
+                <div class="mono" style="font-weight:700">${esc(p.name)}</div>
+                <div class="mono" style="font-size:10.5px;color:var(--muted)">${esc(p.scope_id)}</div>
+                ${renderMaskBits(p.hook_mask)}
+              </div>`).join("")}
+            </div>
+          </div>
+        </div>`
+      : "";
+
+    const routes = snap.routes || [];
+    if (routes.length === 0) {
+      $("routes-graph-box").innerHTML = `<div class="empty">No routes configured in active snapshot.</div>`;
+      return;
+    }
+
+    $("routes-graph-box").innerHTML = routes.map((r) => {
+      const methods = r.methods && r.methods.length ? r.methods.join(",") : "ANY";
+      const hosts = r.hosts && r.hosts.length ? r.hosts.join(",") : "*";
+      const details = r.plugin_details || [];
+      const nodes = [];
+      nodes.push(`<div class="pipe-node match">
+        <div style="font-size:10.5px;color:var(--accent);font-weight:700">ROUTE MATCH</div>
+        <div class="mono" style="font-weight:700;margin-top:2px">${esc(methods)} ${esc(r.path)}</div>
+        <div class="mono" style="font-size:10.5px;color:var(--muted)">hosts: ${esc(hosts)}</div>
+      </div>`);
+
+      for (const gp of globals) {
+        nodes.push(`<div class="pipe-arrow">→</div>`);
+        nodes.push(`<div class="pipe-node global">
+          <div style="font-size:10px;color:var(--purple);font-weight:700">GLOBAL</div>
+          <div class="mono" style="font-weight:700">${esc(gp.name)}</div>
+          ${renderMaskBits(gp.hook_mask)}
+        </div>`);
+      }
+
+      for (const rp of details) {
+        nodes.push(`<div class="pipe-arrow">→</div>`);
+        nodes.push(`<div class="pipe-node">
+          <div style="font-size:10px;color:var(--muted);font-weight:700">PLUGIN</div>
+          <div class="mono" style="font-weight:700">${esc(rp.name)}</div>
+          ${renderMaskBits(rp.hook_mask)}
+        </div>`);
+      }
+
+      nodes.push(`<div class="pipe-arrow">→</div>`);
+      nodes.push(`<div class="pipe-node upstream">
+        <div style="font-size:10.5px;color:var(--green);font-weight:700">UPSTREAM POOL</div>
+        <div class="mono" style="font-weight:700;margin-top:2px">${esc(r.upstream)}</div>
+        <div class="mono" style="font-size:10.5px;color:var(--muted)">max_attempts=${r.max_attempts} · cap=${fmtBytes(r.max_body_bytes)}</div>
+      </div>`);
+
+      return `<div class="route-card">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+          <div><strong class="mono" style="font-size:13.5px">${esc(r.id)}</strong> <span style="color:var(--muted);font-size:11.5px">compiled HookMask:</span></div>
+          <div>${renderMaskBits(r.hook_mask)}</div>
+        </div>
+        <div class="pipeline">${nodes.join("")}</div>
+      </div>`;
+    }).join("");
+  }
+
+  function renderUpstreams() {
+    const ups = state.upstreams && state.upstreams.upstreams;
+    if (!ups || ups.length === 0) {
+      $("upstreams-box").innerHTML = `<div class="empty">No upstreams configured.</div>`;
+      return;
+    }
+
+    const palette = ["#38bdf8", "#a78bfa", "#34d399", "#fbbf24", "#f472b6"];
+    $("upstreams-box").innerHTML = ups.map((u) => {
+      const totalW = u.endpoints.reduce((acc, e) => acc + (e.weight || 1), 0) || 1;
+      const bar = u.endpoints.map((ep, idx) => {
+        const pct = ((ep.weight || 1) / totalW) * 100;
+        const color = ep.healthy ? palette[idx % palette.length] : "#f87171";
+        return `<div style="width:${pct.toFixed(1)}%;background:${color}" title="${esc(ep.url)} (weight ${ep.weight})"></div>`;
+      }).join("");
+
+      const rows = u.endpoints.map((ep) => {
+        const pct = (((ep.weight || 1) / totalW) * 100).toFixed(0);
+        return `<tr>
+          <td class="mono">${esc(ep.url)}</td>
+          <td class="mono">${ep.weight} (${pct}%)</td>
+          <td><span class="badge ${ep.healthy ? "st-2xx" : "st-5xx"}">${ep.healthy ? "HEALTHY" : "EJECTED"}</span></td>
+          <td class="mono">${ep.active_healthy ? "ok" : "fail"} / ${ep.passive_healthy ? "ok" : "fail"}</td>
+          <td class="mono">${ep.active_probes_ok} ok / ${ep.active_probes_err} err</td>
+          <td class="mono">${ep.passive_failures}</td>
+          <td class="mono">${ep.last_probe_latency_us ? fmtUs(ep.last_probe_latency_us) : "—"}</td>
+        </tr>`;
+      }).join("");
+
+      return `<div class="card">
+        <div class="card-header">
+          <div><span class="card-title mono">${esc(u.name)}</span> <span class="pill" style="margin-left:6px">pool #${u.pool_id}</span></div>
+          <span class="pill ${u.active_health_check ? "info" : ""}">${u.active_health_check ? "Active Health Probes ON" : "Passive Health Only"}</span>
+        </div>
+        <div class="card-body">
+          <div class="weight-bar">${bar}</div>
+          <table>
+            <thead><tr><th>Endpoint</th><th>Weight</th><th>Status</th><th>Active / Passive</th><th>Active Probes</th><th>Passive Errs</th><th>Last Probe</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+    }).join("");
+  }
+
+  function renderAiPanel() {
+    const ai = state.status && state.status.extensions && state.status.extensions.ai;
+    if (!ai) {
+      $("ai-box").innerHTML = `<div class="empty">AI runtime inspector provider is not registered on this gateway.</div>`;
+      return;
+    }
+
+    const modelsRows = (ai.models || []).length > 0
+      ? ai.models.map((m) => `<tr>
+          <td class="mono">${esc(m.provider)}</td>
+          <td class="mono" style="font-weight:700">${esc(m.model)}</td>
+          <td class="mono">${fmtInt(m.requests)}</td>
+          <td class="mono" style="color:${m.error_requests ? "var(--red)" : "var(--muted)"}">${fmtInt(m.error_requests)}</td>
+          <td class="mono">${fmtInt(m.prompt_tokens)}</td>
+          <td class="mono">${fmtInt(m.completion_tokens)}</td>
+          <td class="mono">${fmtMs(m.avg_ttft_ms)}</td>
+          <td class="mono">$${Number(m.cost_usd || 0).toFixed(5)}</td>
+        </tr>`).join("")
+      : `<tr><td colspan="8" class="empty">No AI inference requests recorded yet.</td></tr>`;
+
+    const cdRows = (ai.cooldowns || []).length > 0
+      ? ai.cooldowns.map((c) => `<tr>
+          <td class="mono" style="color:var(--muted)">${esc(c.scope)}</td>
+          <td class="mono" style="font-weight:700">${esc(c.target)}</td>
+          <td><span class="badge ${c.in_cooldown ? "st-5xx" : "st-4xx"}">${c.in_cooldown ? "COOLDOWN" : "DEGRADED"}</span></td>
+          <td class="mono">${c.consecutive_failures}</td>
+          <td class="mono">${c.remaining_ms > 0 ? fmtMs(c.remaining_ms) : "—"}</td>
+        </tr>`).join("")
+      : `<tr><td colspan="5" class="empty">No active provider cooldowns — all AI failover targets healthy.</td></tr>`;
+
+    const latRows = (ai.latency_targets || []).length > 0
+      ? ai.latency_targets.map((l) => `<tr>
+          <td class="mono">${esc(l.target)}</td>
+          <td class="mono">${fmtMs(l.ewma_latency_ms)}</td>
+          <td class="mono">${(l.ewma_error_rate * 100).toFixed(1)}%</td>
+          <td class="mono">${fmtInt(l.samples)}</td>
+          <td class="mono">${fmtMs(l.age_ms)}</td>
+        </tr>`).join("")
+      : `<tr><td colspan="5" class="empty">No EWMA latency routing observations yet.</td></tr>`;
+
+    const cacheRows = (ai.caches || []).length > 0
+      ? ai.caches.map((c) => `<tr>
+          <td class="mono">${esc(c.scope)}</td>
+          <td class="mono">${fmtInt(c.entries)}</td>
+          <td class="mono">${fmtBytes(c.total_bytes)}</td>
+        </tr>`).join("")
+      : `<tr><td colspan="3" class="empty">No in-memory ai-cache tables active.</td></tr>`;
+
+    $("ai-box").innerHTML = `
+      <div class="card">
+        <div class="card-header"><span class="card-title">Model &amp; Provider Usage</span><span class="mono" style="font-size:11px;color:var(--muted)">failovers: ${fmtInt(ai.totals.total_failovers)} · cache hits: ${fmtInt(ai.totals.total_cache_hits)}</span></div>
+        <div class="card-body" style="padding:0">
+          <table>
+            <thead><tr><th>Provider</th><th>Model</th><th>Requests</th><th>Errors</th><th>Prompt Tokens</th><th>Completion Tokens</th><th>Avg TTFT</th><th>Spend (USD)</th></tr></thead>
+            <tbody>${modelsRows}</tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><span class="card-title">Provider Failover Cooldowns</span><span style="font-size:11px;color:var(--muted)">StateStore-backed circuit breakers</span></div>
+        <div class="card-body" style="padding:0">
+          <table>
+            <thead><tr><th>Scope</th><th>Target (upstream::model)</th><th>State</th><th>Failures</th><th>Remaining</th></tr></thead>
+            <tbody>${cdRows}</tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="split">
+        <div class="card">
+          <div class="card-header"><span class="card-title">Smart Routing EWMA Latency</span></div>
+          <div class="card-body" style="padding:0">
+            <table>
+              <thead><tr><th>Target</th><th>EWMA Latency</th><th>EWMA Error</th><th>Samples</th><th>Age</th></tr></thead>
+              <tbody>${latRows}</tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="card-title">Exact-Match AI Cache Tables</span></div>
+          <div class="card-body" style="padding:0">
+            <table>
+              <thead><tr><th>Scope</th><th>Entries</th><th>Memory</th></tr></thead>
+              <tbody>${cacheRows}</tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  refreshAll();
+  connectSse();
+  setInterval(refreshAll, 5000);
+})();
+</script>
+</body>
+</html>

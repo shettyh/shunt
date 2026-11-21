@@ -154,6 +154,30 @@ impl StateStore {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Collects all live entries of concrete type `T`, returning `(scope_id, key, Arc<T>)`
+    /// sorted deterministically by `(scope_id, key)`.
+    ///
+    /// Enables read-only runtime inspection (e.g., Admin Inspector status providers) without
+    /// coupling core state storage to plugin-specific concrete types.
+    pub fn collect_by_type<T>(&self) -> Vec<(String, String, Arc<T>)>
+    where
+        T: Send + Sync + 'static,
+    {
+        let guard = self.entries.read().expect("StateStore lock poisoned");
+        let mut out = Vec::new();
+        for (full_key, value) in guard.iter() {
+            if let Ok(typed) = Arc::clone(value).downcast::<T>() {
+                let (scope_id, key) = full_key
+                    .split_once("::")
+                    .map(|(s, k)| (s.to_owned(), k.to_owned()))
+                    .unwrap_or_else(|| (String::new(), full_key.clone()));
+                out.push((scope_id, key, typed));
+            }
+        }
+        out.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        out
+    }
 }
 
 /// Scoped handle into [`StateStore`] given to a plugin during build.
@@ -437,5 +461,12 @@ mod tests {
         // Re-acquiring preserved state returns the same AtomicU64 with value 5.
         let counter_after = h1.get_or_init("hits", || AtomicU64::new(0));
         assert_eq!(counter_after.load(Ordering::Relaxed), 5);
+
+        // Generic typed inspection collects only matching live entries in deterministic order.
+        let collected = store.collect_by_type::<AtomicU64>();
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].0, "route:api:rate-limit");
+        assert_eq!(collected[0].1, "hits");
+        assert_eq!(collected[0].2.load(Ordering::Relaxed), 5);
     }
 }

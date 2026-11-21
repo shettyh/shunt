@@ -12,11 +12,12 @@ use hyper_util::rt::TokioExecutor;
 use serde::Serialize;
 use serde_json::Value;
 use shunt_ai::sse::SseParser;
-use shunt_ai::{AiMetrics, register_ai_plugins};
+use shunt_ai::{AiMetrics, inspect_ai_runtime, register_ai_plugins};
 use shunt_config::provider::sha256_hex;
 use shunt_config::{
-    AdminServer, ConfigError, ConfigProvider, FileConfigProvider, GatewayConfig, LoadedConfig,
-    MetricsRenderer, ReloadController, SnapshotCompiler, UpstreamEndpointIr,
+    AdminServer, ConfigError, ConfigProvider, FileConfigProvider, GatewayConfig,
+    InspectorCapturePlugin, LoadedConfig, MetricsRenderer, ReloadController, SnapshotCompiler,
+    TraceRingBuffer, UpstreamEndpointIr,
 };
 use shunt_core::{GatewayServer, RuntimeRegistry};
 use shunt_plugin_sdk::{ManualClock, PluginRegistry};
@@ -391,20 +392,45 @@ async fn run_case(
     register_builtin_plugins(&mut plugin_registry, Arc::clone(&metrics));
     register_ai_plugins(&mut plugin_registry, Arc::clone(&ai_metrics));
     let runtime_registry = Arc::new(RuntimeRegistry::with_clock(clock.clone()));
-    let compiler = Arc::new(SnapshotCompiler::new(
-        Arc::new(plugin_registry),
-        Arc::clone(&runtime_registry),
-    ));
-
     let provider = Arc::new(MutableTestConfigProvider::new(
         base_config_name.to_owned(),
         base_config_toml.to_owned(),
         mock_endpoints,
     ));
 
+    let initial_loaded = {
+        let _env = EnvGuard::apply(env_overrides);
+        provider.load()
+    };
+    let loaded = match initial_loaded {
+        Ok(l) => l,
+        Err(err) => {
+            shutdown_mocks(mock_handles).await;
+            return CaseReport {
+                name: case.name.clone(),
+                passed: false,
+                duration_ms: started.elapsed().as_millis() as u64,
+                failures: vec![format!("failed to load gateway config: {err}")],
+            };
+        }
+    };
+
+    let ui_enabled = loaded.config.admin.ui;
+    let mut compiler =
+        SnapshotCompiler::new(Arc::new(plugin_registry), Arc::clone(&runtime_registry));
+    let trace_store = if ui_enabled {
+        let store = Arc::new(TraceRingBuffer::new(loaded.config.admin.ui_trace_capacity));
+        compiler = compiler
+            .with_extra_global_plugin(Arc::new(InspectorCapturePlugin::new(Arc::clone(&store))));
+        Some(store)
+    } else {
+        None
+    };
+    let compiler = Arc::new(compiler);
+
     let initial_bundle = {
         let _env = EnvGuard::apply(env_overrides);
-        provider.load().and_then(|loaded| compiler.compile(&loaded))
+        compiler.compile(&loaded)
     };
 
     let bundle = match initial_bundle {
@@ -423,6 +449,7 @@ async fn run_case(
     // 3. Bind real GatewayServer + AdminServer on ephemeral 127.0.0.1:0 ports
     let gw_handle = match GatewayServer::new(bundle.snapshot)
         .with_drain_timeout(Duration::from_secs(2))
+        .with_trace_enabled(ui_enabled)
         .bind("127.0.0.1:0".parse().unwrap())
         .await
     {
@@ -477,23 +504,38 @@ async fn run_case(
         out
     });
 
-    let admin_handle =
-        match AdminServer::new(Arc::clone(&controller), Arc::clone(&render_all_metrics))
-            .bind("127.0.0.1:0".parse().unwrap())
-            .await
-        {
-            Ok(h) => h,
-            Err(err) => {
-                gw_handle.shutdown().await;
-                shutdown_mocks(mock_handles).await;
-                return CaseReport {
-                    name: case.name.clone(),
-                    passed: false,
-                    duration_ms: started.elapsed().as_millis() as u64,
-                    failures: vec![format!("failed to bind AdminServer: {err}")],
-                };
-            }
-        };
+    let ai_m_status = Arc::clone(&ai_metrics);
+    let rt_status = Arc::clone(&runtime_registry);
+    let mut admin_server =
+        AdminServer::new(Arc::clone(&controller), Arc::clone(&render_all_metrics))
+            .with_ui_enabled(ui_enabled)
+            .with_status_provider(
+                "ai",
+                Arc::new(move || {
+                    inspect_ai_runtime(
+                        &ai_m_status,
+                        rt_status.state_store(),
+                        rt_status.clock().as_ref(),
+                    )
+                }),
+            );
+    if let Some(store) = trace_store {
+        admin_server = admin_server.with_trace_store(store);
+    }
+
+    let admin_handle = match admin_server.bind("127.0.0.1:0".parse().unwrap()).await {
+        Ok(h) => h,
+        Err(err) => {
+            gw_handle.shutdown().await;
+            shutdown_mocks(mock_handles).await;
+            return CaseReport {
+                name: case.name.clone(),
+                passed: false,
+                duration_ms: started.elapsed().as_millis() as u64,
+                failures: vec![format!("failed to bind AdminServer: {err}")],
+            };
+        }
+    };
 
     let gw_addr = gw_handle.local_addr();
     let admin_addr = admin_handle.local_addr();
@@ -584,8 +626,9 @@ async fn run_case(
 
         if let Some(req_spec) = &step.request {
             let metrics_before = parse_prometheus_metrics(&render_all_metrics());
+            let target_addr = if req_spec.admin { admin_addr } else { gw_addr };
 
-            match send_gateway_request(&client, gw_addr, req_spec).await {
+            match send_gateway_request(&client, target_addr, req_spec).await {
                 Ok(resp_outcome) => {
                     if step.flush_telemetry || runtime_registry.has_active_telemetry() {
                         // Allow off-hot-path `on_complete` tasks to finish enriching & dropping

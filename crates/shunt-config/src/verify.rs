@@ -372,24 +372,36 @@ pub fn verify_bundle(
         }
     }
 
-    // 3. admin.non_loopback
+    // 3. admin.non_loopback & admin.ui_non_loopback
     if bundle.config.admin.enabled
         && let Ok(addr) = bundle.config.admin.listen.parse::<SocketAddr>()
         && !addr.ip().is_loopback()
     {
+        let sev = if effective_policy.require_loopback_admin {
+            Severity::Error
+        } else {
+            Severity::Warning
+        };
         diags.push(VerifyDiagnostic {
             rule: "admin.non_loopback".to_owned(),
-            severity: if effective_policy.require_loopback_admin {
-                Severity::Error
-            } else {
-                Severity::Warning
-            },
+            severity: sev,
             subject: Some("admin.listen".to_owned()),
             message: format!(
                 "admin listener `{}` binds to a non-loopback address; bind to 127.0.0.1 or [::1]",
                 bundle.config.admin.listen
             ),
         });
+        if bundle.config.admin.ui {
+            diags.push(VerifyDiagnostic {
+                rule: "admin.ui_non_loopback".to_owned(),
+                severity: sev,
+                subject: Some("admin.ui".to_owned()),
+                message: format!(
+                    "admin Inspector UI is enabled on non-loopback listener `{}`; restrict `admin.listen` to 127.0.0.1 or [::1] so live request traces are not publicly exposed",
+                    bundle.config.admin.listen
+                ),
+            });
+        }
     }
 
     // 3b. telemetry.no_trace_plugin

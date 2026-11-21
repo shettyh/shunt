@@ -172,11 +172,20 @@ pub struct SniCertConfig {
     pub key: PathBuf,
 }
 
+/// Default capacity of the in-memory trace ring buffer for the Admin Inspector UI.
+pub const DEFAULT_UI_TRACE_CAPACITY: usize = 256;
+/// Maximum permitted in-memory trace ring buffer capacity.
+pub const MAX_UI_TRACE_CAPACITY: usize = 10_000;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AdminConfig {
     pub enabled: bool,
     pub listen: String,
+    /// Enable the opt-in read-only Admin Inspector Web UI and live trace SSE stream (default: `false`).
+    pub ui: bool,
+    /// Capacity of the bounded in-memory trace ring buffer when the Inspector UI is enabled (default: `256`).
+    pub ui_trace_capacity: usize,
 }
 
 impl Default for AdminConfig {
@@ -184,6 +193,8 @@ impl Default for AdminConfig {
         Self {
             enabled: true,
             listen: "127.0.0.1:9090".to_owned(),
+            ui: false,
+            ui_trace_capacity: DEFAULT_UI_TRACE_CAPACITY,
         }
     }
 }
@@ -461,6 +472,16 @@ impl GatewayConfig {
             errors.push(format!(
                 "admin.listen (`{}`) must be bound to a separate address/port from server.listen",
                 self.admin.listen
+            ));
+        }
+
+        if self.admin.ui && !self.admin.enabled {
+            errors.push("admin.ui: cannot be enabled when `admin.enabled = false`".into());
+        }
+        if self.admin.ui_trace_capacity == 0 || self.admin.ui_trace_capacity > MAX_UI_TRACE_CAPACITY
+        {
+            errors.push(format!(
+                "admin.ui_trace_capacity: must be between 1 and {MAX_UI_TRACE_CAPACITY}"
             ));
         }
 

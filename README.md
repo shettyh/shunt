@@ -68,8 +68,8 @@ docker run --rm -p 8080:8080 -p 9090:9090 \
 # Validate config, compile snapshot, and print routes + HookMasks
 shunt check -c examples/shunt.toml
 
-# Development mode: file-watch hot reloads + live per-hook µs trace waterfalls
-shunt dev -c examples/shunt.toml
+# Development mode: file-watch hot reloads + live per-hook µs trace waterfalls (add `--ui` for browser Inspector)
+shunt dev --ui -c examples/shunt.toml
 
 # Production mode: atomic reloads (file watch, POST /reload, SIGHUP) + graceful draining
 shunt run -c examples/shunt.toml
@@ -106,8 +106,12 @@ The read-only Admin API always binds to a separate listener (`127.0.0.1:9090` by
 | Endpoint | Description |
 | --- | --- |
 | `GET /health` | Liveness/readiness status, snapshot version, digest, and route/upstream counts |
-| `GET /metrics` | Prometheus exposition metrics (HTTP gateway + `shunt-ai` token/TTFT counters) |
-| `GET /snapshot` | Active compiled routes, upstreams, and plugin `HookMask`s (secrets redacted) |
+| `GET /metrics` | Prometheus exposition metrics (HTTP gateway, upstream health, OTLP, and `shunt-ai` counters) |
+| `GET /snapshot` | Active compiled routes, upstreams, and per-plugin `HookMask`s (secrets redacted) |
+| `GET /upstreams` | Live upstream pool endpoint weights, active probe status, and passive health |
+| `GET /api/status` | Snapshot status and pluggable runtime extensions (e.g., AI usage, provider cooldowns, EWMA latency, cache stats) |
+| `GET /` & `GET /ui` | Opt-in read-only Admin Inspector Web UI (`--ui` or `[admin] ui = true`, zero DB) |
+| `GET /api/traces` & `/api/traces/stream` | Opt-in bounded trace ring buffer & live SSE trace waterfall stream (`--ui` or `[admin] ui = true`) |
 | `POST /reload` | Synchronously revalidate and atomically swap the configuration snapshot |
 
 ---

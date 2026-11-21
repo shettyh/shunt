@@ -302,6 +302,16 @@ impl TargetLatencyStats {
     }
 }
 
+/// Read-only snapshot of one EWMA latency target for Admin Inspector APIs.
+#[derive(Debug, Clone, Serialize)]
+pub struct LatencyEntrySnapshot {
+    pub target: String,
+    pub ewma_latency_ms: f64,
+    pub ewma_error_rate: f64,
+    pub samples: u64,
+    pub age_ms: u64,
+}
+
 /// `StateStore`-backed EWMA TTFT/latency and error-rate table surviving snapshot reloads.
 #[derive(Debug, Default)]
 pub struct TargetLatencyTable {
@@ -311,6 +321,22 @@ pub struct TargetLatencyTable {
 impl TargetLatencyTable {
     pub fn target_key(provider: &str, upstream: &str, model: &str) -> String {
         format!("{provider}::{upstream}::{model}")
+    }
+
+    pub fn snapshot_entries(&self, now_ms: u64) -> Vec<LatencyEntrySnapshot> {
+        let guard = self.entries.read().expect("TargetLatencyTable poisoned");
+        let mut out: Vec<LatencyEntrySnapshot> = guard
+            .iter()
+            .map(|(target, s)| LatencyEntrySnapshot {
+                target: target.clone(),
+                ewma_latency_ms: s.ewma_latency_ms,
+                ewma_error_rate: s.ewma_error_rate,
+                samples: s.samples,
+                age_ms: now_ms.saturating_sub(s.last_updated_ms),
+            })
+            .collect();
+        out.sort_by(|a, b| a.target.cmp(&b.target));
+        out
     }
 
     pub fn get(&self, key: &str) -> Option<TargetLatencyStats> {

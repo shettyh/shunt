@@ -1,0 +1,133 @@
+[spec]
+name = "RFC 0012: Admin Read-Only Inspector UI, Live Trace Waterfall & AI Runtime Status"
+config_inline = """
+[server]
+listen = "127.0.0.1:0"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+ui = true
+ui_trace_capacity = 64
+
+[[plugins]]
+name = "request-id"
+
+[[upstreams]]
+name = "openai_primary"
+endpoints = ["http://127.0.0.1:19801"]
+
+[[upstreams]]
+name = "openai_fallback"
+endpoints = ["http://127.0.0.1:19802"]
+
+[[routes]]
+id = "ai_v1"
+path_prefix = "/v1"
+upstream = "openai_primary"
+max_attempts = 2
+
+[[routes.plugins]]
+name = "ai-model-router"
+[routes.plugins.config]
+[[routes.plugins.config.models.smart]]
+provider = "primary"
+upstream = "openai_primary"
+model = "gpt-4o"
+[[routes.plugins.config.models.smart]]
+provider = "fallback"
+upstream = "openai_fallback"
+model = "gpt-4o-mini"
+
+[[routes.plugins]]
+name = "ai-cache"
+[routes.plugins.config]
+ttl_secs = 120
+scope = "global"
+
+[[routes.plugins]]
+name = "ai-budget"
+[routes.plugins.config]
+scope = "global"
+use_builtin_pricing = true
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+[routes.plugins.config.providers.primary]
+dialect = "openai_compatible"
+[routes.plugins.config.providers.primary.auth]
+type = "bearer"
+api_key = "sk-primary-top-secret-key"
+
+[routes.plugins.config.providers.fallback]
+dialect = "openai_compatible"
+[routes.plugins.config.providers.fallback.auth]
+type = "bearer"
+api_key = "sk-fallback-top-secret-key"
+
+[[routes.plugins]]
+name = "ai-failover"
+[routes.plugins.config]
+retry_statuses = [429, 500, 502, 503]
+cooldown_ms = 30000
+failure_threshold = 1
+
+[[routes.plugins]]
+name = "ai-usage-tracker"
+[routes.plugins.config]
+log_usage = false
+"""
+
+[[mocks]]
+name = "primary_rate_limited"
+upstream = "openai_primary"
+status = 429
+json = { error = { message = "rate limit exceeded" } }
+
+[[mocks]]
+name = "fallback_ok"
+upstream = "openai_fallback"
+status = 200
+json = { id = "chatcmpl-fallback", object = "chat.completion", model = "gpt-4o-mini", choices = [{ index = 0, message = { role = "assistant", content = "inspector-verified-answer" }, finish_reason = "stop" }], usage = { prompt_tokens = 100, completion_tokens = 50, total_tokens = 150 } }
+
+[[cases]]
+name = "inspector_ui_serves_html_captures_enriched_traces_cooldowns_and_cache_hits"
+use_mocks = ["primary_rate_limited", "fallback_ok"]
+
+# 1. Verify read-only Inspector UI HTML and security headers on Admin listener
+[[cases.steps]]
+name = "get_admin_ui_html"
+request = { admin = true, method = "GET", path = "/ui" }
+expect = { status = 200, headers_contains = { "content-type" = "text/html" }, headers = { "x-frame-options" = "DENY", "x-content-type-options" = "nosniff" }, body_contains = "Shunt Admin Inspector", snapshot_redacts = ["sk-primary-top-secret-key", "sk-fallback-top-secret-key"] }
+
+# 2. Verify /snapshot exposes compiled per-route plugin_details and HookMask
+[[cases.steps]]
+name = "get_snapshot_plugin_details"
+request = { admin = true, method = "GET", path = "/snapshot" }
+expect = { status = 200, json_path = { "/routes/0/id" = "ai_v1", "/routes/0/plugin_details/0/name" = "ai-model-router", "/routes/0/plugin_details/1/name" = "ai-cache" } }
+
+# 3. Execute deterministic AI request that triggers 429 failover -> fallback 200 (cache miss + cooldown)
+[[cases.steps]]
+name = "ai_request_failover_miss"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "smart", temperature = 0, messages = [{ role = "user", content = "hello inspector" }] } }
+expect = { status = 200, headers = { "x-shunt-cache" = "miss" }, json_path = { "/choices/0/message/content" = "inspector-verified-answer" } }
+
+# 4. Execute identical deterministic request -> ai-cache HIT
+[[cases.steps]]
+name = "ai_request_cache_hit"
+wait_ms = 30
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "smart", temperature = 0, messages = [{ role = "user", content = "hello inspector" }] } }
+expect = { status = 200, headers = { "x-shunt-cache" = "hit" }, json_path = { "/choices/0/message/content" = "inspector-verified-answer" } }
+
+# 5. Inspect /api/traces: verify both traces, per-hook waterfall entries, and GenAI attributes
+[[cases.steps]]
+name = "get_api_traces"
+wait_ms = 30
+request = { admin = true, method = "GET", path = "/api/traces" }
+expect = { status = 200, json_path = { "/summary/total_recorded" = 2, "/summary/status_2xx" = 2, "/traces/0/route_id" = "ai_v1", "/traces/0/attributes/gen_ai.provider.name" = "fallback", "/traces/0/attributes/gen_ai.request.model" = "smart", "/traces/0/attributes/gen_ai.usage.input_tokens" = 100, "/traces/0/attributes/gen_ai.usage.output_tokens" = 50, "/traces/0/attributes/shunt.ai.failovers" = 1, "/traces/0/attributes/shunt.ai.cache_status" = "miss", "/traces/1/attributes/shunt.ai.cache_status" = "hit" } }
+
+# 6. Inspect /api/status: verify AI totals, active provider cooldown, and cache table stats
+[[cases.steps]]
+name = "get_api_status"
+request = { admin = true, method = "GET", path = "/api/status" }
+expect = { status = 200, json_path = { "/ui_enabled" = true, "/trace_capture_enabled" = true, "/extensions/ai/totals/total_requests" = 1, "/extensions/ai/totals/total_prompt_tokens" = 100, "/extensions/ai/totals/total_completion_tokens" = 50, "/extensions/ai/totals/total_failovers" = 1, "/extensions/ai/totals/total_cache_hits" = 1, "/extensions/ai/totals/total_cache_misses" = 1, "/extensions/ai/cooldowns/0/target" = "openai_primary::gpt-4o", "/extensions/ai/cooldowns/0/in_cooldown" = true, "/extensions/ai/caches/0/entries" = 1 } }
