@@ -204,6 +204,7 @@ impl HttpPlugin for PoweredByPlugin {
 
 ## Design Docs & RFCs
 
+- [Product & Architecture Vision](docs/vision.md)
 - [Core Design Specification](docs/design.md)
 - [Architecture RFCs](rfcs/README.md):
   - [RFC 0001](rfcs/0001-plugin-sdk-and-lifecycle.md) — Plugin SDK & Request Lifecycle
