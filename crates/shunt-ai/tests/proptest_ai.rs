@@ -1218,4 +1218,81 @@ proptest! {
             }
         }
     }
+
+    #[test]
+    fn canonical_cache_key_is_permutation_invariant(
+        pairs in prop::collection::vec(("[a-z0-9_]{1,10}", "[a-z0-9 ]{0,20}"), 1..12),
+    ) {
+        let mut forward = serde_json::Map::new();
+        let mut reverse = serde_json::Map::new();
+        for (k, v) in &pairs {
+            forward.insert(k.clone(), Value::String(v.clone()));
+        }
+        // Insert identical final key-value pairs in reversed order.
+        let ordered_entries: Vec<(String, Value)> = forward
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (k, v) in ordered_entries.into_iter().rev() {
+            reverse.insert(k, v);
+        }
+        let vf = Value::Object(forward);
+        let vr = Value::Object(reverse);
+        prop_assert_eq!(shunt_ai::canonical_json_bytes(&vf), shunt_ai::canonical_json_bytes(&vr));
+        let kf = shunt_ai::compute_cache_key(
+            "key:t1",
+            shunt_ai::AiEndpointKind::ChatCompletions,
+            "gpt-4o",
+            Some(("openai", "gpt-4o")),
+            &vf,
+        );
+        let kr = shunt_ai::compute_cache_key(
+            "key:t1",
+            shunt_ai::AiEndpointKind::ChatCompletions,
+            "gpt-4o",
+            Some(("openai", "gpt-4o")),
+            &vr,
+        );
+        prop_assert_eq!(kf, kr);
+    }
+
+    #[test]
+    fn ai_cache_table_never_exceeds_entry_or_byte_bounds(
+        max_entries in 1usize..16,
+        max_total_bytes in 32usize..512,
+        ops in prop::collection::vec((0u8..3, 0usize..24, 1usize..128, 0u64..2000), 1..120),
+    ) {
+        let table = shunt_ai::AiCacheTable::new();
+        let mut now_ms = 0u64;
+        let ttl = Duration::from_secs(5);
+        for (kind, key_id, payload_len, dt_ms) in ops {
+            now_ms = now_ms.saturating_add(dt_ms);
+            let now = Duration::from_millis(now_ms);
+            let key = format!("k-{key_id}");
+            match kind {
+                0 | 1 => {
+                    let entry = shunt_ai::CachedAiResponse {
+                        content_type: "application/json".to_owned(),
+                        provider: "openai".to_owned(),
+                        served_model: "gpt-4o".to_owned(),
+                        body: vec![b'a'; payload_len],
+                    };
+                    table.insert(key, entry, now, ttl, max_entries, max_total_bytes);
+                }
+                _ => {
+                    let _ = table.get(&key, now);
+                }
+            }
+            prop_assert!(
+                table.len() <= max_entries,
+                "len {} > max_entries {max_entries}",
+                table.len()
+            );
+            prop_assert!(
+                table.total_bytes() <= max_total_bytes,
+                "total_bytes {} > max_total_bytes {max_total_bytes}",
+                table.total_bytes()
+            );
+        }
+    }
 }

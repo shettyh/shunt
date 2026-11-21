@@ -7,14 +7,16 @@ use serde::Deserialize;
 use serde_json::Value;
 use shunt_plugin_sdk::{
     BuildContext, Bytes, Flow, HookMask, HookResult, HttpPlugin, PluginBuildError, PluginConfig,
-    PluginFactory, RequestCtx, RequestSummary, ResponseHead, StreamFlow, header,
+    PluginFactory, RequestCtx, RequestSummary, ResponseHead, SpanHandle, StreamFlow, header,
 };
 use tracing::info;
 
+use crate::cache::AiCacheStatus;
 use crate::pricing::nano_usd_to_usd;
 use crate::sse::SseParser;
 use crate::types::{
-    AiFailoverHistory, AiKeyPolicy, AiRequestMeta, AiUsage, AiUsageReport, DetectedEndpoint,
+    AiEndpointKind, AiFailoverHistory, AiKeyPolicy, AiRequestMeta, AiUsage, AiUsageReport,
+    DetectedEndpoint,
 };
 
 const DEFAULT_MAX_JSON_INSPECT_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
@@ -69,6 +71,8 @@ struct AiMetricsData {
     ttft_seconds: BTreeMap<(String, String, bool), HistogramState>,
     /// (provider, model, stream) -> total duration histogram
     duration_seconds: BTreeMap<(String, String, bool), HistogramState>,
+    /// (status="hit"|"miss"|"bypass", endpoint, model) -> count
+    cache_requests_total: BTreeMap<(&'static str, String, String), u64>,
 }
 
 /// Point-in-time aggregate counters from [`AiMetrics`] (useful for programmatic checks/tests).
@@ -79,6 +83,8 @@ pub struct AiMetricsSnapshot {
     pub total_completion_tokens: u64,
     pub total_failovers: u64,
     pub total_cost_usd: f64,
+    pub total_cache_hits: u64,
+    pub total_cache_misses: u64,
 }
 
 /// Thread-safe Prometheus-compatible AI metrics store updated by [`AiUsageTrackerPlugin`]
@@ -185,6 +191,15 @@ impl AiMetrics {
         *entry = entry.saturating_add(cost_nano_usd);
     }
 
+    /// Records an AI response cache lookup disposition (`"hit"`, `"miss"`, or `"bypass"`).
+    pub fn record_cache(&self, status: &'static str, endpoint: &str, model: &str) {
+        let mut data = self.inner.write().expect("AiMetrics lock poisoned");
+        *data
+            .cache_requests_total
+            .entry((status, endpoint.to_owned(), model.to_owned()))
+            .or_insert(0) += 1;
+    }
+
     pub fn snapshot(&self) -> AiMetricsSnapshot {
         let data = self.inner.read().expect("AiMetrics lock poisoned");
         let total_requests = data.requests_total.values().copied().sum();
@@ -206,20 +221,37 @@ impl AiMetrics {
             .values()
             .copied()
             .fold(0u64, u64::saturating_add);
+        let total_cache_hits = data
+            .cache_requests_total
+            .iter()
+            .filter(|((status, _, _), _)| *status == "hit")
+            .map(|(_, &v)| v)
+            .sum();
+        let total_cache_misses = data
+            .cache_requests_total
+            .iter()
+            .filter(|((status, _, _), _)| *status == "miss")
+            .map(|(_, &v)| v)
+            .sum();
         AiMetricsSnapshot {
             total_requests,
             total_prompt_tokens,
             total_completion_tokens,
             total_failovers,
             total_cost_usd: nano_usd_to_usd(total_cost_nano),
+            total_cache_hits,
+            total_cache_misses,
         }
     }
 
     /// Renders collected AI metrics in Prometheus exposition text format (v0.0.4).
-    /// Returns an empty string if no AI requests or costs have been observed yet.
+    /// Returns an empty string if no AI requests, cache events, or costs have been observed yet.
     pub fn render_prometheus(&self) -> String {
         let data = self.inner.read().expect("AiMetrics lock poisoned");
-        if data.requests_total.is_empty() && data.cost_nano_usd_total.is_empty() {
+        if data.requests_total.is_empty()
+            && data.cost_nano_usd_total.is_empty()
+            && data.cache_requests_total.is_empty()
+        {
             return String::new();
         }
 
@@ -302,19 +334,38 @@ impl AiMetrics {
             }
         }
 
-        out.push_str(
-            "# HELP shunt_ai_request_duration_seconds Total AI request duration in seconds.\n",
-        );
-        out.push_str("# TYPE shunt_ai_request_duration_seconds histogram\n");
-        for ((provider, model, stream), hist) in &data.duration_seconds {
-            render_ai_histogram(
-                &mut out,
-                "shunt_ai_request_duration_seconds",
-                provider,
-                model,
-                *stream,
-                hist,
+        if !data.duration_seconds.is_empty() {
+            out.push_str(
+                "# HELP shunt_ai_request_duration_seconds Total AI request duration in seconds.\n",
             );
+            out.push_str("# TYPE shunt_ai_request_duration_seconds histogram\n");
+            for ((provider, model, stream), hist) in &data.duration_seconds {
+                render_ai_histogram(
+                    &mut out,
+                    "shunt_ai_request_duration_seconds",
+                    provider,
+                    model,
+                    *stream,
+                    hist,
+                );
+            }
+        }
+
+        if !data.cache_requests_total.is_empty() {
+            out.push_str(
+                "# HELP shunt_ai_cache_requests_total Total AI response cache lookups by status.\n",
+            );
+            out.push_str("# TYPE shunt_ai_cache_requests_total counter\n");
+            for ((status, endpoint, model), count) in &data.cache_requests_total {
+                let _ = writeln!(
+                    out,
+                    "shunt_ai_cache_requests_total{{status=\"{}\",endpoint=\"{}\",model=\"{}\"}} {}",
+                    status,
+                    escape_label(endpoint),
+                    escape_label(model),
+                    count
+                );
+            }
         }
 
         out
@@ -549,6 +600,38 @@ impl HttpPlugin for AiUsageTrackerPlugin {
         }
 
         let meta = ctx.get_ext::<AiRequestMeta>();
+        let cache_status = ctx.get_ext::<AiCacheStatus>();
+
+        // On an exact-match AI cache hit, annotate the active OTel span with GenAI metadata
+        // without double-counting upstream inference requests/tokens in `AiMetrics::record`.
+        if let Some(AiCacheStatus::Hit {
+            provider,
+            served_model,
+        }) = cache_status
+        {
+            if let Some(span) = ctx.get_ext::<SpanHandle>() {
+                let op = meta
+                    .map(|m| genai_operation_name(m.endpoint))
+                    .unwrap_or("chat");
+                let requested_model = meta
+                    .map(|m| m.requested_model.as_str())
+                    .unwrap_or(served_model.as_str());
+                span.set_name(format!("{op} {requested_model}"));
+                span.set_str("gen_ai.operation.name", op);
+                span.set_str("gen_ai.provider.name", provider.as_str());
+                span.set_str("gen_ai.request.model", requested_model);
+                span.set_str("gen_ai.response.model", served_model.as_str());
+                span.set_str("shunt.ai.cache_status", "hit");
+                if let Some(policy) = ctx.get_ext::<AiKeyPolicy>() {
+                    span.set_str("shunt.ai.key_id", policy.key_id.as_str());
+                    if let Some(team) = &policy.team {
+                        span.set_str("shunt.ai.team", team.as_str());
+                    }
+                }
+            }
+            return HookResult::Ready(());
+        }
+
         let usage = ctx.get_ext::<AiUsage>();
         let failover_events = ctx
             .get_ext::<AiFailoverHistory>()
@@ -609,6 +692,46 @@ impl HttpPlugin for AiUsageTrackerPlugin {
 
         self.metrics.record(&report);
 
+        if let Some(span) = ctx.get_ext::<SpanHandle>() {
+            let op = meta
+                .map(|m| genai_operation_name(m.endpoint))
+                .unwrap_or("chat");
+            span.set_name(format!("{op} {}", report.requested_model));
+            span.set_str("gen_ai.operation.name", op);
+            span.set_str("gen_ai.provider.name", report.provider.as_str());
+            span.set_str("gen_ai.request.model", report.requested_model.as_str());
+            span.set_str("gen_ai.response.model", report.served_model.as_str());
+            if let Some(p) = report.prompt_tokens {
+                span.set_int("gen_ai.usage.input_tokens", p.min(i64::MAX as u64) as i64);
+            }
+            if let Some(c) = report.completion_tokens {
+                span.set_int("gen_ai.usage.output_tokens", c.min(i64::MAX as u64) as i64);
+            }
+            if let Some(cached) = report.cached_prompt_tokens {
+                span.set_int(
+                    "gen_ai.usage.cache_read.input_tokens",
+                    cached.min(i64::MAX as u64) as i64,
+                );
+            }
+            span.set_bool("shunt.ai.stream", report.stream);
+            if let Some(ttft) = report.ttft {
+                span.set_float("shunt.ai.ttft_ms", ttft.as_secs_f64() * 1000.0);
+            }
+            span.set_int("shunt.ai.failovers", report.failover_events.len() as i64);
+            if let Some(m) = meta {
+                span.set_str("shunt.ai.routing_strategy", m.routing_strategy.as_str());
+            }
+            if let Some(cs) = cache_status {
+                span.set_str("shunt.ai.cache_status", cs.as_str());
+            }
+            if let Some(k) = &report.key_id {
+                span.set_str("shunt.ai.key_id", k.as_str());
+            }
+            if let Some(t) = &report.team {
+                span.set_str("shunt.ai.team", t.as_str());
+            }
+        }
+
         if let Some(sink) = &self.sink {
             sink(&report);
         }
@@ -633,6 +756,18 @@ impl HttpPlugin for AiUsageTrackerPlugin {
         }
 
         HookResult::Ready(())
+    }
+}
+
+const fn genai_operation_name(endpoint: AiEndpointKind) -> &'static str {
+    match endpoint {
+        AiEndpointKind::Embeddings => "embeddings",
+        AiEndpointKind::ChatCompletions
+        | AiEndpointKind::AnthropicMessages
+        | AiEndpointKind::OpenAiResponses
+        | AiEndpointKind::ModelsList
+        | AiEndpointKind::ModelRetrieve
+        | AiEndpointKind::AnthropicCountTokens => "chat",
     }
 }
 

@@ -11,6 +11,7 @@ pub mod http_types;
 pub mod mask;
 pub mod plugin;
 pub mod state;
+pub mod telemetry;
 
 pub use bytes::Bytes;
 pub use clock::{Clock, ManualClock, SystemClock};
@@ -29,4 +30,9 @@ pub use plugin::HttpPlugin;
 pub use state::{
     BuildContext, PluginBuildError, PluginConfig, PluginFactory, PluginRegistry, StateHandle,
     StateStore,
+};
+pub use telemetry::{
+    InMemoryTelemetrySink, ParsedTraceparent, SpanHandle, SpanKind, SpanRecord, SpanStatusCode,
+    SpanValue, TelemetrySink, TraceContext, current_unix_nanos, encode_hex_lower, generate_span_id,
+    generate_trace_id,
 };

@@ -1,0 +1,261 @@
+[spec]
+name = "rfc0011-observability-and-ai-cache"
+config_inline = """
+[server]
+listen = "127.0.0.1:0"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+[telemetry]
+enabled = true
+backend = "otlp_http"
+endpoint = "mock://otlp_collector/v1/traces"
+service_name = "shunt-spec"
+queue_capacity = 256
+batch_size = 1
+flush_interval_ms = 50
+export_timeout_ms = 2000
+headers = { Authorization = "env:SPEC_OTLP_AUTH" }
+resource_attributes = { "deployment.environment" = "spec" }
+
+[[plugins]]
+name = "otel-trace"
+[plugins.config]
+sample_rate = 1.0
+respect_parent_sampling = true
+propagate_headers = true
+emit_response_header = true
+
+[[plugins]]
+name = "metrics"
+
+[[upstreams]]
+name = "openai_up"
+endpoints = ["http://127.0.0.1:18081"]
+
+[[upstreams]]
+name = "anthropic_up"
+endpoints = ["http://127.0.0.1:18082"]
+
+[[routes]]
+id = "ai_cached"
+path_prefix = "/v1"
+methods = ["GET", "POST"]
+upstream = "openai_up"
+max_body_bytes = 1048576
+max_attempts = 2
+
+[[routes.plugins]]
+name = "ai-virtual-keys"
+[routes.plugins.config]
+keys = [
+  { id = "key-a", api_key = "sk-key-a", team = "alpha", rpm = 20, tpm = 50000, budget_usd = 1.0 },
+  { id = "key-b", api_key = "sk-key-b", team = "beta", rpm = 20, tpm = 50000, budget_usd = 1.0 }
+]
+
+[[routes.plugins]]
+name = "ai-model-router"
+[routes.plugins.config]
+[routes.plugins.config.models]
+"gpt-cached" = [
+  { provider = "openai", upstream = "openai_up", model = "gpt-4o-mini" }
+]
+"claude-cached" = [
+  { provider = "anthropic", upstream = "anthropic_up", model = "claude-3-5-sonnet-20241022" }
+]
+"embed-cached" = [
+  { provider = "openai", upstream = "openai_up", model = "text-embedding-3-small" }
+]
+
+[[routes.plugins]]
+name = "ai-cache"
+[routes.plugins.config]
+ttl_secs = 60
+max_entries = 128
+max_total_bytes = 4194304
+max_entry_bytes = 262144
+scope = "virtual_key"
+require_deterministic = true
+respect_cache_control = true
+emit_headers = true
+
+[[routes.plugins]]
+name = "ai-token-rate-limit"
+[routes.plugins.config]
+default_rpm = 20
+default_tpm = 50000
+
+[[routes.plugins]]
+name = "ai-budget"
+[routes.plugins.config]
+default_limit_usd = 1.0
+window = "daily"
+mode = "hard"
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+[routes.plugins.config.providers.openai]
+dialect = "openai_compatible"
+auth = { type = "bearer", api_key = "env:SPEC_OPENAI_KEY" }
+
+[routes.plugins.config.providers.anthropic]
+dialect = "anthropic"
+auth = { type = "header", header = "x-api-key", api_key = "env:SPEC_ANTHROPIC_KEY" }
+
+[[routes.plugins]]
+name = "ai-usage-tracker"
+[routes.plugins.config]
+log_usage = false
+"""
+
+[env]
+SPEC_OTLP_AUTH = "Bearer otlp-top-secret-token"
+SPEC_OPENAI_KEY = "sk-openai-spec-secret"
+SPEC_ANTHROPIC_KEY = "sk-ant-spec-secret"
+
+[[mocks]]
+name = "otlp_ok"
+upstream = "otlp_collector"
+status = 200
+json = {}
+
+[[mocks]]
+name = "openai_chat_ok"
+upstream = "openai_up"
+status = 200
+json = { id = "chatcmpl-cache-1", object = "chat.completion", model = "gpt-4o-mini", choices = [{ index = 0, message = { role = "assistant", content = "cached-answer-42" }, finish_reason = "stop" }], usage = { prompt_tokens = 25, completion_tokens = 15, total_tokens = 40 } }
+
+[[mocks]]
+name = "openai_embed_ok"
+upstream = "openai_up"
+status = 200
+json = { object = "list", model = "text-embedding-3-small", data = [{ object = "embedding", index = 0, embedding = [0.1, 0.2, 0.3] }], usage = { prompt_tokens = 8, total_tokens = 8 } }
+
+[[mocks]]
+name = "openai_stream_ok"
+upstream = "openai_up"
+status = 200
+sse_raw = [
+  "data: {\"id\":\"chatcmpl-s1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"streamed\"},\"finish_reason\":null}]}\n\n",
+  "data: {\"id\":\"chatcmpl-s1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n",
+  "data: [DONE]\n\n"
+]
+
+[[mocks]]
+name = "anthropic_chat_ok"
+upstream = "anthropic_up"
+status = 200
+json = { id = "msg_cache_1", type = "message", role = "assistant", model = "claude-3-5-sonnet-20241022", content = [{ type = "text", text = "anthropic-cached-reply" }], stop_reason = "end_turn", usage = { input_tokens = 30, output_tokens = 12 } }
+
+# ---------------------------------------------------------------------------
+# Case 1: W3C traceparent propagation + OTLP/HTTP JSON export (HTTP + GenAI)
+#         + Exact-match cache miss -> hit (key-order invariant) + zero extra upstream/budget cost
+# ---------------------------------------------------------------------------
+[[cases]]
+name = "otlp_genai_export_and_deterministic_cache_hit"
+use_mocks = ["otlp_ok", "openai_chat_ok"]
+
+[[cases.steps]]
+name = "miss_populates_cache_and_exports_otlp_genai_span"
+request = { method = "POST", path = "/v1/chat/completions", headers = { authorization = "Bearer sk-key-a", traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", tracestate = "vendor=shunt" }, json = { model = "gpt-cached", temperature = 0, messages = [{ role = "user", content = "What is 6*7?" }] } }
+expect = { status = 200, headers = { "x-shunt-cache" = "miss", "x-trace-id" = "4bf92f3577b34da6a3ce929d0e0e4736" }, json_path = { "/choices/0/message/content" = "cached-answer-42" }, snapshot_redacts = ["otlp-top-secret-token", "sk-openai-spec-secret"], upstream_calls = [
+  { upstream = "openai_up", count = 1, headers_contains = { traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-" }, headers = { tracestate = "vendor=shunt" } },
+  { upstream = "otlp_collector", count = 1, method = "POST", path = "/v1/traces", headers = { authorization = "Bearer otlp-top-secret-token" }, body_contains = "gen_ai.provider.name", json_path = { "/resourceSpans/0/resource/attributes/0/value/stringValue" = "shunt-spec", "/resourceSpans/0/scopeSpans/0/spans/0/traceId" = "4bf92f3577b34da6a3ce929d0e0e4736", "/resourceSpans/0/scopeSpans/0/spans/0/parentSpanId" = "00f067aa0ba902b7", "/resourceSpans/0/scopeSpans/0/spans/0/name" = "chat gpt-cached" } }
+], metrics_delta = { "shunt_ai_cache_requests_total{status=\"miss\",endpoint=\"chat_completions\",model=\"gpt-cached\"}" = 1, "shunt_telemetry_spans_total{backend=\"otlp_http\",result=\"exported\"}" = 1 } }
+
+[[cases.steps]]
+name = "hit_serves_from_cache_with_reordered_json_and_zero_upstream_calls"
+# Reordered JSON keys + temperature 0.0 (float zero) must hash to the exact same canonical key.
+request = { method = "POST", path = "/v1/chat/completions", headers = { authorization = "Bearer sk-key-a" }, body = "{\"messages\":[{\"content\":\"What is 6*7?\",\"role\":\"user\"}],\"temperature\":0.0,\"model\":\"gpt-cached\"}" }
+expect = { status = 200, headers = { "x-shunt-cache" = "hit" }, json_path = { "/choices/0/message/content" = "cached-answer-42" }, upstream_calls = [
+  { upstream = "openai_up", count = 1 },
+  { upstream = "otlp_collector", count = 2, body_contains = "\"stringValue\":\"hit\"" }
+], metrics_delta = { "shunt_ai_cache_requests_total{status=\"hit\",endpoint=\"chat_completions\",model=\"gpt-cached\"}" = 1, "shunt_ai_requests_total{provider=\"openai\",model=\"gpt-4o-mini\",stream=\"false\",status=\"200\"}" = 0 } }
+
+# ---------------------------------------------------------------------------
+# Case 2: Non-deterministic chat, streaming, and Cache-Control: no-store bypass
+# ---------------------------------------------------------------------------
+[[cases]]
+name = "cache_bypasses_non_deterministic_streaming_and_no_store"
+use_mocks = ["otlp_ok", "openai_chat_ok"]
+
+[[cases.steps]]
+name = "temperature_gt_zero_bypasses"
+request = { method = "POST", path = "/v1/chat/completions", headers = { authorization = "Bearer sk-key-a" }, json = { model = "gpt-cached", temperature = 0.7, messages = [{ role = "user", content = "creative" }] } }
+expect = { status = 200, headers = { "x-shunt-cache" = "bypass" }, upstream_calls = [{ upstream = "openai_up", count = 1 }], metrics_delta = { "shunt_ai_cache_requests_total{status=\"bypass\",endpoint=\"chat_completions\",model=\"gpt-cached\"}" = 1 } }
+
+[[cases.steps]]
+name = "no_store_bypasses_even_at_temp_zero"
+request = { method = "POST", path = "/v1/chat/completions", headers = { authorization = "Bearer sk-key-a", "cache-control" = "no-store" }, json = { model = "gpt-cached", temperature = 0, messages = [{ role = "user", content = "private" }] } }
+expect = { status = 200, headers = { "x-shunt-cache" = "bypass" }, upstream_calls = [{ upstream = "openai_up", count = 2 }] }
+
+[[cases]]
+name = "cache_bypasses_streaming_requests"
+use_mocks = ["otlp_ok", "openai_stream_ok"]
+request = { method = "POST", path = "/v1/chat/completions", headers = { authorization = "Bearer sk-key-a" }, json = { model = "gpt-cached", temperature = 0, stream = true, messages = [{ role = "user", content = "stream me" }] } }
+expect = { status = 200, headers = { "x-shunt-cache" = "bypass" }, sse_contains_text = "streamed", upstream_calls = [{ upstream = "openai_up", count = 1 }] }
+
+# ---------------------------------------------------------------------------
+# Case 3: Embeddings are always deterministic & cache without temperature
+# ---------------------------------------------------------------------------
+[[cases]]
+name = "embeddings_cache_miss_then_hit"
+use_mocks = ["otlp_ok", "openai_embed_ok"]
+
+[[cases.steps]]
+name = "embed_miss"
+request = { method = "POST", path = "/v1/embeddings", headers = { authorization = "Bearer sk-key-a" }, json = { model = "embed-cached", input = "hello world" } }
+expect = { status = 200, headers = { "x-shunt-cache" = "miss" }, json_path = { "/data/0/embedding/1" = 0.2 }, upstream_calls = [{ upstream = "openai_up", count = 1 }] }
+
+[[cases.steps]]
+name = "embed_hit"
+request = { method = "POST", path = "/v1/embeddings", headers = { authorization = "Bearer sk-key-a" }, json = { input = "hello world", model = "embed-cached" } }
+expect = { status = 200, headers = { "x-shunt-cache" = "hit" }, json_path = { "/data/0/embedding/1" = 0.2 }, upstream_calls = [{ upstream = "openai_up", count = 1 }], metrics_delta = { "shunt_ai_cache_requests_total{status=\"hit\",endpoint=\"embeddings\",model=\"embed-cached\"}" = 1 } }
+
+# ---------------------------------------------------------------------------
+# Case 4: Translated Anthropic non-streaming responses cache in OpenAI schema
+# ---------------------------------------------------------------------------
+[[cases]]
+name = "translated_anthropic_response_caches_cleanly"
+use_mocks = ["otlp_ok", "anthropic_chat_ok"]
+
+[[cases.steps]]
+name = "anthropic_miss_translates_and_stores"
+request = { method = "POST", path = "/v1/chat/completions", headers = { authorization = "Bearer sk-key-a" }, json = { model = "claude-cached", temperature = 0, messages = [{ role = "user", content = "hello claude" }] } }
+expect = { status = 200, headers = { "x-shunt-cache" = "miss" }, json_path = { "/object" = "chat.completion", "/choices/0/message/content" = "anthropic-cached-reply" }, upstream_calls = [{ upstream = "anthropic_up", count = 1 }] }
+
+[[cases.steps]]
+name = "anthropic_hit_returns_translated_openai_json"
+request = { method = "POST", path = "/v1/chat/completions", headers = { authorization = "Bearer sk-key-a" }, json = { model = "claude-cached", temperature = 0, messages = [{ role = "user", content = "hello claude" }] } }
+expect = { status = 200, headers = { "x-shunt-cache" = "hit" }, json_path = { "/object" = "chat.completion", "/choices/0/message/content" = "anthropic-cached-reply" }, upstream_calls = [{ upstream = "anthropic_up", count = 1 }] }
+
+# ---------------------------------------------------------------------------
+# Case 5: Tenant isolation (virtual_key scope) + TTL expiry via ManualClock
+# ---------------------------------------------------------------------------
+[[cases]]
+name = "tenant_isolation_and_deterministic_ttl_expiry"
+use_mocks = ["otlp_ok", "openai_chat_ok"]
+
+[[cases.steps]]
+name = "key_a_miss"
+request = { method = "POST", path = "/v1/chat/completions", headers = { authorization = "Bearer sk-key-a" }, json = { model = "gpt-cached", temperature = 0, messages = [{ role = "user", content = "tenant test" }] } }
+expect = { status = 200, headers = { "x-shunt-cache" = "miss" }, upstream_calls = [{ upstream = "openai_up", count = 1 }] }
+
+[[cases.steps]]
+name = "key_b_does_not_read_key_a_entry"
+request = { method = "POST", path = "/v1/chat/completions", headers = { authorization = "Bearer sk-key-b" }, json = { model = "gpt-cached", temperature = 0, messages = [{ role = "user", content = "tenant test" }] } }
+expect = { status = 200, headers = { "x-shunt-cache" = "miss" }, upstream_calls = [{ upstream = "openai_up", count = 2 }] }
+
+[[cases.steps]]
+name = "key_a_hits_before_ttl"
+advance_clock_ms = 30000
+request = { method = "POST", path = "/v1/chat/completions", headers = { authorization = "Bearer sk-key-a" }, json = { model = "gpt-cached", temperature = 0, messages = [{ role = "user", content = "tenant test" }] } }
+expect = { status = 200, headers = { "x-shunt-cache" = "hit" }, upstream_calls = [{ upstream = "openai_up", count = 2 }] }
+
+[[cases.steps]]
+name = "key_a_expires_after_ttl"
+advance_clock_ms = 40000
+request = { method = "POST", path = "/v1/chat/completions", headers = { authorization = "Bearer sk-key-a" }, json = { model = "gpt-cached", temperature = 0, messages = [{ role = "user", content = "tenant test" }] } }
+expect = { status = 200, headers = { "x-shunt-cache" = "miss" }, upstream_calls = [{ upstream = "openai_up", count = 3 }] }

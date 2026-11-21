@@ -1,11 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use shunt_plugin_sdk::state::StagedStateMap;
-use shunt_plugin_sdk::{BuildContext, Clock, DistributedStore, StateStore, SystemClock};
+use shunt_plugin_sdk::{
+    BuildContext, Clock, DistributedStore, StateStore, SystemClock, TelemetrySink,
+};
 
 use crate::error::CoreError;
+use crate::otlp::{OtlpExporterConfig, OtlpHttpExporter};
 use crate::redis::{RedisStateStore, RedisStoreConfig};
 use crate::upstream::{UpstreamConfig, UpstreamPool, UpstreamPoolKey};
 
@@ -22,6 +26,7 @@ pub struct RuntimeRegistry {
     next_pool_id: AtomicU64,
     pools: RwLock<HashMap<UpstreamPoolKey, Arc<UpstreamPool>>>,
     redis_stores: RwLock<HashMap<RedisStoreConfig, Arc<RedisStateStore>>>,
+    otlp_exporters: RwLock<HashMap<OtlpExporterConfig, Arc<OtlpHttpExporter>>>,
     state_store: Arc<StateStore>,
     clock: Arc<dyn Clock>,
 }
@@ -44,9 +49,91 @@ impl RuntimeRegistry {
             next_pool_id: AtomicU64::new(1),
             pools: RwLock::new(HashMap::new()),
             redis_stores: RwLock::new(HashMap::new()),
+            otlp_exporters: RwLock::new(HashMap::new()),
             state_store: Arc::new(StateStore::new()),
             clock,
         }
+    }
+
+    /// Returns a cached warm [`OtlpHttpExporter`] matching `config`, or creates and caches one.
+    pub fn get_or_create_otlp_exporter(
+        &self,
+        config: &OtlpExporterConfig,
+    ) -> Arc<OtlpHttpExporter> {
+        if let Some(existing) = self
+            .otlp_exporters
+            .read()
+            .expect("RuntimeRegistry otlp_exporters lock poisoned")
+            .get(config)
+            .cloned()
+        {
+            return existing;
+        }
+        let mut guard = self
+            .otlp_exporters
+            .write()
+            .expect("RuntimeRegistry otlp_exporters lock poisoned");
+        guard
+            .entry(config.clone())
+            .or_insert_with(|| Arc::new(OtlpHttpExporter::new(config.clone())))
+            .clone()
+    }
+
+    /// Garbage-collects cached OTLP exporters other than `active` (call only after snapshot commit).
+    pub fn retain_otlp_exporter(&self, active: Option<&OtlpExporterConfig>) {
+        let mut guard = self
+            .otlp_exporters
+            .write()
+            .expect("RuntimeRegistry otlp_exporters lock poisoned");
+        match active {
+            Some(cfg) => guard.retain(|k, _| k == cfg),
+            None => guard.clear(),
+        }
+    }
+
+    /// Returns `true` if at least one telemetry exporter is currently registered.
+    pub fn has_active_telemetry(&self) -> bool {
+        !self
+            .otlp_exporters
+            .read()
+            .expect("RuntimeRegistry otlp_exporters lock poisoned")
+            .is_empty()
+    }
+
+    /// Flushes all active telemetry exporters up to `timeout` (e.g., on graceful shutdown).
+    pub async fn flush_telemetry(&self, timeout: Duration) {
+        let exporters: Vec<Arc<OtlpHttpExporter>> = self
+            .otlp_exporters
+            .read()
+            .expect("RuntimeRegistry otlp_exporters lock poisoned")
+            .values()
+            .cloned()
+            .collect();
+        for exp in exporters {
+            exp.flush(timeout).await;
+        }
+    }
+
+    /// Renders Prometheus metrics for all active telemetry exporters.
+    pub fn render_telemetry_prometheus(&self) -> String {
+        let exporters: Vec<Arc<OtlpHttpExporter>> = self
+            .otlp_exporters
+            .read()
+            .expect("RuntimeRegistry otlp_exporters lock poisoned")
+            .values()
+            .cloned()
+            .collect();
+        let mut out = String::new();
+        for exp in exporters {
+            let chunk = exp.render_prometheus();
+            if !chunk.is_empty() {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(&chunk);
+            }
+        }
+        out
     }
 
     /// Returns a cached warm [`RedisStateStore`] matching `config`, or creates and caches one.
@@ -200,12 +287,23 @@ impl RuntimeRegistry {
         &self,
         distributed_store: Option<Arc<dyn DistributedStore>>,
     ) -> BuildSession {
+        self.begin_build_session_with_services(distributed_store, None)
+    }
+
+    /// Starts a transactional plugin build session with optional gateway services
+    /// (`DistributedStore` and `TelemetrySink`).
+    pub fn begin_build_session_with_services(
+        &self,
+        distributed_store: Option<Arc<dyn DistributedStore>>,
+        telemetry_sink: Option<Arc<dyn TelemetrySink>>,
+    ) -> BuildSession {
         BuildSession {
             state_store: Arc::clone(&self.state_store),
             touched_scopes: Arc::new(RwLock::new(HashSet::new())),
             staged_state: Arc::new(RwLock::new(HashMap::new())),
             clock: Arc::clone(&self.clock),
             distributed_store,
+            telemetry_sink,
         }
     }
 }
@@ -220,6 +318,7 @@ pub struct BuildSession {
     staged_state: Arc<RwLock<StagedStateMap>>,
     clock: Arc<dyn Clock>,
     distributed_store: Option<Arc<dyn DistributedStore>>,
+    telemetry_sink: Option<Arc<dyn TelemetrySink>>,
 }
 
 impl BuildSession {
@@ -232,6 +331,7 @@ impl BuildSession {
             Arc::clone(&self.clock),
         )
         .with_distributed_store(self.distributed_store.as_ref().map(Arc::clone))
+        .with_telemetry_sink(self.telemetry_sink.as_ref().map(Arc::clone))
     }
 
     /// Atomically commits all newly staged state entries into [`StateStore`] and

@@ -193,7 +193,7 @@ To execute Path A immediately while laying clean rails for Path B, the recommend
 | **2** | **RFC 0008 — Multi-Protocol AI Ingress** | Anthropic `/v1/messages` frontend + OpenAI `/v1/responses` support (bidirectional translation across backends) | Path A (A1) |
 | **3** | **RFC 0009 — Virtual Keys, TPM Limits, Cost Budgets & Distributed `StateStore`** | Virtual API keys, pricing catalog, cost budgets, TPM/RPM limiter, optional Redis/Valkey `StateStore` | Path A (A2) + Path B |
 | **4** | **RFC 0010 — Smart Routing & Active Upstream Health Checks** | Weighted upstream pools, active HTTP/TCP upstream probes, weighted/TTFT/cost AI routing, multi-protocol capability guards | Path A (A3) + Path B (B1) |
-| **5** | **RFC 0011 — OTLP Observability, AI Cache & Grafana Dashboards** | Bounded async telemetry bus, OpenTelemetry HTTP + GenAI tracing, exact-match `ai-cache`, starter Grafana dashboards | Path A (A3) + Path B (B1) |
+| **5** | **RFC 0011 — OTLP/HTTP Observability & Exact-Match AI Cache** | Zero-dependency bounded async OTLP/HTTP JSON trace exporter, W3C `traceparent` + HTTP & GenAI tracing, exact-match `ai-cache` (in-memory LRU+TTL & optional Redis) | Path A (A3) + Path B (B1) |
 | **6** | **RFC 0012 — Admin Read-Only Inspector UI (`--ui`)** | Opt-in embedded read-only Web UI on Admin listener for live trace waterfalls, snapshot/HookMask graph & AI usage | Path A + Path B |
 | **7** | **RFC 0013 — JWT/OIDC Auth & Kubernetes Gateway API** | JWKS/JWT auth plugin + K8s Gateway API `ConfigProvider` | Path B (B1–B2) |
 | **8** | **RFC 0014 — Wasm Component Model Plugin Host** | Tier 2 hot-reloadable Wasm plugins on `shunt-plugin-sdk` | Path B (B3) |

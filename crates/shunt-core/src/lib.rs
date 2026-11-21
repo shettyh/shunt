@@ -5,6 +5,7 @@
 pub mod body;
 pub mod catch;
 pub mod error;
+pub mod otlp;
 pub mod pipeline;
 pub mod probe;
 pub mod redis;
@@ -17,6 +18,7 @@ pub mod ws;
 
 pub use body::ShuntBody;
 pub use error::CoreError;
+pub use otlp::{OtlpExporterConfig, OtlpExporterStats, OtlpHttpExporter, encode_otlp_traces_json};
 pub use probe::ProbeSupervisor;
 pub use redis::{
     RedisStateStore, RedisStoreConfig, RespError, RespValue, decode_resp_frame,

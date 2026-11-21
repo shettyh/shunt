@@ -15,6 +15,7 @@ toml = "0.8"
 shunt-ai = { path = "../crates/shunt-ai" }
 shunt-config = { path = "../crates/shunt-config" }
 shunt-core = { path = "../crates/shunt-core" }
+shunt-plugin-sdk = { path = "../crates/shunt-plugin-sdk" }
 
 [[bin]]
 name = "fuzz_sse_parser"
@@ -75,6 +76,13 @@ bench = false
 [[bin]]
 name = "fuzz_resp_parser"
 path = "fuzz_targets/fuzz_resp_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_traceparent"
+path = "fuzz_targets/fuzz_traceparent.rs"
 test = false
 doc = false
 bench = false

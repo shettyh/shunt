@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use proptest::prelude::*;
-use shunt_plugin_sdk::{Clock, ManualClock};
+use shunt_plugin_sdk::{Clock, ManualClock, TraceContext};
 use shunt_plugins::rate_limit::{BucketTable, TokenBucket};
 
 #[derive(Debug, Clone)]
@@ -125,5 +125,35 @@ proptest! {
                 }
             }
         }
+    }
+
+    #[test]
+    fn traceparent_parser_never_panics_and_enforces_w3c_invariants(input in ".*") {
+        if let Some(parsed) = TraceContext::parse_traceparent(&input) {
+            prop_assert_ne!(parsed.trace_id, [0u8; 16]);
+            prop_assert_ne!(parsed.parent_id, [0u8; 8]);
+            let child = TraceContext::child_from(parsed, parsed.is_sampled(), None);
+            let formatted = child.format_traceparent();
+            let reparsed = TraceContext::parse_traceparent(&formatted);
+            prop_assert!(reparsed.is_some());
+            let reparsed = reparsed.unwrap();
+            prop_assert_eq!(reparsed.trace_id, parsed.trace_id);
+            prop_assert_eq!(reparsed.parent_id, child.span_id);
+            prop_assert_eq!(reparsed.is_sampled(), child.is_sampled());
+        }
+    }
+
+    #[test]
+    fn trace_id_ratio_sampling_is_monotonic(
+        trace_id in any::<[u8; 16]>(),
+        r1 in 0.0f64..=1.0,
+        r2 in 0.0f64..=1.0,
+    ) {
+        let (low, high) = if r1 <= r2 { (r1, r2) } else { (r2, r1) };
+        if TraceContext::should_sample_trace_id(trace_id, low) {
+            prop_assert!(TraceContext::should_sample_trace_id(trace_id, high));
+        }
+        prop_assert!(!TraceContext::should_sample_trace_id(trace_id, 0.0));
+        prop_assert!(TraceContext::should_sample_trace_id(trace_id, 1.0));
     }
 }

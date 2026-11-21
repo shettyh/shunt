@@ -10,6 +10,7 @@ use shunt_plugin_sdk::{
 use tracing::warn;
 
 use crate::aws_sigv4::{AwsSigV4Credentials, sign_upstream_request};
+use crate::cache::{AiCachePending, AiTranslatedResponseBody};
 use crate::dialects::bedrock::{
     BedrockStreamTranslator, bedrock_converse_path, bedrock_converse_to_openai_response,
     openai_to_bedrock_converse_request,
@@ -1121,7 +1122,7 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                 let upstream_kind = *upstream;
                 let ingress_fmt = *ingress;
                 let resp_status = *status;
-                handle_buffered_json_translation(
+                let res = handle_buffered_json_translation(
                     upstream_kind.label(),
                     buffer,
                     chunk,
@@ -1164,7 +1165,11 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                             }
                         }
                     },
-                )
+                );
+                if end_of_stream && !chunk.is_empty() && ctx.get_ext::<AiCachePending>().is_some() {
+                    ctx.insert_ext(AiTranslatedResponseBody(chunk.clone()));
+                }
+                res
             }
         }
     }

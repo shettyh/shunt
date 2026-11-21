@@ -5,16 +5,19 @@ use std::time::Duration;
 use http::Method;
 use serde::Serialize;
 use shunt_core::{
-    ActiveHealthCheckConfig, ActiveProbeKind, CertStore, GatewaySnapshot, PathMatch,
-    RedisStoreConfig, RouteMatch, RouteSpec, RuntimeRegistry, SnapshotBuilder, TimeoutConfig,
-    UpstreamConfig, UpstreamEndpoint, UpstreamTlsConfig, load_certified_key_pem,
+    ActiveHealthCheckConfig, ActiveProbeKind, CertStore, GatewaySnapshot, OtlpExporterConfig,
+    PathMatch, RedisStoreConfig, RouteMatch, RouteSpec, RuntimeRegistry, SnapshotBuilder,
+    TimeoutConfig, UpstreamConfig, UpstreamEndpoint, UpstreamTlsConfig, load_certified_key_pem,
 };
-use shunt_plugin_sdk::{DistributedStore, HookMask, HttpPlugin, PluginConfig, PluginRegistry};
+use shunt_plugin_sdk::{
+    DistributedStore, HookMask, HttpPlugin, PluginConfig, PluginRegistry, TelemetrySink,
+};
 
 use crate::error::ConfigError;
 use crate::ir::{
     ActiveHealthCheckIr, ActiveProbeKindIr, GatewayConfig, PluginAttachment, RouteIr,
-    ServerTlsConfig, StateBackendKind, StateConfig, UpstreamIr, redact_secrets,
+    ServerTlsConfig, StateBackendKind, StateConfig, TelemetryBackendKind, TelemetryConfig,
+    UpstreamIr, redact_secrets,
 };
 use crate::provider::LoadedConfig;
 
@@ -26,6 +29,7 @@ pub struct SnapshotInspect {
     pub digest: String,
     pub source: String,
     pub state_backend: String,
+    pub telemetry_backend: String,
     pub global_plugins: Vec<PluginInspect>,
     pub upstreams: Vec<UpstreamInspect>,
     pub routes: Vec<RouteInspect>,
@@ -131,10 +135,28 @@ impl SnapshotCompiler {
             }
         };
 
+        // Resolve optional telemetry exporter upfront so invalid env/URL fails cleanly.
+        let (otlp_cfg, telemetry_sink, telemetry_backend): (
+            Option<OtlpExporterConfig>,
+            Option<Arc<dyn TelemetrySink>>,
+            String,
+        ) = if loaded.config.telemetry.enabled {
+            match loaded.config.telemetry.backend {
+                TelemetryBackendKind::OtlpHttp => {
+                    let ocfg = compile_telemetry_config(&loaded.config.telemetry)?;
+                    let exporter = self.runtime_registry.get_or_create_otlp_exporter(&ocfg);
+                    let dyn_sink: Arc<dyn TelemetrySink> = exporter;
+                    (Some(ocfg), Some(dyn_sink), "otlp_http".to_owned())
+                }
+            }
+        } else {
+            (None, None, "disabled".to_owned())
+        };
+
         let version = self.next_version.fetch_add(1, Ordering::Relaxed);
         let build_session = self
             .runtime_registry
-            .begin_build_session_with_distributed(distributed_store);
+            .begin_build_session_with_services(distributed_store, telemetry_sink);
 
         let mut builder = SnapshotBuilder::new(version);
         let mut global_inspect = Vec::new();
@@ -190,6 +212,8 @@ impl SnapshotCompiler {
         // Compilation fully succeeded: atomically commit staged plugin state & GC orphans.
         build_session.commit_gc();
         self.runtime_registry.retain_redis_store(redis_cfg.as_ref());
+        self.runtime_registry
+            .retain_otlp_exporter(otlp_cfg.as_ref());
 
         let mut upstreams_inspect: Vec<UpstreamInspect> = loaded
             .config
@@ -236,6 +260,7 @@ impl SnapshotCompiler {
             digest: loaded.digest.clone(),
             source: loaded.source_name.clone(),
             state_backend,
+            telemetry_backend,
             global_plugins: global_inspect,
             upstreams: upstreams_inspect,
             routes: routes_inspect,
@@ -265,6 +290,52 @@ impl SnapshotCompiler {
                 source,
             })
     }
+}
+
+fn compile_telemetry_config(
+    telemetry: &TelemetryConfig,
+) -> Result<OtlpExporterConfig, ConfigError> {
+    let raw_endpoint = telemetry.endpoint.as_deref().ok_or_else(|| {
+        ConfigError::Validation(vec![
+            "telemetry.endpoint is required when telemetry is enabled".into(),
+        ])
+    })?;
+    let resolved_endpoint = resolve_env_var(raw_endpoint, "telemetry.endpoint")?;
+    let uri: http::Uri = resolved_endpoint.parse().map_err(|e| {
+        ConfigError::Validation(vec![format!(
+            "telemetry.endpoint: invalid URI `{resolved_endpoint}`: {e}"
+        )])
+    })?;
+    let scheme = uri.scheme_str().unwrap_or("");
+    if (scheme != "http" && scheme != "https") || uri.authority().is_none() {
+        return Err(ConfigError::Validation(vec![format!(
+            "telemetry.endpoint: `{resolved_endpoint}` must be a valid http:// or https:// URL"
+        )]));
+    }
+
+    let mut headers = std::collections::BTreeMap::new();
+    for (k, v) in &telemetry.headers {
+        let resolved_val = resolve_env_var(v, &format!("telemetry.headers.{k}"))?;
+        if http::header::HeaderValue::from_str(&resolved_val).is_err() {
+            return Err(ConfigError::Validation(vec![format!(
+                "telemetry.headers.{k}: resolved value is not a valid HTTP header value"
+            )]));
+        }
+        headers.insert(k.clone(), resolved_val);
+    }
+
+    Ok(OtlpExporterConfig {
+        endpoint: resolved_endpoint,
+        service_name: telemetry.service_name.clone(),
+        service_version: env!("CARGO_PKG_VERSION").to_owned(),
+        resource_attributes: telemetry.resource_attributes.clone(),
+        headers,
+        queue_capacity: telemetry.queue_capacity.max(1),
+        batch_size: telemetry.batch_size.max(1),
+        flush_interval: Duration::from_millis(telemetry.flush_interval_ms.max(1)),
+        export_timeout: Duration::from_millis(telemetry.export_timeout_ms.max(1)),
+        insecure_skip_verify: telemetry.insecure_skip_verify,
+    })
 }
 
 fn compile_redis_state_config(state: &StateConfig) -> Result<RedisStoreConfig, ConfigError> {

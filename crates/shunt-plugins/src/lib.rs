@@ -10,6 +10,7 @@ pub mod cors;
 pub mod dev_waterfall;
 pub mod header_rewrite;
 pub mod metrics;
+pub mod otel_trace;
 pub mod rate_limit;
 pub mod request_id;
 
@@ -23,6 +24,7 @@ pub use cors::{CorsFactory, CorsPlugin};
 pub use dev_waterfall::{DevWaterfallPlugin, WaterfallSink, format_waterfall};
 pub use header_rewrite::{HeaderRewriteFactory, HeaderRewritePlugin};
 pub use metrics::{MetricsFactory, MetricsPlugin, PrometheusMetrics};
+pub use otel_trace::{OtelTraceFactory, OtelTracePlugin};
 pub use rate_limit::{RateLimitFactory, RateLimitPlugin};
 pub use request_id::{RequestId, RequestIdFactory, RequestIdPlugin};
 
@@ -35,5 +37,6 @@ pub fn register_builtin_plugins(registry: &mut PluginRegistry, metrics: Arc<Prom
         .register(RateLimitFactory)
         .register(HeaderRewriteFactory)
         .register(CorsFactory)
+        .register(OtelTraceFactory)
         .register(MetricsFactory::new(metrics));
 }

@@ -178,6 +178,18 @@ fn rebind_config_to_mocks(
     config.admin.enabled = true;
     config.admin.listen = "127.0.0.1:0".to_owned();
 
+    if let Some(ep) = config.telemetry.endpoint.as_deref()
+        && let Some(rest) = ep.strip_prefix("mock://")
+    {
+        let (mock_name, suffix) = match rest.split_once('/') {
+            Some((name, path)) => (name, format!("/{path}")),
+            None => (rest, String::new()),
+        };
+        if let Some(base_url) = mock_endpoints.get(mock_name).and_then(|v| v.first()) {
+            config.telemetry.endpoint = Some(format!("{}{suffix}", base_url.trim_end_matches('/')));
+        }
+    }
+
     for up in &mut config.upstreams {
         if let Some(endpoints) = mock_endpoints.get(&up.name) {
             let prev = std::mem::take(&mut up.endpoints);
@@ -436,6 +448,7 @@ async fn run_case(
     let m_clone = Arc::clone(&metrics);
     let ai_m_clone = Arc::clone(&ai_metrics);
     let ctrl_metrics = Arc::clone(&controller);
+    let rt_metrics = Arc::clone(&runtime_registry);
     let render_all_metrics: MetricsRenderer = Arc::new(move || {
         let mut out = m_clone.render_prometheus();
         let up_out = ctrl_metrics
@@ -446,6 +459,13 @@ async fn run_case(
                 out.push('\n');
             }
             out.push_str(&up_out);
+        }
+        let tel_out = rt_metrics.render_telemetry_prometheus();
+        if !tel_out.is_empty() {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&tel_out);
         }
         let ai_out = ai_m_clone.render_prometheus();
         if !ai_out.is_empty() {
@@ -567,6 +587,14 @@ async fn run_case(
 
             match send_gateway_request(&client, gw_addr, req_spec).await {
                 Ok(resp_outcome) => {
+                    if step.flush_telemetry || runtime_registry.has_active_telemetry() {
+                        // Allow off-hot-path `on_complete` tasks to finish enriching & dropping
+                        // `SpanHandle` before flushing the OTLP batch worker.
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                        runtime_registry
+                            .flush_telemetry(Duration::from_secs(2))
+                            .await;
+                    }
                     if let Some(expect) = &step.expect {
                         check_expectations(
                             &step_label,
@@ -586,6 +614,11 @@ async fn run_case(
                     failures.push(format!("{step_label}: HTTP request failed: {e}"));
                 }
             }
+        } else if step.flush_telemetry {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            runtime_registry
+                .flush_telemetry(Duration::from_secs(2))
+                .await;
         }
     }
 

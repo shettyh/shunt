@@ -312,7 +312,7 @@ async fn run_server(config_path: PathBuf, dev_mode: bool, watch_files: bool) -> 
     };
 
     let (plugins, runtime, metrics, ai_metrics) = build_registries();
-    let mut compiler = SnapshotCompiler::new(plugins, runtime);
+    let mut compiler = SnapshotCompiler::new(plugins, Arc::clone(&runtime));
     if dev_mode {
         compiler = compiler.with_extra_global_plugin(Arc::new(DevWaterfallPlugin::stderr()));
     }
@@ -370,6 +370,7 @@ async fn run_server(config_path: PathBuf, dev_mode: bool, watch_files: bool) -> 
         let metrics_clone = Arc::clone(&metrics);
         let ai_metrics_clone = Arc::clone(&ai_metrics);
         let controller_metrics = Arc::clone(&controller);
+        let runtime_metrics = Arc::clone(&runtime);
         let admin = AdminServer::new(
             Arc::clone(&controller),
             Arc::new(move || {
@@ -382,6 +383,13 @@ async fn run_server(config_path: PathBuf, dev_mode: bool, watch_files: bool) -> 
                         out.push('\n');
                     }
                     out.push_str(&up_out);
+                }
+                let tel_out = runtime_metrics.render_telemetry_prometheus();
+                if !tel_out.is_empty() {
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push_str(&tel_out);
                 }
                 let ai_out = ai_metrics_clone.render_prometheus();
                 if !ai_out.is_empty() {
@@ -453,6 +461,7 @@ async fn run_server(config_path: PathBuf, dev_mode: bool, watch_files: bool) -> 
         admin.shutdown().await;
     }
     let clean = server_handle.shutdown().await;
+    runtime.flush_telemetry(Duration::from_secs(2)).await;
     if clean {
         info!("graceful shutdown complete");
     } else {
@@ -492,10 +501,11 @@ async fn wait_for_signals(controller: Arc<ReloadController>) {
 
 fn print_snapshot_table(inspect: &SnapshotInspect) {
     println!(
-        "Snapshot v{} (digest: {}, state: {})",
+        "Snapshot v{} (digest: {}, state: {}, telemetry: {})",
         inspect.version,
         &inspect.digest[..inspect.digest.len().min(12)],
-        inspect.state_backend
+        inspect.state_backend,
+        inspect.telemetry_backend
     );
 
     if !inspect.global_plugins.is_empty() {

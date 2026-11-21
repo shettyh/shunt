@@ -1141,9 +1141,22 @@ impl Connection for ShuntStream {
 }
 
 #[derive(Clone)]
-struct ShuntConnector {
+pub(crate) struct ShuntConnector {
     connect_timeout: Duration,
     tls_connector: TlsConnector,
+}
+
+impl ShuntConnector {
+    pub(crate) fn new(
+        connect_timeout: Duration,
+        tls_cfg: &UpstreamTlsConfig,
+    ) -> Result<Self, CoreError> {
+        let client_cfg = tls_cfg.build_client_config(None)?;
+        Ok(Self {
+            connect_timeout,
+            tls_connector: TlsConnector::from(client_cfg),
+        })
+    }
 }
 
 impl Service<Uri> for ShuntConnector {
