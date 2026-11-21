@@ -638,12 +638,20 @@ fn contains_first_token(val: &Value) -> bool {
         }
     }
 
-    // Anthropic streaming chunk (in case ai-usage-tracker runs before ai-provider-adapter)
-    val.get("type").and_then(Value::as_str) == Some("content_block_delta")
+    // Anthropic / OpenAI Responses streaming chunks
+    matches!(
+        val.get("type").and_then(Value::as_str),
+        Some(
+            "content_block_delta"
+                | "response.output_text.delta"
+                | "response.function_call_arguments.delta"
+        )
+    )
 }
 
 fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {
-    // Model name (OpenAI top-level, Gemini modelVersion, or Anthropic message_start.message.model)
+    // Model name (OpenAI top-level, Gemini modelVersion, Anthropic message_start.message.model,
+    // or OpenAI Responses SSE response.completed / response.created)
     if let Some(m) = val.get("model").and_then(Value::as_str) {
         usage.served_model = Some(m.to_owned());
     } else if let Some(m) = val.get("modelVersion").and_then(Value::as_str) {
@@ -654,9 +662,15 @@ fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {
         .and_then(Value::as_str)
     {
         usage.served_model = Some(m.to_owned());
+    } else if let Some(m) = val
+        .get("response")
+        .and_then(|resp| resp.get("model"))
+        .and_then(Value::as_str)
+    {
+        usage.served_model = Some(m.to_owned());
     }
 
-    // Top-level `usage` (OpenAI chat/embeddings, Anthropic non-stream/message_delta, Bedrock Converse)
+    // Top-level `usage` (OpenAI chat/responses/embeddings, Anthropic non-stream/message_delta, Bedrock Converse)
     if let Some(u) = val.get("usage").and_then(Value::as_object) {
         if let Some(p) = u.get("prompt_tokens").and_then(Value::as_u64) {
             usage.prompt_tokens = Some(p);
@@ -681,6 +695,23 @@ fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {
             usage.completion_tokens = Some(o);
         }
         if let Some(t) = u.get("totalTokens").and_then(Value::as_u64) {
+            usage.total_tokens = Some(t);
+        }
+    }
+
+    // OpenAI Responses SSE (`response.completed` / `response.incomplete`): response.usage
+    if let Some(u) = val
+        .get("response")
+        .and_then(|r| r.get("usage"))
+        .and_then(Value::as_object)
+    {
+        if let Some(i) = u.get("input_tokens").and_then(Value::as_u64) {
+            usage.prompt_tokens = Some(i);
+        }
+        if let Some(o) = u.get("output_tokens").and_then(Value::as_u64) {
+            usage.completion_tokens = Some(o);
+        }
+        if let Some(t) = u.get("total_tokens").and_then(Value::as_u64) {
             usage.total_tokens = Some(t);
         }
     }

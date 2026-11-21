@@ -1,9 +1,11 @@
-# Multi-Provider Shunt AI Gateway configuration (RFC 0007)
+# Multi-Provider Shunt AI Gateway configuration (RFC 0007 + RFC 0008)
 #
-# Serves a unified OpenAI-compatible API surface on `/v1`:
+# Serves a unified multi-protocol AI API surface on `/v1`:
 #   - GET  /v1/models
 #   - GET  /v1/models/{id}
-#   - POST /v1/chat/completions
+#   - POST /v1/chat/completions  (OpenAI Chat Completions)
+#   - POST /v1/messages          (Anthropic Messages — Claude Code / Anthropic SDKs)
+#   - POST /v1/responses         (OpenAI Responses — Codex CLI / OpenAI Agents SDK)
 #   - POST /v1/embeddings
 #
 # Across OpenAI, Anthropic, local Ollama, Groq, Azure OpenAI, Google Gemini (AI Studio
@@ -136,6 +138,7 @@ response_headers = true
 
 [routes.plugins.config.providers.openai]
 dialect = "openai_compatible"
+responses_path = "/v1/responses"
 auth = { type = "bearer", api_key = "env:OPENAI_API_KEY" }
 include_stream_usage = true
 

@@ -58,5 +58,19 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_openai_to_anthropic_sse"
+path = "fuzz_targets/fuzz_openai_to_anthropic_sse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_chat_to_responses_sse"
+path = "fuzz_targets/fuzz_chat_to_responses_sse.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

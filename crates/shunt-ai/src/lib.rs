@@ -21,6 +21,7 @@ pub mod aws_eventstream;
 pub mod aws_sigv4;
 pub mod dialects;
 pub mod failover;
+pub mod ingress;
 pub mod model_router;
 pub mod provider_adapter;
 pub mod sse;
@@ -47,6 +48,14 @@ pub use dialects::gemini::{
     openai_to_gemini_embeddings_request, openai_to_gemini_request,
 };
 pub use failover::{AiFailoverFactory, AiFailoverPlugin};
+pub use ingress::anthropic::{
+    OpenAiToAnthropicSseTranslator, anthropic_to_openai_request,
+    map_openai_finish_to_anthropic_stop, openai_to_anthropic_response, rewrite_anthropic_request,
+};
+pub use ingress::responses::{
+    ChatToResponsesSseTranslator, chat_to_responses_response, responses_to_chat_request,
+    rewrite_openai_responses_request,
+};
 pub use model_router::{AiModelRouterFactory, AiModelRouterPlugin, ModelRule, TargetSpec};
 pub use provider_adapter::{
     AiProviderAdapterFactory, AiProviderAdapterPlugin, ProviderAuthConfig, ProviderInstanceConfig,
@@ -58,7 +67,8 @@ pub use translate::{
 };
 pub use types::{
     AiCapability, AiEndpointKind, AiFailoverHistory, AiRequestMeta, AiTarget, AiUsage,
-    AiUsageReport, DetectedEndpoint, FailoverEvent, ProviderDialect,
+    AiUsageReport, DetectedEndpoint, FailoverEvent, ProviderDialect, anthropic_error_response,
+    endpoint_error_response, openai_error_response,
 };
 pub use usage_tracker::{
     AiMetrics, AiMetricsSnapshot, AiUsageTrackerFactory, AiUsageTrackerPlugin, UsageSink,

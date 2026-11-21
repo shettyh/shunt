@@ -7,6 +7,12 @@ use shunt_ai::aws_eventstream::{AwsEventStreamDecoder, encode_eventstream_frame}
 use shunt_ai::dialects::bedrock::{BedrockStreamTranslator, openai_to_bedrock_converse_request};
 use shunt_ai::dialects::gemini::{GeminiSseTranslator, openai_to_gemini_request};
 use shunt_ai::failover::{FailoverCircuitState, compute_cooldown};
+use shunt_ai::ingress::anthropic::{
+    OpenAiToAnthropicSseTranslator, anthropic_to_openai_request, openai_to_anthropic_response,
+};
+use shunt_ai::ingress::responses::{
+    ChatToResponsesSseTranslator, chat_to_responses_response, responses_to_chat_request,
+};
 use shunt_ai::sse::SseParser;
 use shunt_ai::translate::{AnthropicSseTranslator, openai_to_anthropic_request};
 use shunt_plugin_sdk::{Clock, ManualClock};
@@ -751,5 +757,324 @@ proptest! {
         let _ = openai_to_bedrock_converse_request(&raw);
         let mut dec = AwsEventStreamDecoder::new();
         let _ = dec.push(&raw);
+    }
+
+    #[test]
+    fn openai_to_anthropic_sse_preserves_text_tools_usage_and_lifecycle(
+        texts in prop::collection::vec("[a-zA-Z0-9 .,!?]{1,20}", 1..8),
+        tool_arg_parts in prop::collection::vec("[a-z0-9{}:\", ]{1,12}", 1..4),
+        input_tokens in 1u64..10_000,
+        output_tokens in 1u64..10_000,
+        chunk_sizes in prop::collection::vec(1usize..17, 1..64),
+    ) {
+        let expected_text: String = texts.concat();
+        let expected_args: String = tool_arg_parts.concat();
+
+        let mut sse = String::new();
+        for (i, t) in texts.iter().enumerate() {
+            let delta = if i == 0 {
+                json!({ "role": "assistant", "content": t })
+            } else {
+                json!({ "content": t })
+            };
+            let chunk = json!({
+                "id": "chatcmpl-prop",
+                "object": "chat.completion.chunk",
+                "model": "gpt-4o",
+                "choices": [{ "index": 0, "delta": delta, "finish_reason": Value::Null }]
+            });
+            sse.push_str(&format!("data: {chunk}\n\n"));
+        }
+        for (i, part) in tool_arg_parts.iter().enumerate() {
+            let tc = if i == 0 {
+                json!({
+                    "index": 0,
+                    "id": "call_prop_1",
+                    "type": "function",
+                    "function": { "name": "calc", "arguments": part }
+                })
+            } else {
+                json!({
+                    "index": 0,
+                    "function": { "arguments": part }
+                })
+            };
+            let chunk = json!({
+                "id": "chatcmpl-prop",
+                "object": "chat.completion.chunk",
+                "model": "gpt-4o",
+                "choices": [{ "index": 0, "delta": { "tool_calls": [tc] }, "finish_reason": Value::Null }]
+            });
+            sse.push_str(&format!("data: {chunk}\n\n"));
+        }
+        sse.push_str(&format!(
+            "data: {}\n\n",
+            json!({
+                "id": "chatcmpl-prop",
+                "object": "chat.completion.chunk",
+                "model": "gpt-4o",
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }]
+            })
+        ));
+        sse.push_str(&format!(
+            "data: {}\n\n",
+            json!({
+                "id": "chatcmpl-prop",
+                "object": "chat.completion.chunk",
+                "model": "gpt-4o",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": input_tokens,
+                    "completion_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens
+                }
+            })
+        ));
+        sse.push_str("data: [DONE]\n\n");
+
+        let mut tr = OpenAiToAnthropicSseTranslator::new("fallback");
+        let mut out_bytes = Vec::new();
+        for c in partition_bytes(sse.as_bytes(), &chunk_sizes) {
+            out_bytes.extend_from_slice(&tr.push_chunk(&c));
+        }
+        out_bytes.extend_from_slice(&tr.finish());
+
+        let mut parser = SseParser::new();
+        let mut events = parser.push(&out_bytes);
+        events.extend(parser.finish());
+
+        prop_assert!(events.len() >= 4);
+        prop_assert_eq!(events.first().unwrap().event.as_deref(), Some("message_start"));
+        prop_assert_eq!(events.last().unwrap().event.as_deref(), Some("message_stop"));
+
+        let mut starts = 0usize;
+        let mut stops = 0usize;
+        let mut got_text = String::new();
+        let mut got_args = String::new();
+        let mut got_usage = None;
+        for ev in &events {
+            let v: Value = serde_json::from_str(&ev.data).expect("valid JSON");
+            match ev.event.as_deref() {
+                Some("content_block_start") => starts += 1,
+                Some("content_block_stop") => stops += 1,
+                Some("content_block_delta") => match v["delta"]["type"].as_str() {
+                    Some("text_delta") => got_text.push_str(v["delta"]["text"].as_str().unwrap()),
+                    Some("input_json_delta") => {
+                        got_args.push_str(v["delta"]["partial_json"].as_str().unwrap())
+                    }
+                    _ => {}
+                },
+                Some("message_delta") => {
+                    prop_assert_eq!(v["delta"]["stop_reason"].as_str(), Some("tool_use"));
+                    got_usage = Some((
+                        v["usage"]["input_tokens"].as_u64().unwrap(),
+                        v["usage"]["output_tokens"].as_u64().unwrap(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        prop_assert_eq!(starts, stops);
+        prop_assert_eq!(starts, 2);
+        prop_assert_eq!(got_text, expected_text);
+        prop_assert_eq!(got_args, expected_args);
+        prop_assert_eq!(got_usage, Some((input_tokens, output_tokens)));
+    }
+
+    #[test]
+    fn chat_to_responses_sse_has_monotonic_sequence_and_preserves_content(
+        texts in prop::collection::vec("[a-zA-Z0-9 .,!?]{1,20}", 1..8),
+        input_tokens in 1u64..10_000,
+        output_tokens in 1u64..10_000,
+        chunk_sizes in prop::collection::vec(1usize..17, 1..64),
+    ) {
+        let expected_text: String = texts.concat();
+
+        let mut sse = String::new();
+        for t in &texts {
+            let chunk = json!({
+                "id": "chatcmpl-resp-prop",
+                "object": "chat.completion.chunk",
+                "created": 1700000100,
+                "model": "gpt-4o",
+                "choices": [{ "index": 0, "delta": { "content": t }, "finish_reason": Value::Null }]
+            });
+            sse.push_str(&format!("data: {chunk}\n\n"));
+        }
+        sse.push_str(&format!(
+            "data: {}\n\n",
+            json!({
+                "id": "chatcmpl-resp-prop",
+                "object": "chat.completion.chunk",
+                "created": 1700000100,
+                "model": "gpt-4o",
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+                "usage": {
+                    "prompt_tokens": input_tokens,
+                    "completion_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens
+                }
+            })
+        ));
+        sse.push_str("data: [DONE]\n\n");
+
+        let mut tr = ChatToResponsesSseTranslator::new("fallback");
+        let mut out_bytes = Vec::new();
+        for c in partition_bytes(sse.as_bytes(), &chunk_sizes) {
+            out_bytes.extend_from_slice(&tr.push_chunk(&c));
+        }
+        out_bytes.extend_from_slice(&tr.finish());
+
+        let mut parser = SseParser::new();
+        let mut events = parser.push(&out_bytes);
+        events.extend(parser.finish());
+
+        prop_assert!(events.len() >= 6);
+        prop_assert_eq!(events[0].event.as_deref(), Some("response.created"));
+        prop_assert_eq!(events[1].event.as_deref(), Some("response.in_progress"));
+        prop_assert_eq!(events.last().unwrap().event.as_deref(), Some("response.completed"));
+
+        let mut got_text = String::new();
+        for (idx, ev) in events.iter().enumerate() {
+            let v: Value = serde_json::from_str(&ev.data).expect("valid JSON");
+            prop_assert_eq!(v["sequence_number"].as_u64(), Some(idx as u64));
+            if ev.event.as_deref() == Some("response.output_text.delta") {
+                got_text.push_str(v["delta"].as_str().unwrap());
+            }
+        }
+
+        let completed: Value = serde_json::from_str(&events.last().unwrap().data).unwrap();
+        prop_assert_eq!(got_text, expected_text.clone());
+        prop_assert_eq!(
+            completed["response"]["output"][0]["content"][0]["text"].as_str(),
+            Some(expected_text.as_str())
+        );
+        prop_assert_eq!(completed["response"]["usage"]["input_tokens"].as_u64(), Some(input_tokens));
+        prop_assert_eq!(completed["response"]["usage"]["output_tokens"].as_u64(), Some(output_tokens));
+    }
+
+    #[test]
+    fn composed_bedrock_to_anthropic_and_gemini_to_responses_are_chunk_invariant(
+        texts in prop::collection::vec("[a-zA-Z0-9 ]{1,16}", 1..6),
+        chunk_sizes in prop::collection::vec(1usize..13, 1..48),
+    ) {
+        let expected_text: String = texts.concat();
+
+        // 1. Bedrock binary EventStream -> Canonical OpenAI SSE -> Anthropic SSE
+        let mut bedrock_wire = Vec::new();
+        bedrock_wire.extend_from_slice(&encode_eventstream_frame(
+            &[(":message-type", "event"), (":event-type", "messageStart")],
+            br#"{"role":"assistant"}"#,
+        ));
+        for t in &texts {
+            let p = serde_json::to_vec(&json!({ "contentBlockIndex": 0, "delta": { "text": t } })).unwrap();
+            bedrock_wire.extend_from_slice(&encode_eventstream_frame(
+                &[(":message-type", "event"), (":event-type", "contentBlockDelta")],
+                &p,
+            ));
+        }
+        bedrock_wire.extend_from_slice(&encode_eventstream_frame(
+            &[(":message-type", "event"), (":event-type", "messageStop")],
+            br#"{"stopReason":"end_turn"}"#,
+        ));
+        bedrock_wire.extend_from_slice(&encode_eventstream_frame(
+            &[(":message-type", "event"), (":event-type", "metadata")],
+            br#"{"usage":{"inputTokens":5,"outputTokens":4,"totalTokens":9}}"#,
+        ));
+
+        let mut up = BedrockStreamTranslator::new("bedrock-model");
+        let mut ing = OpenAiToAnthropicSseTranslator::new("bedrock-model");
+        let mut out = Vec::new();
+        for c in partition_bytes(&bedrock_wire, &chunk_sizes) {
+            let mid = up.push_chunk(&c);
+            if !mid.is_empty() {
+                out.extend_from_slice(&ing.push_chunk(&mid));
+            }
+        }
+        let up_tail = up.finish();
+        if !up_tail.is_empty() {
+            out.extend_from_slice(&ing.push_chunk(&up_tail));
+        }
+        out.extend_from_slice(&ing.finish());
+
+        let mut parser = SseParser::new();
+        let mut events = parser.push(&out);
+        events.extend(parser.finish());
+        prop_assert_eq!(events.first().unwrap().event.as_deref(), Some("message_start"));
+        prop_assert_eq!(events.last().unwrap().event.as_deref(), Some("message_stop"));
+        let mut got_anth_text = String::new();
+        for ev in &events {
+            if ev.event.as_deref() == Some("content_block_delta") {
+                let v: Value = serde_json::from_str(&ev.data).unwrap();
+                if let Some(t) = v["delta"]["text"].as_str() {
+                    got_anth_text.push_str(t);
+                }
+            }
+        }
+        prop_assert_eq!(got_anth_text, expected_text.clone());
+
+        // 2. Gemini SSE -> Canonical OpenAI SSE -> OpenAI Responses SSE
+        let mut gem_wire = String::new();
+        for (idx, t) in texts.iter().enumerate() {
+            let is_last = idx + 1 == texts.len();
+            let frame = if is_last {
+                json!({
+                    "responseId": "gem_comp",
+                    "modelVersion": "gemini-2.5-flash",
+                    "candidates": [{ "content": { "role": "model", "parts": [{ "text": t }] }, "finishReason": "STOP" }],
+                    "usageMetadata": { "promptTokenCount": 4, "candidatesTokenCount": 3, "totalTokenCount": 7 }
+                })
+            } else {
+                json!({
+                    "responseId": "gem_comp",
+                    "modelVersion": "gemini-2.5-flash",
+                    "candidates": [{ "content": { "role": "model", "parts": [{ "text": t }] } }]
+                })
+            };
+            gem_wire.push_str(&format!("data: {frame}\n\n"));
+        }
+
+        let mut g_up = GeminiSseTranslator::new("gemini-2.5-flash");
+        let mut r_ing = ChatToResponsesSseTranslator::new("gemini-2.5-flash");
+        let mut r_out = Vec::new();
+        for c in partition_bytes(gem_wire.as_bytes(), &chunk_sizes) {
+            let mid = g_up.push_chunk(&c);
+            if !mid.is_empty() {
+                r_out.extend_from_slice(&r_ing.push_chunk(&mid));
+            }
+        }
+        let g_tail = g_up.finish();
+        if !g_tail.is_empty() {
+            r_out.extend_from_slice(&r_ing.push_chunk(&g_tail));
+        }
+        r_out.extend_from_slice(&r_ing.finish());
+
+        let mut r_parser = SseParser::new();
+        let mut r_events = r_parser.push(&r_out);
+        r_events.extend(r_parser.finish());
+        prop_assert_eq!(r_events.last().unwrap().event.as_deref(), Some("response.completed"));
+        let completed: Value = serde_json::from_str(&r_events.last().unwrap().data).unwrap();
+        prop_assert_eq!(
+            completed["response"]["output"][0]["content"][0]["text"].as_str(),
+            Some(expected_text.as_str())
+        );
+    }
+
+    #[test]
+    fn ingress_translators_never_panic_on_arbitrary_bytes(
+        raw in prop::collection::vec(any::<u8>(), 0..256),
+    ) {
+        let _ = anthropic_to_openai_request(&raw, "m");
+        let _ = openai_to_anthropic_response(&raw, http::StatusCode::OK, "m");
+        let _ = responses_to_chat_request(&raw, "m");
+        let _ = chat_to_responses_response(&raw, http::StatusCode::OK, "m");
+
+        let mut a_sse = OpenAiToAnthropicSseTranslator::new("m");
+        let _ = a_sse.push_chunk(&raw);
+        let _ = a_sse.finish();
+
+        let mut r_sse = ChatToResponsesSseTranslator::new("m");
+        let _ = r_sse.push_chunk(&raw);
+        let _ = r_sse.finish();
     }
 }

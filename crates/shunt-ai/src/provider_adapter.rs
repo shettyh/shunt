@@ -19,12 +19,20 @@ use crate::dialects::gemini::{
     gemini_to_openai_embeddings_response, gemini_to_openai_response,
     openai_to_gemini_embeddings_request, openai_to_gemini_request,
 };
+use crate::ingress::anthropic::{
+    OpenAiToAnthropicSseTranslator, anthropic_to_openai_request, openai_to_anthropic_response,
+    rewrite_anthropic_request,
+};
+use crate::ingress::responses::{
+    ChatToResponsesSseTranslator, chat_to_responses_response, responses_to_chat_request,
+    rewrite_openai_responses_request,
+};
 use crate::translate::{
     AnthropicSseTranslator, anthropic_to_openai_response, openai_to_anthropic_request,
     rewrite_openai_embeddings_request, rewrite_openai_request,
 };
 use crate::types::{
-    AiEndpointKind, AiRequestMeta, ProviderDialect, openai_error_response,
+    AiEndpointKind, AiRequestMeta, ProviderDialect, endpoint_error_response,
     percent_encode_path_segment, resolve_env_secret,
 };
 
@@ -86,6 +94,12 @@ pub struct ProviderInstanceConfig {
     /// Override embeddings path (used by `openai_compatible`).
     #[serde(default)]
     pub embeddings_path: Option<String>,
+    /// Optional native OpenAI Responses API path (e.g., `"/v1/responses"` or
+    /// `"/openai/v1/responses"`). When configured on `openai_compatible` or `azure_openai`,
+    /// `POST /v1/responses` uses zero-translation native passthrough; when omitted,
+    /// `/v1/responses` transparently translates through Chat Completions.
+    #[serde(default)]
+    pub responses_path: Option<String>,
     /// OpenAI-compatible: inject `stream_options.include_usage = true` on streaming chat (default: true).
     #[serde(default = "default_true")]
     pub include_stream_usage: bool,
@@ -150,6 +164,7 @@ struct CompiledProvider {
     auth: CompiledAuth,
     chat_path: Uri,
     embeddings_path: Uri,
+    responses_path: Option<Uri>,
     include_stream_usage: bool,
     organization: Option<HeaderValue>,
     project: Option<HeaderValue>,
@@ -160,31 +175,107 @@ struct CompiledProvider {
     extra_headers: Vec<(HeaderName, HeaderValue)>,
 }
 
+/// Target client ingress response format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IngressResponseFormat {
+    OpenAiChat,
+    AnthropicMessages,
+    OpenAiResponses,
+}
+
+/// Stage 1 of streaming response translation: upstream wire format -> canonical OpenAI SSE.
+#[derive(Debug, Clone)]
+enum UpstreamStreamStage {
+    OpenAiSse,
+    AnthropicSse(Box<AnthropicSseTranslator>),
+    GeminiSse(Box<GeminiSseTranslator>),
+    BedrockStream(Box<BedrockStreamTranslator>),
+}
+
+impl UpstreamStreamStage {
+    fn push_chunk(&mut self, chunk: &Bytes) -> Bytes {
+        match self {
+            UpstreamStreamStage::OpenAiSse => chunk.clone(),
+            UpstreamStreamStage::AnthropicSse(tr) => tr.push_chunk(chunk),
+            UpstreamStreamStage::GeminiSse(tr) => tr.push_chunk(chunk),
+            UpstreamStreamStage::BedrockStream(tr) => tr.push_chunk(chunk),
+        }
+    }
+
+    fn finish(&mut self) -> Bytes {
+        match self {
+            UpstreamStreamStage::OpenAiSse => Bytes::new(),
+            UpstreamStreamStage::AnthropicSse(tr) => tr.finish(),
+            UpstreamStreamStage::GeminiSse(tr) => tr.finish(),
+            UpstreamStreamStage::BedrockStream(tr) => tr.finish(),
+        }
+    }
+}
+
+/// Stage 2 of streaming response translation: canonical OpenAI SSE -> client ingress SSE.
+#[derive(Debug, Clone)]
+enum IngressStreamStage {
+    Identity,
+    ToAnthropic(Box<OpenAiToAnthropicSseTranslator>),
+    ToResponses(Box<ChatToResponsesSseTranslator>),
+}
+
+impl IngressStreamStage {
+    fn push_chunk(&mut self, chunk: &Bytes) -> Bytes {
+        match self {
+            IngressStreamStage::Identity => chunk.clone(),
+            IngressStreamStage::ToAnthropic(tr) => tr.push_chunk(chunk),
+            IngressStreamStage::ToResponses(tr) => tr.push_chunk(chunk),
+        }
+    }
+
+    fn finish(&mut self) -> Bytes {
+        match self {
+            IngressStreamStage::Identity => Bytes::new(),
+            IngressStreamStage::ToAnthropic(tr) => tr.finish(),
+            IngressStreamStage::ToResponses(tr) => tr.finish(),
+        }
+    }
+}
+
+/// Stage 1 kind for buffered non-streaming JSON responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpstreamJsonKind {
+    OpenAi,
+    Anthropic,
+    Gemini,
+    GeminiEmbeddings,
+    Bedrock,
+}
+
+impl UpstreamJsonKind {
+    const fn label(self) -> &'static str {
+        match self {
+            UpstreamJsonKind::OpenAi => "OpenAI",
+            UpstreamJsonKind::Anthropic => "Anthropic",
+            UpstreamJsonKind::Gemini => "Gemini",
+            UpstreamJsonKind::GeminiEmbeddings => "Gemini embeddings",
+            UpstreamJsonKind::Bedrock => "Bedrock",
+        }
+    }
+}
+
 /// Per-request response translation state stored in `RequestCtx::extensions`.
 #[derive(Debug, Clone)]
 enum AdapterResponseState {
+    /// Native same-protocol passthrough (zero parsing/copy overhead).
     Passthrough,
-    AnthropicSse(Box<AnthropicSseTranslator>),
-    AnthropicJson {
+    /// Two-stage live streaming translator: upstream -> canonical OpenAI SSE -> ingress SSE.
+    Streaming {
+        upstream: UpstreamStreamStage,
+        ingress: IngressStreamStage,
+    },
+    /// Two-stage buffered JSON translator: upstream JSON -> canonical OpenAI JSON -> ingress JSON.
+    BufferedJson {
+        upstream: UpstreamJsonKind,
+        ingress: IngressResponseFormat,
         status: StatusCode,
         fallback_model: String,
-        buffer: Vec<u8>,
-    },
-    GeminiSse(Box<GeminiSseTranslator>),
-    GeminiJson {
-        status: StatusCode,
-        fallback_model: String,
-        buffer: Vec<u8>,
-    },
-    GeminiEmbeddingsJson {
-        status: StatusCode,
-        model: String,
-        buffer: Vec<u8>,
-    },
-    BedrockStream(Box<BedrockStreamTranslator>),
-    BedrockJson {
-        status: StatusCode,
-        model: String,
         buffer: Vec<u8>,
     },
 }
@@ -376,6 +467,14 @@ fn compile_provider(
             message: format!("invalid {prefix}.embeddings_path `{raw_emb_path}`: {e}"),
         })?;
 
+    let responses_path: Option<Uri> = match cfg.responses_path.as_deref() {
+        Some(raw) => Some(raw.parse().map_err(|e| PluginBuildError::BuildFailed {
+            plugin: plugin.to_owned(),
+            message: format!("invalid {prefix}.responses_path `{raw}`: {e}"),
+        })?),
+        None => None,
+    };
+
     let organization = parse_optional_header(
         plugin,
         &format!("{prefix}.organization"),
@@ -401,6 +500,7 @@ fn compile_provider(
         auth,
         chat_path,
         embeddings_path,
+        responses_path,
         include_stream_usage: cfg.include_stream_usage,
         organization,
         project,
@@ -489,7 +589,8 @@ impl HttpPlugin for AiProviderAdapterPlugin {
         };
 
         let Some(provider) = self.providers.get(&target.provider) else {
-            let resp = openai_error_response(
+            let resp = endpoint_error_response(
+                endpoint,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
                 Some("provider_not_configured"),
@@ -499,6 +600,24 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                 ),
             );
             return HookResult::Ready(Flow::Respond(resp));
+        };
+
+        let is_native_anthropic = endpoint == AiEndpointKind::AnthropicMessages
+            && provider.dialect == ProviderDialect::Anthropic;
+        let is_native_responses = endpoint == AiEndpointKind::OpenAiResponses
+            && matches!(
+                provider.dialect,
+                ProviderDialect::OpenAiCompatible | ProviderDialect::AzureOpenAi
+            )
+            && provider.responses_path.is_some();
+
+        // Preserve client `anthropic-version` / `anthropic-beta` only on native Anthropic passthrough.
+        let client_anthropic_version = if is_native_anthropic {
+            req.headers
+                .get(HeaderName::from_static("anthropic-version"))
+                .cloned()
+        } else {
+            None
         };
 
         // Strip downstream credentials & any prior-attempt provider headers, and disable
@@ -513,6 +632,12 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             .remove(HeaderName::from_static("x-amz-security-token"));
         req.headers
             .remove(HeaderName::from_static("x-amz-content-sha256"));
+        if !is_native_anthropic {
+            req.headers
+                .remove(HeaderName::from_static("anthropic-version"));
+            req.headers
+                .remove(HeaderName::from_static("anthropic-beta"));
+        }
         req.headers.insert(
             header::ACCEPT_ENCODING,
             HeaderValue::from_static("identity"),
@@ -530,6 +655,64 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             req.headers.insert(k.clone(), v.clone());
         }
 
+        // Fast path 1: Native Anthropic `/v1/messages` -> Anthropic upstream (zero schema loss).
+        if is_native_anthropic {
+            req.uri = provider.chat_path.clone();
+            req.headers.insert(
+                HeaderName::from_static("anthropic-version"),
+                client_anthropic_version.unwrap_or_else(|| provider.anthropic_version.clone()),
+            );
+            if let Some(body) = &req.body {
+                match rewrite_anthropic_request(body, &target.model) {
+                    Ok(Some(rewritten)) => req.body = Some(Bytes::from(rewritten)),
+                    Ok(None) => {}
+                    Err(err) => return HookResult::Ready(bad_request_translation(endpoint, &err)),
+                }
+            }
+            return finalize_sigv4_if_needed(endpoint, provider, req);
+        }
+
+        // Fast path 2: Native OpenAI Responses `/v1/responses` -> provider with `responses_path`.
+        if is_native_responses {
+            if provider.dialect == ProviderDialect::OpenAiCompatible {
+                if let Some(org) = &provider.organization {
+                    req.headers
+                        .insert(HeaderName::from_static("openai-organization"), org.clone());
+                }
+                if let Some(proj) = &provider.project {
+                    req.headers
+                        .insert(HeaderName::from_static("openai-project"), proj.clone());
+                }
+            }
+            req.uri = provider.responses_path.clone().unwrap();
+            if let Some(body) = &req.body {
+                match rewrite_openai_responses_request(body, &target.model) {
+                    Ok(Some(rewritten)) => req.body = Some(Bytes::from(rewritten)),
+                    Ok(None) => {}
+                    Err(err) => return HookResult::Ready(bad_request_translation(endpoint, &err)),
+                }
+            }
+            return finalize_sigv4_if_needed(endpoint, provider, req);
+        }
+
+        // Hub-and-spoke ingress normalization: translate non-Chat conversational requests into
+        // canonical OpenAI Chat Completions JSON once before dispatching to any upstream dialect.
+        let canonical_body: Option<Bytes> = match (endpoint, req.body.as_ref()) {
+            (AiEndpointKind::AnthropicMessages, Some(raw)) => {
+                match anthropic_to_openai_request(raw, &target.model) {
+                    Ok(v) => Some(Bytes::from(v)),
+                    Err(err) => return HookResult::Ready(bad_request_translation(endpoint, &err)),
+                }
+            }
+            (AiEndpointKind::OpenAiResponses, Some(raw)) => {
+                match responses_to_chat_request(raw, &target.model) {
+                    Ok(v) => Some(Bytes::from(v)),
+                    Err(err) => return HookResult::Ready(bad_request_translation(endpoint, &err)),
+                }
+            }
+            (_, opt) => opt.cloned(),
+        };
+
         match provider.dialect {
             ProviderDialect::OpenAiCompatible => {
                 if let Some(org) = &provider.organization {
@@ -544,28 +727,32 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                 match endpoint {
                     AiEndpointKind::Embeddings => {
                         req.uri = provider.embeddings_path.clone();
-                        if let Some(body) = &req.body {
+                        if let Some(body) = &canonical_body {
                             match rewrite_openai_embeddings_request(body, &target.model) {
                                 Ok(Some(rewritten)) => req.body = Some(Bytes::from(rewritten)),
-                                Ok(None) => {}
+                                Ok(None) => req.body = Some(body.clone()),
                                 Err(err) => {
-                                    return HookResult::Ready(bad_request_translation(&err));
+                                    return HookResult::Ready(bad_request_translation(
+                                        endpoint, &err,
+                                    ));
                                 }
                             }
                         }
                     }
                     _ => {
                         req.uri = provider.chat_path.clone();
-                        if let Some(body) = &req.body {
+                        if let Some(body) = &canonical_body {
                             match rewrite_openai_request(
                                 body,
                                 &target.model,
                                 provider.include_stream_usage,
                             ) {
                                 Ok(Some(rewritten)) => req.body = Some(Bytes::from(rewritten)),
-                                Ok(None) => {}
+                                Ok(None) => req.body = Some(body.clone()),
                                 Err(err) => {
-                                    return HookResult::Ready(bad_request_translation(&err));
+                                    return HookResult::Ready(bad_request_translation(
+                                        endpoint, &err,
+                                    ));
                                 }
                             }
                         }
@@ -587,13 +774,14 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                 match path_str.parse::<Uri>() {
                     Ok(uri) => req.uri = uri,
                     Err(e) => {
-                        return HookResult::Ready(bad_request_translation(&format!(
-                            "invalid Azure OpenAI URI `{path_str}`: {e}"
-                        )));
+                        return HookResult::Ready(bad_request_translation(
+                            endpoint,
+                            &format!("invalid Azure OpenAI URI `{path_str}`: {e}"),
+                        ));
                     }
                 }
 
-                if let Some(body) = &req.body {
+                if let Some(body) = &canonical_body {
                     let res = match endpoint {
                         AiEndpointKind::Embeddings => {
                             rewrite_openai_embeddings_request(body, &target.model)
@@ -606,14 +794,17 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                     };
                     match res {
                         Ok(Some(rewritten)) => req.body = Some(Bytes::from(rewritten)),
-                        Ok(None) => {}
-                        Err(err) => return HookResult::Ready(bad_request_translation(&err)),
+                        Ok(None) => req.body = Some(body.clone()),
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
                     }
                 }
             }
             ProviderDialect::Anthropic => {
                 if endpoint == AiEndpointKind::Embeddings {
-                    let resp = openai_error_response(
+                    let resp = endpoint_error_response(
+                        endpoint,
                         StatusCode::BAD_REQUEST,
                         "invalid_request_error",
                         Some("unsupported_endpoint"),
@@ -631,14 +822,16 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                     provider.anthropic_version.clone(),
                 );
 
-                if let Some(body) = &req.body {
+                if let Some(body) = &canonical_body {
                     match openai_to_anthropic_request(
                         body,
                         &target.model,
                         provider.default_max_tokens,
                     ) {
                         Ok(translated) => req.body = Some(Bytes::from(translated)),
-                        Err(err) => return HookResult::Ready(bad_request_translation(&err)),
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
                     }
                 }
             }
@@ -650,8 +843,9 @@ impl HttpPlugin for AiProviderAdapterPlugin {
 
                 match endpoint {
                     AiEndpointKind::Embeddings => {
-                        let Some(body) = &req.body else {
+                        let Some(body) = &canonical_body else {
                             return HookResult::Ready(bad_request_translation(
+                                endpoint,
                                 "missing embeddings request body",
                             ));
                         };
@@ -661,15 +855,18 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                             vertex_ref.is_some(),
                         ) {
                             Ok(pair) => pair,
-                            Err(err) => return HookResult::Ready(bad_request_translation(&err)),
+                            Err(err) => {
+                                return HookResult::Ready(bad_request_translation(endpoint, &err));
+                            }
                         };
                         let path_str = gemini_embeddings_path(&target.model, is_batch, vertex_ref);
                         match path_str.parse::<Uri>() {
                             Ok(uri) => req.uri = uri,
                             Err(e) => {
-                                return HookResult::Ready(bad_request_translation(&format!(
-                                    "invalid Gemini embeddings URI `{path_str}`: {e}"
-                                )));
+                                return HookResult::Ready(bad_request_translation(
+                                    endpoint,
+                                    &format!("invalid Gemini embeddings URI `{path_str}`: {e}"),
+                                ));
                             }
                         }
                         req.body = Some(Bytes::from(translated));
@@ -680,16 +877,19 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                         match path_str.parse::<Uri>() {
                             Ok(uri) => req.uri = uri,
                             Err(e) => {
-                                return HookResult::Ready(bad_request_translation(&format!(
-                                    "invalid Gemini URI `{path_str}`: {e}"
-                                )));
+                                return HookResult::Ready(bad_request_translation(
+                                    endpoint,
+                                    &format!("invalid Gemini URI `{path_str}`: {e}"),
+                                ));
                             }
                         }
-                        if let Some(body) = &req.body {
+                        if let Some(body) = &canonical_body {
                             match openai_to_gemini_request(body) {
                                 Ok(translated) => req.body = Some(Bytes::from(translated)),
                                 Err(err) => {
-                                    return HookResult::Ready(bad_request_translation(&err));
+                                    return HookResult::Ready(bad_request_translation(
+                                        endpoint, &err,
+                                    ));
                                 }
                             }
                         }
@@ -698,7 +898,8 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             }
             ProviderDialect::Bedrock => {
                 if endpoint == AiEndpointKind::Embeddings {
-                    let resp = openai_error_response(
+                    let resp = endpoint_error_response(
+                        endpoint,
                         StatusCode::NOT_IMPLEMENTED,
                         "not_implemented_error",
                         Some("unsupported_endpoint"),
@@ -714,35 +915,25 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                 match path_str.parse::<Uri>() {
                     Ok(uri) => req.uri = uri,
                     Err(e) => {
-                        return HookResult::Ready(bad_request_translation(&format!(
-                            "invalid Bedrock URI `{path_str}`: {e}"
-                        )));
+                        return HookResult::Ready(bad_request_translation(
+                            endpoint,
+                            &format!("invalid Bedrock URI `{path_str}`: {e}"),
+                        ));
                     }
                 }
 
-                if let Some(body) = &req.body {
+                if let Some(body) = &canonical_body {
                     match openai_to_bedrock_converse_request(body) {
                         Ok(translated) => req.body = Some(Bytes::from(translated)),
-                        Err(err) => return HookResult::Ready(bad_request_translation(&err)),
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
                     }
                 }
             }
         }
 
-        // Perform AWS SigV4 signing AFTER final URI path, headers, and translated payload are ready.
-        if let CompiledAuth::AwsSigV4(ref creds) = provider.auth
-            && let Err(err) = sign_upstream_request(req, creds, None)
-        {
-            let resp = openai_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                Some("aws_sigv4_signing_failed"),
-                &err,
-            );
-            return HookResult::Ready(Flow::Respond(resp));
-        }
-
-        HookResult::Ready(Flow::Continue)
+        finalize_sigv4_if_needed(endpoint, provider, req)
     }
 
     fn on_response_headers<'a>(
@@ -777,6 +968,24 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             return HookResult::Ready(Flow::Continue);
         };
 
+        // Native same-protocol passthrough fast paths (zero translation overhead).
+        let is_native_passthrough = match (endpoint, provider.dialect) {
+            (
+                AiEndpointKind::ChatCompletions | AiEndpointKind::Embeddings,
+                ProviderDialect::OpenAiCompatible | ProviderDialect::AzureOpenAi,
+            ) => true,
+            (AiEndpointKind::AnthropicMessages, ProviderDialect::Anthropic) => true,
+            (
+                AiEndpointKind::OpenAiResponses,
+                ProviderDialect::OpenAiCompatible | ProviderDialect::AzureOpenAi,
+            ) => provider.responses_path.is_some(),
+            _ => false,
+        };
+        if is_native_passthrough {
+            ctx.insert_ext(AdapterResponseState::Passthrough);
+            return HookResult::Ready(Flow::Continue);
+        }
+
         let content_type_lower = res
             .headers
             .get(header::CONTENT_TYPE)
@@ -784,80 +993,83 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             .map(str::to_ascii_lowercase)
             .unwrap_or_default();
 
-        match provider.dialect {
-            ProviderDialect::OpenAiCompatible | ProviderDialect::AzureOpenAi => {
-                ctx.insert_ext(AdapterResponseState::Passthrough);
-            }
-            ProviderDialect::Anthropic => {
-                let is_sse = content_type_lower.contains("text/event-stream");
-                if res.status.is_success() && (is_sse || stream_requested) {
-                    set_sse_headers(res);
-                    ctx.insert_ext(AdapterResponseState::AnthropicSse(Box::new(
-                        AnthropicSseTranslator::new(target.model),
-                    )));
-                } else {
-                    res.headers.insert(
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("application/json"),
-                    );
-                    ctx.insert_ext(AdapterResponseState::AnthropicJson {
-                        status: res.status,
-                        fallback_model: target.model,
-                        buffer: Vec::new(),
-                    });
+        // Special-case Gemini embeddings JSON (always non-streaming).
+        if provider.dialect == ProviderDialect::Gemini && endpoint == AiEndpointKind::Embeddings {
+            res.headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            ctx.insert_ext(AdapterResponseState::BufferedJson {
+                upstream: UpstreamJsonKind::GeminiEmbeddings,
+                ingress: IngressResponseFormat::OpenAiChat,
+                status: res.status,
+                fallback_model: target.model,
+                buffer: Vec::new(),
+            });
+            return HookResult::Ready(Flow::Continue);
+        }
+
+        let ingress_format = match endpoint {
+            AiEndpointKind::AnthropicMessages => IngressResponseFormat::AnthropicMessages,
+            AiEndpointKind::OpenAiResponses => IngressResponseFormat::OpenAiResponses,
+            _ => IngressResponseFormat::OpenAiChat,
+        };
+
+        let is_stream = res.status.is_success()
+            && match provider.dialect {
+                ProviderDialect::Bedrock => {
+                    content_type_lower.contains("application/vnd.amazon.eventstream")
+                        || stream_requested
                 }
-            }
-            ProviderDialect::Gemini => {
-                if endpoint == AiEndpointKind::Embeddings {
-                    res.headers.insert(
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("application/json"),
-                    );
-                    ctx.insert_ext(AdapterResponseState::GeminiEmbeddingsJson {
-                        status: res.status,
-                        model: target.model,
-                        buffer: Vec::new(),
-                    });
-                } else {
-                    let is_sse = content_type_lower.contains("text/event-stream");
-                    if res.status.is_success() && (is_sse || stream_requested) {
-                        set_sse_headers(res);
-                        ctx.insert_ext(AdapterResponseState::GeminiSse(Box::new(
-                            GeminiSseTranslator::new(target.model),
-                        )));
-                    } else {
-                        res.headers.insert(
-                            header::CONTENT_TYPE,
-                            HeaderValue::from_static("application/json"),
-                        );
-                        ctx.insert_ext(AdapterResponseState::GeminiJson {
-                            status: res.status,
-                            fallback_model: target.model,
-                            buffer: Vec::new(),
-                        });
-                    }
+                _ => content_type_lower.contains("text/event-stream") || stream_requested,
+            };
+
+        if is_stream {
+            set_sse_headers(res);
+            let upstream = match provider.dialect {
+                ProviderDialect::OpenAiCompatible | ProviderDialect::AzureOpenAi => {
+                    UpstreamStreamStage::OpenAiSse
                 }
-            }
-            ProviderDialect::Bedrock => {
-                let is_eventstream =
-                    content_type_lower.contains("application/vnd.amazon.eventstream");
-                if res.status.is_success() && (is_eventstream || stream_requested) {
-                    set_sse_headers(res);
-                    ctx.insert_ext(AdapterResponseState::BedrockStream(Box::new(
-                        BedrockStreamTranslator::new(target.model),
-                    )));
-                } else {
-                    res.headers.insert(
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("application/json"),
-                    );
-                    ctx.insert_ext(AdapterResponseState::BedrockJson {
-                        status: res.status,
-                        model: target.model,
-                        buffer: Vec::new(),
-                    });
+                ProviderDialect::Anthropic => UpstreamStreamStage::AnthropicSse(Box::new(
+                    AnthropicSseTranslator::new(target.model.clone()),
+                )),
+                ProviderDialect::Gemini => UpstreamStreamStage::GeminiSse(Box::new(
+                    GeminiSseTranslator::new(target.model.clone()),
+                )),
+                ProviderDialect::Bedrock => UpstreamStreamStage::BedrockStream(Box::new(
+                    BedrockStreamTranslator::new(target.model.clone()),
+                )),
+            };
+            let ingress = match ingress_format {
+                IngressResponseFormat::OpenAiChat => IngressStreamStage::Identity,
+                IngressResponseFormat::AnthropicMessages => IngressStreamStage::ToAnthropic(
+                    Box::new(OpenAiToAnthropicSseTranslator::new(target.model)),
+                ),
+                IngressResponseFormat::OpenAiResponses => IngressStreamStage::ToResponses(
+                    Box::new(ChatToResponsesSseTranslator::new(target.model)),
+                ),
+            };
+            ctx.insert_ext(AdapterResponseState::Streaming { upstream, ingress });
+        } else {
+            res.headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            let upstream = match provider.dialect {
+                ProviderDialect::OpenAiCompatible | ProviderDialect::AzureOpenAi => {
+                    UpstreamJsonKind::OpenAi
                 }
-            }
+                ProviderDialect::Anthropic => UpstreamJsonKind::Anthropic,
+                ProviderDialect::Gemini => UpstreamJsonKind::Gemini,
+                ProviderDialect::Bedrock => UpstreamJsonKind::Bedrock,
+            };
+            ctx.insert_ext(AdapterResponseState::BufferedJson {
+                upstream,
+                ingress: ingress_format,
+                status: res.status,
+                fallback_model: target.model,
+                buffer: Vec::new(),
+            });
         }
 
         HookResult::Ready(Flow::Continue)
@@ -877,84 +1089,123 @@ impl HttpPlugin for AiProviderAdapterPlugin {
 
         match state {
             AdapterResponseState::Passthrough => HookResult::Ready(StreamFlow::Continue),
-            AdapterResponseState::AnthropicSse(translator) => {
-                if end_of_stream {
-                    *chunk = translator.finish();
+            AdapterResponseState::Streaming { upstream, ingress } => {
+                let mut canonical = if chunk.is_empty() {
+                    Bytes::new()
                 } else {
-                    *chunk = translator.push_chunk(chunk);
+                    upstream.push_chunk(chunk)
+                };
+                if end_of_stream {
+                    canonical = concat_bytes(canonical, upstream.finish());
                 }
+
+                let mut out = if canonical.is_empty() {
+                    Bytes::new()
+                } else {
+                    ingress.push_chunk(&canonical)
+                };
+                if end_of_stream {
+                    out = concat_bytes(out, ingress.finish());
+                }
+
+                *chunk = out;
                 HookResult::Ready(StreamFlow::Continue)
             }
-            AdapterResponseState::GeminiSse(translator) => {
-                if end_of_stream {
-                    *chunk = translator.finish();
-                } else {
-                    *chunk = translator.push_chunk(chunk);
-                }
-                HookResult::Ready(StreamFlow::Continue)
-            }
-            AdapterResponseState::BedrockStream(translator) => {
-                if end_of_stream {
-                    *chunk = translator.finish();
-                } else {
-                    *chunk = translator.push_chunk(chunk);
-                }
-                HookResult::Ready(StreamFlow::Continue)
-            }
-            AdapterResponseState::AnthropicJson {
+            AdapterResponseState::BufferedJson {
+                upstream,
+                ingress,
                 status,
                 fallback_model,
                 buffer,
-            } => handle_buffered_json_translation(
-                "Anthropic",
-                buffer,
-                chunk,
-                end_of_stream,
-                max_bytes,
-                |buf| anthropic_to_openai_response(buf, *status, fallback_model),
-            ),
-            AdapterResponseState::GeminiJson {
-                status,
-                fallback_model,
-                buffer,
-            } => handle_buffered_json_translation(
-                "Gemini",
-                buffer,
-                chunk,
-                end_of_stream,
-                max_bytes,
-                |buf| gemini_to_openai_response(buf, *status, fallback_model),
-            ),
-            AdapterResponseState::GeminiEmbeddingsJson {
-                status,
-                model,
-                buffer,
-            } => handle_buffered_json_translation(
-                "Gemini embeddings",
-                buffer,
-                chunk,
-                end_of_stream,
-                max_bytes,
-                |buf| gemini_to_openai_embeddings_response(buf, *status, model),
-            ),
-            AdapterResponseState::BedrockJson {
-                status,
-                model,
-                buffer,
-            } => handle_buffered_json_translation(
-                "Bedrock",
-                buffer,
-                chunk,
-                end_of_stream,
-                max_bytes,
-                |buf| bedrock_converse_to_openai_response(buf, *status, model),
-            ),
+            } => {
+                let upstream_kind = *upstream;
+                let ingress_fmt = *ingress;
+                let resp_status = *status;
+                handle_buffered_json_translation(
+                    upstream_kind.label(),
+                    buffer,
+                    chunk,
+                    end_of_stream,
+                    max_bytes,
+                    |buf| {
+                        let canonical: Vec<u8> = match upstream_kind {
+                            UpstreamJsonKind::OpenAi => buf.to_vec(),
+                            UpstreamJsonKind::Anthropic => {
+                                anthropic_to_openai_response(buf, resp_status, fallback_model)?
+                            }
+                            UpstreamJsonKind::Gemini => {
+                                gemini_to_openai_response(buf, resp_status, fallback_model)?
+                            }
+                            UpstreamJsonKind::GeminiEmbeddings => {
+                                return gemini_to_openai_embeddings_response(
+                                    buf,
+                                    resp_status,
+                                    fallback_model,
+                                );
+                            }
+                            UpstreamJsonKind::Bedrock => bedrock_converse_to_openai_response(
+                                buf,
+                                resp_status,
+                                fallback_model,
+                            )?,
+                        };
+
+                        match ingress_fmt {
+                            IngressResponseFormat::OpenAiChat => Ok(canonical),
+                            IngressResponseFormat::AnthropicMessages => {
+                                openai_to_anthropic_response(
+                                    &canonical,
+                                    resp_status,
+                                    fallback_model,
+                                )
+                            }
+                            IngressResponseFormat::OpenAiResponses => {
+                                chat_to_responses_response(&canonical, resp_status, fallback_model)
+                            }
+                        }
+                    },
+                )
+            }
         }
     }
 }
 
-fn bad_request_translation(err: &str) -> Flow {
-    Flow::Respond(openai_error_response(
+fn finalize_sigv4_if_needed<'a>(
+    endpoint: AiEndpointKind,
+    provider: &CompiledProvider,
+    req: &mut UpstreamRequest,
+) -> HookResult<'a, Flow> {
+    if let CompiledAuth::AwsSigV4(ref creds) = provider.auth
+        && let Err(err) = sign_upstream_request(req, creds, None)
+    {
+        let resp = endpoint_error_response(
+            endpoint,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            Some("aws_sigv4_signing_failed"),
+            &err,
+        );
+        return HookResult::Ready(Flow::Respond(resp));
+    }
+    HookResult::Ready(Flow::Continue)
+}
+
+fn concat_bytes(first: Bytes, second: Bytes) -> Bytes {
+    if first.is_empty() {
+        return second;
+    }
+    if second.is_empty() {
+        return first;
+    }
+    let mut merged = Vec::with_capacity(first.len() + second.len());
+    merged.extend_from_slice(&first);
+    merged.extend_from_slice(&second);
+    Bytes::from(merged)
+}
+
+fn bad_request_translation(endpoint: AiEndpointKind, err: &str) -> Flow {
+    Flow::Respond(endpoint_error_response(
+        endpoint,
         StatusCode::BAD_REQUEST,
         "invalid_request_error",
         Some("request_translation_failed"),

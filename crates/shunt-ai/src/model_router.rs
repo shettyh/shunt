@@ -10,8 +10,8 @@ use shunt_plugin_sdk::{
 };
 
 use crate::types::{
-    AiCapability, AiEndpointKind, AiRequestMeta, AiTarget, DetectedEndpoint, openai_error_response,
-    percent_decode,
+    AiCapability, AiEndpointKind, AiRequestMeta, AiTarget, DetectedEndpoint,
+    endpoint_error_response, openai_error_response, percent_decode,
 };
 
 const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
@@ -393,6 +393,10 @@ impl HttpPlugin for AiModelRouterPlugin {
 
         let endpoint = if path.ends_with("/embeddings") {
             AiEndpointKind::Embeddings
+        } else if path.ends_with("/messages") {
+            AiEndpointKind::AnthropicMessages
+        } else if path.ends_with("/responses") {
+            AiEndpointKind::OpenAiResponses
         } else {
             AiEndpointKind::ChatCompletions
         };
@@ -414,7 +418,8 @@ impl HttpPlugin for AiModelRouterPlugin {
         let probe: ModelRequestProbe = match serde_json::from_slice(body) {
             Ok(p) => p,
             Err(err) => {
-                let resp = openai_error_response(
+                let resp = endpoint_error_response(
+                    endpoint,
                     StatusCode::BAD_REQUEST,
                     "invalid_request_error",
                     Some("invalid_json"),
@@ -425,7 +430,8 @@ impl HttpPlugin for AiModelRouterPlugin {
         };
 
         let Some(model) = probe.model.filter(|m| !m.trim().is_empty()) else {
-            let resp = openai_error_response(
+            let resp = endpoint_error_response(
+                endpoint,
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
                 Some("missing_model"),
@@ -435,7 +441,8 @@ impl HttpPlugin for AiModelRouterPlugin {
         };
 
         let Some(all_targets) = self.resolve_targets(&model) else {
-            let resp = openai_error_response(
+            let resp = endpoint_error_response(
+                endpoint,
                 StatusCode::NOT_FOUND,
                 "invalid_request_error",
                 Some("model_not_found"),
@@ -446,7 +453,9 @@ impl HttpPlugin for AiModelRouterPlugin {
 
         let required_cap = match endpoint {
             AiEndpointKind::Embeddings => Some(AiCapability::Embeddings),
-            AiEndpointKind::ChatCompletions => Some(AiCapability::Chat),
+            AiEndpointKind::ChatCompletions
+            | AiEndpointKind::AnthropicMessages
+            | AiEndpointKind::OpenAiResponses => Some(AiCapability::Chat),
             AiEndpointKind::ModelsList | AiEndpointKind::ModelRetrieve => None,
         };
 
@@ -459,7 +468,8 @@ impl HttpPlugin for AiModelRouterPlugin {
         };
 
         if targets.is_empty() {
-            let resp = openai_error_response(
+            let resp = endpoint_error_response(
+                endpoint,
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
                 Some("unsupported_endpoint"),
