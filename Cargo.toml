@@ -4,6 +4,7 @@ members = [
     "crates/shunt-plugin-sdk",
     "crates/shunt-core",
     "crates/shunt-plugins",
+    "crates/shunt-ai",
     "crates/shunt-config",
     "crates/shunt-cli",
 ]
@@ -18,6 +19,7 @@ repository = "https://github.com/shunt-rs/shunt"
 shunt-plugin-sdk = { path = "crates/shunt-plugin-sdk" }
 shunt-core = { path = "crates/shunt-core" }
 shunt-plugins = { path = "crates/shunt-plugins" }
+shunt-ai = { path = "crates/shunt-ai" }
 shunt-config = { path = "crates/shunt-config" }
 
 arc-swap = "1"

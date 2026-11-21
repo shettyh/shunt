@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use shunt_ai::{AiMetrics, register_ai_plugins};
 use shunt_config::{
     AdminServer, ConfigProvider, FileConfigProvider, ReloadController, SnapshotCompiler,
     SnapshotInspect, start_file_watcher,
@@ -77,12 +78,24 @@ fn init_tracing(default_filter: &str) {
         .try_init();
 }
 
-fn build_registries() -> (Arc<PluginRegistry>, Arc<RuntimeRegistry>, Arc<PrometheusMetrics>) {
+fn build_registries() -> (
+    Arc<PluginRegistry>,
+    Arc<RuntimeRegistry>,
+    Arc<PrometheusMetrics>,
+    Arc<AiMetrics>,
+) {
     let metrics = Arc::new(PrometheusMetrics::new());
+    let ai_metrics = Arc::new(AiMetrics::new());
     let mut plugin_registry = PluginRegistry::new();
     register_builtin_plugins(&mut plugin_registry, Arc::clone(&metrics));
+    register_ai_plugins(&mut plugin_registry, Arc::clone(&ai_metrics));
     let runtime_registry = Arc::new(RuntimeRegistry::new());
-    (Arc::new(plugin_registry), runtime_registry, metrics)
+    (
+        Arc::new(plugin_registry),
+        runtime_registry,
+        metrics,
+        ai_metrics,
+    )
 }
 
 fn run_check(config_path: PathBuf) -> ExitCode {
@@ -95,7 +108,7 @@ fn run_check(config_path: PathBuf) -> ExitCode {
         }
     };
 
-    let (plugins, runtime, _metrics) = build_registries();
+    let (plugins, runtime, _metrics, _ai_metrics) = build_registries();
     let compiler = SnapshotCompiler::new(plugins, runtime);
     match compiler.compile(&loaded) {
         Ok(bundle) => {
@@ -120,7 +133,7 @@ async fn run_server(config_path: PathBuf, dev_mode: bool, watch_files: bool) -> 
         }
     };
 
-    let (plugins, runtime, metrics) = build_registries();
+    let (plugins, runtime, metrics, ai_metrics) = build_registries();
     let mut compiler = SnapshotCompiler::new(plugins, runtime);
     if dev_mode {
         compiler = compiler.with_extra_global_plugin(Arc::new(DevWaterfallPlugin::stderr()));
@@ -177,9 +190,20 @@ async fn run_server(config_path: PathBuf, dev_mode: bool, watch_files: bool) -> 
             }
         };
         let metrics_clone = Arc::clone(&metrics);
+        let ai_metrics_clone = Arc::clone(&ai_metrics);
         let admin = AdminServer::new(
             Arc::clone(&controller),
-            Arc::new(move || metrics_clone.render_prometheus()),
+            Arc::new(move || {
+                let mut out = metrics_clone.render_prometheus();
+                let ai_out = ai_metrics_clone.render_prometheus();
+                if !ai_out.is_empty() {
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push_str(&ai_out);
+                }
+                out
+            }),
         );
         match admin.bind(admin_addr).await {
             Ok(h) => Some(h),
