@@ -1077,4 +1077,47 @@ proptest! {
         let _ = r_sse.push_chunk(&raw);
         let _ = r_sse.finish();
     }
+
+    #[test]
+    fn token_estimator_never_panics_and_is_monotonic(
+        raw in prop::collection::vec(any::<u8>(), 0..256),
+        prefix in "[a-zA-Z0-9 ]{0,64}",
+        suffix in "[a-zA-Z0-9 ]{1,64}",
+    ) {
+        for ep in [
+            shunt_ai::AiEndpointKind::ChatCompletions,
+            shunt_ai::AiEndpointKind::AnthropicMessages,
+            shunt_ai::AiEndpointKind::AnthropicCountTokens,
+            shunt_ai::AiEndpointKind::OpenAiResponses,
+            shunt_ai::AiEndpointKind::Embeddings,
+        ] {
+            let est = shunt_ai::estimate_request_tokens(ep, &raw);
+            prop_assert!(est.input_tokens >= 1);
+        }
+
+        let t1 = shunt_ai::estimate_text_tokens(&prefix);
+        let combined = format!("{prefix}{suffix}");
+        let t2 = shunt_ai::estimate_text_tokens(&combined);
+        prop_assert!(t2 >= t1);
+    }
+
+    #[test]
+    fn pricing_cost_nano_usd_invariants(
+        in_price in 0.0f64..100.0,
+        out_price in 0.0f64..200.0,
+        cached_ratio in 0.0f64..1.0,
+        prompt_tokens in 0u64..10_000_000,
+        cached_tokens in 0u64..10_000_000,
+        completion_tokens in 0u64..10_000_000,
+    ) {
+        let cached_price = in_price * cached_ratio;
+        let pricing = shunt_ai::ModelPricing::new(in_price, out_price, Some(cached_price));
+        let cost_with_cache = pricing.cost_nano_usd(prompt_tokens, cached_tokens, completion_tokens);
+        let cost_no_cache = pricing.cost_nano_usd(prompt_tokens, 0, completion_tokens);
+
+        // Cached tokens are never more expensive than uncached when cached_price <= in_price.
+        prop_assert!(cost_with_cache <= cost_no_cache);
+        let usd = shunt_ai::nano_usd_to_usd(cost_with_cache);
+        prop_assert!(usd.is_finite() && usd >= 0.0);
+    }
 }

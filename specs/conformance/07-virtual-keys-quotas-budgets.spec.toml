@@ -1,0 +1,364 @@
+[spec]
+name = "virtual-keys-quotas-and-budgets"
+config_inline = """
+[server]
+listen = "127.0.0.1:0"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+[[upstreams]]
+name = "openai"
+endpoints = ["http://127.0.0.1:19001"]
+
+[[upstreams]]
+name = "anthropic"
+endpoints = ["http://127.0.0.1:19002"]
+
+[[routes]]
+id = "ai_gov"
+path_prefix = "/v1"
+upstream = "openai"
+max_body_bytes = 1048576
+max_attempts = 2
+
+[[routes.plugins]]
+name = "ai-virtual-keys"
+id = "vkeys"
+[routes.plugins.config]
+strip_key_header = true
+accept_bearer = true
+accept_x_api_key = true
+
+[[routes.plugins.config.keys]]
+id = "alice"
+api_key = "env:ALICE_KEY"
+team = "eng"
+allowed_models = ["smart", "fast"]
+rpm = 2
+tpm = 200
+budget_usd = 0.010
+budget_soft_limit_usd = 0.005
+budget_window = { seconds = 300 }
+
+[[routes.plugins.config.keys]]
+id = "bob"
+# sha256("sk-bob-hashed-secret")
+api_key = "sha256:ac2f245a172bd41a29dcdd581d7d7dda18721865722e4c6ccf2eb3f4859f7031"
+team = "eng"
+allowed_models = ["fast"]
+rpm = 10
+tpm = 10000
+budget_usd = 1.000
+budget_window = { seconds = 60 }
+
+[[routes.plugins.config.keys]]
+id = "override-carol"
+api_key = "sk-carol-override"
+team = "research"
+allowed_models = ["smart"]
+[routes.plugins.config.keys.provider_overrides]
+smart = [{ provider = "anthropic", upstream = "anthropic", model = "claude-3-5-sonnet-20241022" }]
+
+[[routes.plugins.config.keys]]
+id = "disabled-dave"
+api_key = "sk-dave-disabled"
+enabled = false
+
+[[routes.plugins]]
+name = "ai-model-router"
+id = "router"
+[routes.plugins.config]
+serve_models_endpoint = true
+serve_count_tokens_endpoint = true
+[routes.plugins.config.models]
+smart = [{ provider = "openai", upstream = "openai", model = "gpt-4o" }]
+fast = [{ provider = "openai", upstream = "openai", model = "gpt-4o-mini" }]
+
+[[routes.plugins]]
+name = "ai-token-rate-limit"
+id = "token_rl"
+[routes.plugins.config]
+rpm = 100
+tpm = 100000
+window_secs = 60
+key_by = "virtual_key"
+reconcile_usage = true
+
+[[routes.plugins]]
+name = "ai-budget"
+id = "budget"
+[routes.plugins.config]
+scope = "virtual_key"
+default_limit_usd = 5.0
+soft_warning_ratio = 0.8
+window = { seconds = 60 }
+mode = "hard"
+reject_status = 402
+use_builtin_pricing = false
+
+[routes.plugins.config.team_budgets.eng]
+limit_usd = 0.015
+soft_limit_usd = 0.010
+window = { seconds = 60 }
+
+[routes.plugins.config.pricing."gpt-4o"]
+input_per_million_usd = 2.50
+output_per_million_usd = 10.00
+cached_input_per_million_usd = 1.25
+
+[routes.plugins.config.pricing."gpt-4o-mini"]
+input_per_million_usd = 10.00
+output_per_million_usd = 10.00
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+id = "adapter"
+[routes.plugins.config.providers.openai]
+dialect = "openai_compatible"
+auth = { type = "bearer", api_key = "env:UPSTREAM_OPENAI_KEY" }
+
+[routes.plugins.config.providers.anthropic]
+dialect = "anthropic"
+auth = { type = "header", header = "x-api-key", api_key = "env:UPSTREAM_ANTHROPIC_KEY" }
+
+[[routes.plugins]]
+name = "ai-usage-tracker"
+id = "usage"
+[routes.plugins.config]
+log_usage = false
+"""
+
+[env]
+ALICE_KEY = "sk-alice-live-secret"
+UPSTREAM_OPENAI_KEY = "sk-upstream-openai-real"
+UPSTREAM_ANTHROPIC_KEY = "sk-upstream-anthropic-real"
+
+# --- Mocks ---
+
+[[mocks]]
+upstream = "openai"
+name = "openai_cached_cost"
+status = 200
+# gpt-4o: 1000 prompt (400 cached -> 600*2.5 + 400*1.25 = 2000 nano/k = $0.0020) + 400 output ($0.0040) = $0.0060
+json = { id = "chatcmpl-cost-1", object = "chat.completion", created = 1700000000, model = "gpt-4o", choices = [{ index = 0, message = { role = "assistant", content = "Cost tracked!" }, finish_reason = "stop" }], usage = { prompt_tokens = 1000, completion_tokens = 400, total_tokens = 1400, prompt_tokens_details = { cached_tokens = 400 } } }
+
+[[mocks]]
+upstream = "openai"
+name = "openai_small_usage"
+status = 200
+json = { id = "chatcmpl-small-1", object = "chat.completion", created = 1700000001, model = "gpt-4o-mini", choices = [{ index = 0, message = { role = "assistant", content = "ok" }, finish_reason = "stop" }], usage = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 } }
+
+[[mocks]]
+upstream = "openai"
+name = "openai_big_reconcile"
+status = 200
+# Actual usage is 195 tokens -> leaves only 5 tokens in Alice's 200 TPM window!
+json = { id = "chatcmpl-rec-1", object = "chat.completion", created = 1700000002, model = "gpt-4o-mini", choices = [{ index = 0, message = { role = "assistant", content = "big reply" }, finish_reason = "stop" }], usage = { prompt_tokens = 25, completion_tokens = 170, total_tokens = 195 } }
+
+[[mocks]]
+upstream = "openai"
+name = "openai_team_drain"
+status = 200
+# gpt-4o-mini @ $10/1M in & out: 1000 + 600 = 1600 tokens = $0.016 (> eng team limit $0.015)
+json = { id = "chatcmpl-team-1", object = "chat.completion", created = 1700000003, model = "gpt-4o-mini", choices = [{ index = 0, message = { role = "assistant", content = "team spend" }, finish_reason = "stop" }], usage = { prompt_tokens = 1000, completion_tokens = 600, total_tokens = 1600 } }
+
+[[mocks]]
+upstream = "anthropic"
+name = "anthropic_reply"
+status = 200
+json = { id = "msg_carol_1", type = "message", role = "assistant", model = "claude-3-5-sonnet-20241022", content = [{ type = "text", text = "Hello from Anthropic override!" }], stop_reason = "end_turn", usage = { input_tokens = 10, output_tokens = 6 } }
+
+# --- Test Cases ---
+
+[[cases]]
+name = "virtual_key_auth_errors_redaction_and_header_isolation"
+use_mocks = ["openai_small_usage"]
+
+[[cases.steps]]
+name = "missing_key_openai_401"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "fast", messages = [{ role = "user", content = "hi" }] } }
+expect = { status = 401, json_path = { "/error/code" = "missing_api_key" }, upstream_calls = [{ upstream = "openai", count = 0 }] }
+
+[[cases.steps]]
+name = "invalid_key_anthropic_native_401"
+request = { method = "POST", path = "/v1/messages", headers = { "x-api-key" = "sk-wrong" }, json = { model = "smart", max_tokens = 32, messages = [{ role = "user", content = "hi" }] } }
+expect = { status = 401, json_path = { "/type" = "error", "/error/type" = "authentication_error" } }
+
+[[cases.steps]]
+name = "disabled_key_403"
+request = { method = "POST", path = "/v1/chat/completions", headers = { Authorization = "Bearer sk-dave-disabled" }, json = { model = "fast", messages = [{ role = "user", content = "hi" }] } }
+expect = { status = 403, json_path = { "/error/code" = "api_key_disabled" } }
+
+[[cases.steps]]
+name = "valid_key_strips_virtual_key_injects_upstream_cred_and_redacts_snapshot"
+request = { method = "POST", path = "/v1/chat/completions", headers = { Authorization = "Bearer sk-alice-live-secret" }, json = { model = "fast", messages = [{ role = "user", content = "hi" }] } }
+expect = { status = 200, snapshot_redacts = ["sk-alice-live-secret", "sk-carol-override", "sk-dave-disabled", "sk-upstream-openai-real"], upstream_calls = [{ upstream = "openai", count = 1, headers = { authorization = "Bearer sk-upstream-openai-real" } }] }
+
+[[cases]]
+name = "sha256_hashed_key_model_acl_and_models_filtering"
+use_mocks = ["openai_small_usage"]
+
+[[cases.steps]]
+name = "bob_models_list_filtered_to_fast_only"
+request = { method = "GET", path = "/v1/models", headers = { Authorization = "Bearer sk-bob-hashed-secret" } }
+expect = { status = 200, json_path = { "/data/0/id" = "fast" }, body_not_contains = "\"smart\"" }
+
+[[cases.steps]]
+name = "bob_forbidden_from_smart_on_models_retrieve"
+request = { method = "GET", path = "/v1/models/smart", headers = { Authorization = "Bearer sk-bob-hashed-secret" } }
+expect = { status = 403, json_path = { "/error/code" = "model_not_allowed" } }
+
+[[cases.steps]]
+name = "bob_forbidden_from_smart_on_chat"
+request = { method = "POST", path = "/v1/chat/completions", headers = { Authorization = "Bearer sk-bob-hashed-secret" }, json = { model = "smart", messages = [{ role = "user", content = "hi" }] } }
+expect = { status = 403, json_path = { "/error/code" = "model_not_allowed" }, upstream_calls = [{ upstream = "openai", count = 0 }] }
+
+[[cases.steps]]
+name = "bob_allowed_on_fast"
+request = { method = "POST", path = "/v1/chat/completions", headers = { Authorization = "Bearer sk-bob-hashed-secret" }, json = { model = "fast", messages = [{ role = "user", content = "hi" }] } }
+expect = { status = 200, upstream_calls = [{ upstream = "openai", count = 1 }] }
+
+[[cases]]
+name = "per_key_provider_override_and_local_count_tokens"
+use_mocks = ["anthropic_reply"]
+
+[[cases.steps]]
+name = "carol_smart_routes_to_anthropic_override_via_x_api_key"
+request = { method = "POST", path = "/v1/messages", headers = { "x-api-key" = "sk-carol-override" }, json = { model = "smart", max_tokens = 64, messages = [{ role = "user", content = "hello" }] } }
+expect = { status = 200, json_path = { "/content/0/text" = "Hello from Anthropic override!" }, upstream_calls = [{ upstream = "anthropic", count = 1, headers = { "x-api-key" = "sk-upstream-anthropic-real" } }] }
+
+[[cases.steps]]
+name = "anthropic_count_tokens_local_estimate"
+request = { method = "POST", path = "/v1/messages/count_tokens", headers = { "x-api-key" = "sk-carol-override" }, json = { model = "smart", system = "You are concise.", messages = [{ role = "user", content = "Count the tokens in this sentence please." }] } }
+expect = { status = 200, body_contains = "\"input_tokens\"", upstream_calls = [{ upstream = "anthropic", count = 1 }] }
+
+[[cases]]
+name = "rpm_limit_window_reset_and_tpm_reconciliation"
+use_mocks = ["openai_big_reconcile"]
+
+[[cases.steps]]
+name = "alice_first_call_reconciles_to_195_tokens"
+request = { method = "POST", path = "/v1/chat/completions", headers = { Authorization = "Bearer sk-alice-live-secret" }, json = { model = "fast", messages = [{ role = "user", content = "short" }] } }
+expect = { status = 200, headers = { "x-ratelimit-limit-requests" = "2", "x-ratelimit-remaining-requests" = "1", "x-ratelimit-limit-tokens" = "200" }, metrics_delta = { shunt_ai_tokens_total = 195.0 } }
+
+[[cases.steps]]
+name = "alice_second_call_rejected_by_reconciled_tpm"
+request = { method = "POST", path = "/v1/chat/completions", headers = { Authorization = "Bearer sk-alice-live-secret" }, json = { model = "fast", messages = [{ role = "user", content = "this message easily exceeds 5 remaining tokens" }] } }
+expect = { status = 429, headers_present = ["retry-after"], json_path = { "/error/code" = "tpm_limit_exceeded" } }
+
+[[cases.steps]]
+name = "advance_clock_resets_window_and_admits"
+advance_clock_ms = 61000
+request = { method = "POST", path = "/v1/chat/completions", headers = { Authorization = "Bearer sk-alice-live-secret" }, json = { model = "fast", messages = [{ role = "user", content = "fresh window!" }] } }
+expect = { status = 200, headers = { "x-ratelimit-remaining-requests" = "1" } }
+
+[[cases]]
+name = "budget_cost_attribution_soft_warning_hard_402_and_window_reset"
+use_mocks = ["openai_cached_cost"]
+
+[[cases.steps]]
+name = "first_call_charges_0_006_usd_crossing_soft_limit"
+request = { method = "POST", path = "/v1/chat/completions", headers = { Authorization = "Bearer sk-alice-live-secret" }, json = { model = "smart", messages = [{ role = "user", content = "hi" }] } }
+expect = { status = 200, headers = { "x-shunt-budget-limit-usd" = "0.010000" }, metrics_delta = { shunt_ai_cost_usd_total = 0.006 } }
+
+[[cases.steps]]
+name = "second_call_emits_soft_warning_header_and_charges_to_0_012"
+# Advance past the 60s TPM window (step 0 reconciled 1400 tokens) while staying within the 300s budget window.
+advance_clock_ms = 61000
+request = { method = "POST", path = "/v1/chat/completions", headers = { Authorization = "Bearer sk-alice-live-secret" }, json = { model = "smart", messages = [{ role = "user", content = "hi" }] } }
+expect = { status = 200, headers = { "x-shunt-budget-warning" = "soft_limit_reached", "x-shunt-budget-spent-usd" = "0.006000" }, metrics_delta = { shunt_ai_cost_usd_total = 0.006 } }
+
+[[cases.steps]]
+name = "third_call_rejected_402_budget_exceeded_across_reload"
+# Advance past 60s TPM window and hot-reload config to also prove spend ledger persists across reloads!
+advance_clock_ms = 61000
+reload_config_inline = """
+[server]
+listen = "127.0.0.1:0"
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+[[upstreams]]
+name = "openai"
+endpoints = ["http://127.0.0.1:19001"]
+[[upstreams]]
+name = "anthropic"
+endpoints = ["http://127.0.0.1:19002"]
+[[routes]]
+id = "ai_gov"
+path_prefix = "/v1"
+upstream = "openai"
+[[routes.plugins]]
+name = "ai-virtual-keys"
+id = "vkeys"
+[routes.plugins.config]
+[[routes.plugins.config.keys]]
+id = "alice"
+api_key = "env:ALICE_KEY"
+team = "eng"
+rpm = 10
+tpm = 100000
+budget_usd = 0.010
+budget_soft_limit_usd = 0.005
+budget_window = { seconds = 300 }
+[[routes.plugins]]
+name = "ai-model-router"
+id = "router"
+[routes.plugins.config.models]
+smart = [{ provider = "openai", upstream = "openai", model = "gpt-4o" }]
+[[routes.plugins]]
+name = "ai-token-rate-limit"
+id = "token_rl"
+[routes.plugins.config]
+rpm = 100
+tpm = 100000
+window_secs = 60
+[[routes.plugins]]
+name = "ai-budget"
+id = "budget"
+[routes.plugins.config]
+scope = "virtual_key"
+reject_status = 402
+use_builtin_pricing = false
+[routes.plugins.config.pricing."gpt-4o"]
+input_per_million_usd = 2.50
+output_per_million_usd = 10.00
+cached_input_per_million_usd = 1.25
+[[routes.plugins]]
+name = "ai-provider-adapter"
+id = "adapter"
+[routes.plugins.config.providers.openai]
+dialect = "openai_compatible"
+auth = { type = "bearer", api_key = "env:UPSTREAM_OPENAI_KEY" }
+[[routes.plugins]]
+name = "ai-usage-tracker"
+id = "usage"
+[routes.plugins.config]
+log_usage = false
+"""
+expect_reload_ok = true
+expect_pool_reused = ["openai"]
+request = { method = "POST", path = "/v1/chat/completions", headers = { Authorization = "Bearer sk-alice-live-secret" }, json = { model = "smart", messages = [{ role = "user", content = "blocked" }] } }
+expect = { status = 402, json_path = { "/error/code" = "budget_exceeded" }, headers = { "x-shunt-budget-warning" = "hard_limit_exceeded" } }
+
+[[cases.steps]]
+name = "advance_clock_past_budget_window_resets_spend"
+advance_clock_ms = 301000
+request = { method = "POST", path = "/v1/chat/completions", headers = { Authorization = "Bearer sk-alice-live-secret" }, json = { model = "smart", messages = [{ role = "user", content = "allowed again" }] } }
+expect = { status = 200, headers = { "x-shunt-budget-spent-usd" = "0.000000" } }
+
+[[cases]]
+name = "team_aggregate_budget_blocks_teammate"
+use_mocks = ["openai_team_drain"]
+
+[[cases.steps]]
+name = "bob_spends_0_016_exhausting_eng_team_budget"
+request = { method = "POST", path = "/v1/chat/completions", headers = { Authorization = "Bearer sk-bob-hashed-secret" }, json = { model = "fast", messages = [{ role = "user", content = "spend" }] } }
+expect = { status = 200, metrics_delta = { shunt_ai_cost_usd_total = 0.016 } }
+
+[[cases.steps]]
+name = "alice_on_same_team_eng_rejected_by_team_budget"
+request = { method = "POST", path = "/v1/chat/completions", headers = { Authorization = "Bearer sk-alice-live-secret" }, json = { model = "fast", messages = [{ role = "user", content = "blocked by team" }] } }
+expect = { status = 402, json_path = { "/error/code" = "budget_exceeded" }, body_contains = "team:eng" }

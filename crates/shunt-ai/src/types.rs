@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -51,6 +52,7 @@ impl fmt::Display for ProviderDialect {
 pub enum AiEndpointKind {
     ChatCompletions,
     AnthropicMessages,
+    AnthropicCountTokens,
     OpenAiResponses,
     Embeddings,
     ModelsList,
@@ -62,6 +64,7 @@ impl AiEndpointKind {
         match self {
             AiEndpointKind::ChatCompletions => "chat_completions",
             AiEndpointKind::AnthropicMessages => "anthropic_messages",
+            AiEndpointKind::AnthropicCountTokens => "anthropic_count_tokens",
             AiEndpointKind::OpenAiResponses => "openai_responses",
             AiEndpointKind::Embeddings => "embeddings",
             AiEndpointKind::ModelsList => "models_list",
@@ -72,7 +75,9 @@ impl AiEndpointKind {
     pub const fn is_models_discovery(self) -> bool {
         matches!(
             self,
-            AiEndpointKind::ModelsList | AiEndpointKind::ModelRetrieve
+            AiEndpointKind::ModelsList
+                | AiEndpointKind::ModelRetrieve
+                | AiEndpointKind::AnthropicCountTokens
         )
     }
 
@@ -86,6 +91,152 @@ impl AiEndpointKind {
                 | AiEndpointKind::OpenAiResponses
         )
     }
+
+    /// Returns `true` when gateway errors should be formatted using Anthropic's error envelope.
+    pub const fn uses_anthropic_errors(self) -> bool {
+        matches!(
+            self,
+            AiEndpointKind::AnthropicMessages | AiEndpointKind::AnthropicCountTokens
+        )
+    }
+}
+
+/// Budget accumulation window used by `ai-virtual-keys` and `ai-budget`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetWindow {
+    Hourly,
+    #[default]
+    Daily,
+    Monthly,
+    /// Explicit window duration in seconds (e.g., `{ seconds = 300 }`).
+    #[serde(untagged)]
+    Custom {
+        seconds: u64,
+    },
+}
+
+impl BudgetWindow {
+    pub const fn as_duration(self) -> Duration {
+        match self {
+            BudgetWindow::Hourly => Duration::from_secs(3_600),
+            BudgetWindow::Daily => Duration::from_secs(86_400),
+            BudgetWindow::Monthly => Duration::from_secs(30 * 86_400),
+            BudgetWindow::Custom { seconds } => {
+                Duration::from_secs(if seconds == 0 { 1 } else { seconds })
+            }
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            BudgetWindow::Hourly => "hourly",
+            BudgetWindow::Daily => "daily",
+            BudgetWindow::Monthly => "monthly",
+            BudgetWindow::Custom { .. } => "custom",
+        }
+    }
+}
+
+/// Authenticated virtual API key identity & multi-tenant policy attached to
+/// `RequestCtx::extensions` by `ai-virtual-keys` and enforced downstream by
+/// `ai-model-router`, `ai-token-rate-limit`, `ai-budget`, and `ai-usage-tracker`.
+#[derive(Debug, Clone)]
+pub struct AiKeyPolicy {
+    pub key_id: String,
+    pub team: Option<String>,
+    /// Glob patterns of permitted model aliases/names (empty = all models permitted).
+    pub allowed_models: Vec<String>,
+    /// Named provider IDs permitted for this key (empty = all providers permitted).
+    pub allowed_providers: Vec<String>,
+    /// Per-model target override chains (exact model name or glob pattern -> targets).
+    pub provider_overrides: HashMap<String, Vec<AiTarget>>,
+    /// Optional per-key RPM override for `ai-token-rate-limit`.
+    pub rpm: Option<u64>,
+    /// Optional per-key TPM override for `ai-token-rate-limit`.
+    pub tpm: Option<u64>,
+    /// Optional per-key hard spend budget (USD) for `ai-budget`.
+    pub budget_usd: Option<f64>,
+    /// Optional per-key soft warning spend threshold (USD) for `ai-budget`.
+    pub budget_soft_limit_usd: Option<f64>,
+    /// Optional per-key budget window override for `ai-budget`.
+    pub budget_window: Option<BudgetWindow>,
+    /// Arbitrary key metadata tags.
+    pub metadata: BTreeMap<String, String>,
+}
+
+impl AiKeyPolicy {
+    /// Returns `true` if `model` is permitted by `allowed_models` (empty list allows all).
+    pub fn allows_model(&self, model: &str) -> bool {
+        if self.allowed_models.is_empty() {
+            return true;
+        }
+        self.allowed_models
+            .iter()
+            .any(|pat| wildcard_match(pat, model))
+    }
+
+    /// Returns `true` if `provider` is permitted by `allowed_providers` (empty list allows all).
+    pub fn allows_provider(&self, provider: &str) -> bool {
+        if self.allowed_providers.is_empty() {
+            return true;
+        }
+        self.allowed_providers
+            .iter()
+            .any(|pat| wildcard_match(pat, provider))
+    }
+
+    /// Resolves any per-key target override for `requested_model` (exact match first, then glob).
+    pub fn override_targets(&self, requested_model: &str) -> Option<Vec<AiTarget>> {
+        if let Some(targets) = self.provider_overrides.get(requested_model) {
+            return Some(targets.clone());
+        }
+        // Deterministic scan over sorted patterns if a wildcard override exists.
+        let mut patterns: Vec<&String> = self
+            .provider_overrides
+            .keys()
+            .filter(|k| k.contains('*'))
+            .collect();
+        patterns.sort();
+        for pat in patterns {
+            if wildcard_match(pat, requested_model) {
+                return self.provider_overrides.get(pat).cloned();
+            }
+        }
+        None
+    }
+}
+
+/// Simple wildcard glob matching supporting `*` (zero or more bytes).
+pub fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let p = pattern.as_bytes();
+    let t = text.as_bytes();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut star_idx: Option<usize> = None;
+    let mut match_idx = 0usize;
+
+    while ti < t.len() {
+        if pi < p.len() && p[pi] == t[ti] {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == b'*' {
+            star_idx = Some(pi);
+            match_idx = ti;
+            pi += 1;
+        } else if let Some(si) = star_idx {
+            pi = si + 1;
+            match_idx += 1;
+            ti = match_idx;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+
+    pi == p.len()
 }
 
 impl fmt::Display for AiEndpointKind {
@@ -198,6 +349,7 @@ pub struct AiUsage {
     pub provider: Option<String>,
     pub served_model: Option<String>,
     pub prompt_tokens: Option<u64>,
+    pub cached_prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub first_token_at: Option<Instant>,
@@ -224,6 +376,8 @@ impl AiUsage {
 pub struct AiUsageReport {
     pub request_id: u64,
     pub route_id: Option<String>,
+    pub key_id: Option<String>,
+    pub team: Option<String>,
     pub provider: String,
     pub upstream: Option<String>,
     pub requested_model: String,
@@ -233,6 +387,7 @@ pub struct AiUsageReport {
     pub attempts: usize,
     pub failover_events: Vec<FailoverEvent>,
     pub prompt_tokens: Option<u64>,
+    pub cached_prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub ttft: Option<Duration>,
@@ -322,12 +477,11 @@ pub fn endpoint_error_response(
     code: Option<&str>,
     message: &str,
 ) -> BufferedResponse {
-    match endpoint {
-        AiEndpointKind::AnthropicMessages => {
-            let anth_type = map_status_to_anthropic_error_type(status, Some(error_type));
-            anthropic_error_response(status, anth_type, message)
-        }
-        _ => openai_error_response(status, error_type, code, message),
+    if endpoint.uses_anthropic_errors() {
+        let anth_type = map_status_to_anthropic_error_type(status, Some(error_type));
+        anthropic_error_response(status, anth_type, message)
+    } else {
+        openai_error_response(status, error_type, code, message)
     }
 }
 

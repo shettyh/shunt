@@ -5,6 +5,7 @@
 
 pub mod clock;
 pub mod context;
+pub mod distributed;
 pub mod flow;
 pub mod http_types;
 pub mod mask;
@@ -14,6 +15,9 @@ pub mod state;
 pub use bytes::Bytes;
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use context::RequestCtx;
+pub use distributed::{
+    DistributedStore, DistributedStoreError, FailurePolicy, InMemoryDistributedStore, QuotaOutcome,
+};
 pub use flow::{BoxFuture, BufferedResponse, Flow, HookResult, StreamFlow};
 pub use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version, header};
 pub use http_types::{

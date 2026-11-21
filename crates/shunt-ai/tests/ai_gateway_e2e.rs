@@ -1179,3 +1179,51 @@ fn example_shunt_ai_multi_provider_toml_compiles_and_verifies_cleanly() {
         report.diagnostics
     );
 }
+
+#[test]
+fn example_shunt_ai_governance_toml_compiles_and_verifies_cleanly() {
+    unsafe {
+        std::env::set_var("OPENAI_API_KEY", "sk-example-openai");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-example-anthropic");
+        std::env::set_var("ALICE_VIRTUAL_KEY", "sk-shunt-alice-secret");
+        std::env::set_var("BOB_VIRTUAL_KEY", "sk-shunt-bob-secret");
+    }
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/shunt-ai-governance.toml");
+    let provider = shunt_config::FileConfigProvider::new(&path);
+    let loaded = provider
+        .load()
+        .expect("examples/shunt-ai-governance.toml should parse");
+
+    let mut reg = PluginRegistry::new();
+    let prom = Arc::new(PrometheusMetrics::new());
+    let ai_metrics = Arc::new(AiMetrics::new());
+    register_builtin_plugins(&mut reg, prom);
+    register_ai_plugins(&mut reg, ai_metrics);
+
+    let compiler = SnapshotCompiler::new(Arc::new(reg), Arc::new(RuntimeRegistry::new()));
+    let bundle = compiler
+        .compile(&loaded)
+        .expect("examples/shunt-ai-governance.toml should compile cleanly");
+
+    let inspect_json = serde_json::to_string(&bundle.inspect).unwrap();
+    for secret in [
+        "sk-example-openai",
+        "sk-example-anthropic",
+        "sk-shunt-alice-secret",
+        "sk-shunt-bob-secret",
+    ] {
+        assert!(
+            !inspect_json.contains(secret),
+            "secret `{secret}` leaked into SnapshotInspect"
+        );
+    }
+
+    let report = shunt_config::verify_bundle(&bundle, None, true);
+    assert!(
+        report.passed,
+        "governance example failed verify: {:?}",
+        report.diagnostics
+    );
+}

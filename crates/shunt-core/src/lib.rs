@@ -6,6 +6,7 @@ pub mod body;
 pub mod catch;
 pub mod error;
 pub mod pipeline;
+pub mod redis;
 pub mod registry;
 pub mod server;
 pub mod snapshot;
@@ -15,6 +16,10 @@ pub mod ws;
 
 pub use body::ShuntBody;
 pub use error::CoreError;
+pub use redis::{
+    RedisStateStore, RedisStoreConfig, RespError, RespValue, decode_resp_frame,
+    encode_resp_command, encode_resp_value,
+};
 pub use registry::{BuildSession, RuntimeRegistry};
 pub use server::{GatewayServer, ServerHandle, ServerReloader};
 pub use snapshot::{

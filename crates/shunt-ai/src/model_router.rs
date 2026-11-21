@@ -9,9 +9,10 @@ use shunt_plugin_sdk::{
     StatusCode, UpstreamSelection,
 };
 
+use crate::tokens::estimate_request_tokens;
 use crate::types::{
-    AiCapability, AiEndpointKind, AiRequestMeta, AiTarget, DetectedEndpoint,
-    endpoint_error_response, openai_error_response, percent_decode,
+    AiCapability, AiEndpointKind, AiKeyPolicy, AiRequestMeta, AiTarget, DetectedEndpoint,
+    endpoint_error_response, openai_error_response, percent_decode, wildcard_match,
 };
 
 const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
@@ -71,6 +72,10 @@ struct AiModelRouterConfig {
     /// buffering bodies or hopping to an upstream (default: true).
     #[serde(default = "default_true")]
     serve_models_endpoint: bool,
+    /// Serve `POST /v1/messages/count_tokens` locally using Shunt's fast deterministic
+    /// token estimator without calling upstream providers (default: true).
+    #[serde(default = "default_true")]
+    serve_count_tokens_endpoint: bool,
     /// Additional concrete model IDs to advertise on `GET /v1/models` (useful for
     /// wildcard-routed models like `"claude-3-5-sonnet-20241022"` or `"gemini-2.5-flash"`).
     exposed_models: Vec<String>,
@@ -88,6 +93,7 @@ impl Default for AiModelRouterConfig {
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             auto_max_attempts: true,
             serve_models_endpoint: true,
+            serve_count_tokens_endpoint: true,
             exposed_models: Vec::new(),
             models: HashMap::new(),
             rules: Vec::new(),
@@ -153,7 +159,7 @@ impl PluginFactory for AiModelRouterFactory {
             validate_targets(self.name(), "default_targets", &cfg.default_targets)?;
         }
 
-        let (models_list_json, models_by_id) = compile_models_catalog(
+        let (models_list_json, models_by_id, catalog_entries) = compile_models_catalog(
             &cfg.models,
             &cfg.rules,
             &cfg.default_targets,
@@ -164,11 +170,13 @@ impl PluginFactory for AiModelRouterFactory {
             max_body_bytes: cfg.max_body_bytes,
             auto_max_attempts: cfg.auto_max_attempts,
             serve_models_endpoint: cfg.serve_models_endpoint,
+            serve_count_tokens_endpoint: cfg.serve_count_tokens_endpoint,
             models: cfg.models,
             rules: cfg.rules,
             default_targets: cfg.default_targets,
             models_list_json,
             models_by_id,
+            catalog_entries,
         }))
     }
 }
@@ -208,7 +216,7 @@ fn compile_models_catalog(
     rules: &[ModelRule],
     default_targets: &[TargetSpec],
     exposed_models: &[String],
-) -> (Bytes, HashMap<String, Bytes>) {
+) -> (Bytes, HashMap<String, Bytes>, Vec<(String, String)>) {
     // BTreeMap guarantees deterministic alphabetical ordering by model `id`.
     let mut catalog: BTreeMap<String, String> = BTreeMap::new();
 
@@ -244,6 +252,7 @@ fn compile_models_catalog(
 
     let mut data_entries = Vec::with_capacity(catalog.len());
     let mut models_by_id = HashMap::with_capacity(catalog.len());
+    let mut ordered_entries = Vec::with_capacity(catalog.len());
 
     for (id, owned_by) in catalog {
         let entry = json!({
@@ -253,6 +262,7 @@ fn compile_models_catalog(
             "owned_by": owned_by,
         });
         let single_bytes = Bytes::from(serde_json::to_vec(&entry).unwrap_or_default());
+        ordered_entries.push((id.clone(), owned_by));
         models_by_id.insert(id, single_bytes);
         data_entries.push(entry);
     }
@@ -263,7 +273,7 @@ fn compile_models_catalog(
     });
     let list_bytes = Bytes::from(serde_json::to_vec(&list_payload).unwrap_or_default());
 
-    (list_bytes, models_by_id)
+    (list_bytes, models_by_id, ordered_entries)
 }
 
 fn resolve_owner_for_exposed(
@@ -297,11 +307,13 @@ pub struct AiModelRouterPlugin {
     max_body_bytes: usize,
     auto_max_attempts: bool,
     serve_models_endpoint: bool,
+    serve_count_tokens_endpoint: bool,
     models: HashMap<String, Vec<TargetSpec>>,
     rules: Vec<ModelRule>,
     default_targets: Vec<TargetSpec>,
     models_list_json: Bytes,
     models_by_id: HashMap<String, Bytes>,
+    catalog_entries: Vec<(String, String)>,
 }
 
 impl AiModelRouterPlugin {
@@ -362,9 +374,29 @@ impl HttpPlugin for AiModelRouterPlugin {
         if self.serve_models_endpoint && req.method == Method::GET {
             if path == "/v1/models" || path == "/models" {
                 ctx.insert_ext(DetectedEndpoint(AiEndpointKind::ModelsList));
+                let payload = match ctx.get_ext::<AiKeyPolicy>() {
+                    Some(policy) if !policy.allowed_models.is_empty() => {
+                        let filtered: Vec<serde_json::Value> = self
+                            .catalog_entries
+                            .iter()
+                            .filter(|(id, _)| policy.allows_model(id))
+                            .map(|(id, owned_by)| {
+                                json!({
+                                    "id": id,
+                                    "object": "model",
+                                    "created": 0,
+                                    "owned_by": owned_by,
+                                })
+                            })
+                            .collect();
+                        let list = json!({ "object": "list", "data": filtered });
+                        Bytes::from(serde_json::to_vec(&list).unwrap_or_default())
+                    }
+                    _ => self.models_list_json.clone(),
+                };
                 return HookResult::Ready(Flow::Respond(BufferedResponse::json(
                     StatusCode::OK,
-                    self.models_list_json.clone(),
+                    payload,
                 )));
             }
 
@@ -375,6 +407,20 @@ impl HttpPlugin for AiModelRouterPlugin {
             {
                 ctx.insert_ext(DetectedEndpoint(AiEndpointKind::ModelRetrieve));
                 let decoded_id = percent_decode(raw_id);
+                if let Some(policy) = ctx.get_ext::<AiKeyPolicy>()
+                    && !policy.allows_model(&decoded_id)
+                {
+                    let resp = openai_error_response(
+                        StatusCode::FORBIDDEN,
+                        "permission_error",
+                        Some("model_not_allowed"),
+                        &format!(
+                            "Virtual key `{}` is not allowed to access model `{decoded_id}`",
+                            policy.key_id
+                        ),
+                    );
+                    return HookResult::Ready(Flow::Respond(resp));
+                }
                 if let Some(model_bytes) = self.models_by_id.get(&decoded_id) {
                     return HookResult::Ready(Flow::Respond(BufferedResponse::json(
                         StatusCode::OK,
@@ -393,6 +439,8 @@ impl HttpPlugin for AiModelRouterPlugin {
 
         let endpoint = if path.ends_with("/embeddings") {
             AiEndpointKind::Embeddings
+        } else if path.ends_with("/messages/count_tokens") {
+            AiEndpointKind::AnthropicCountTokens
         } else if path.ends_with("/messages") {
             AiEndpointKind::AnthropicMessages
         } else if path.ends_with("/responses") {
@@ -440,7 +488,37 @@ impl HttpPlugin for AiModelRouterPlugin {
             return HookResult::Ready(Flow::Respond(resp));
         };
 
-        let Some(all_targets) = self.resolve_targets(&model) else {
+        // Enforce virtual key model ACL before routing or local count_tokens.
+        if let Some(policy) = ctx.get_ext::<AiKeyPolicy>()
+            && !policy.allows_model(&model)
+        {
+            let resp = endpoint_error_response(
+                endpoint,
+                StatusCode::FORBIDDEN,
+                "permission_error",
+                Some("model_not_allowed"),
+                &format!(
+                    "Virtual key `{}` is not allowed to access model `{model}`",
+                    policy.key_id
+                ),
+            );
+            return HookResult::Ready(Flow::Respond(resp));
+        }
+
+        // Local Anthropic `POST /v1/messages/count_tokens` estimation fast path.
+        if endpoint == AiEndpointKind::AnthropicCountTokens && self.serve_count_tokens_endpoint {
+            let est = estimate_request_tokens(endpoint, body);
+            let payload = json!({ "input_tokens": est.input_tokens });
+            let bytes = serde_json::to_vec(&payload).unwrap_or_default();
+            return HookResult::Ready(Flow::Respond(BufferedResponse::json(StatusCode::OK, bytes)));
+        }
+
+        // Apply per-key provider overrides if present, else resolve from route rules.
+        let override_targets = ctx
+            .get_ext::<AiKeyPolicy>()
+            .and_then(|p| p.override_targets(&model));
+
+        let Some(all_targets) = override_targets.or_else(|| self.resolve_targets(&model)) else {
             let resp = endpoint_error_response(
                 endpoint,
                 StatusCode::NOT_FOUND,
@@ -451,20 +529,45 @@ impl HttpPlugin for AiModelRouterPlugin {
             return HookResult::Ready(Flow::Respond(resp));
         };
 
+        // Filter targets by virtual key `allowed_providers` if configured.
+        let allowed_targets: Vec<AiTarget> = match ctx.get_ext::<AiKeyPolicy>() {
+            Some(policy) if !policy.allowed_providers.is_empty() => all_targets
+                .into_iter()
+                .filter(|t| policy.allows_provider(&t.provider))
+                .collect(),
+            _ => all_targets,
+        };
+
+        if allowed_targets.is_empty() {
+            let key_id = ctx
+                .get_ext::<AiKeyPolicy>()
+                .map(|p| p.key_id.as_str())
+                .unwrap_or("unknown");
+            let resp = endpoint_error_response(
+                endpoint,
+                StatusCode::FORBIDDEN,
+                "permission_error",
+                Some("provider_not_allowed"),
+                &format!("Virtual key `{key_id}` has no permitted providers for model `{model}`"),
+            );
+            return HookResult::Ready(Flow::Respond(resp));
+        }
+
         let required_cap = match endpoint {
             AiEndpointKind::Embeddings => Some(AiCapability::Embeddings),
             AiEndpointKind::ChatCompletions
             | AiEndpointKind::AnthropicMessages
+            | AiEndpointKind::AnthropicCountTokens
             | AiEndpointKind::OpenAiResponses => Some(AiCapability::Chat),
             AiEndpointKind::ModelsList | AiEndpointKind::ModelRetrieve => None,
         };
 
         let targets: Vec<AiTarget> = match required_cap {
-            Some(cap) => all_targets
+            Some(cap) => allowed_targets
                 .into_iter()
                 .filter(|t| t.supports(cap))
                 .collect(),
-            None => all_targets,
+            None => allowed_targets,
         };
 
         if targets.is_empty() {
@@ -524,38 +627,6 @@ impl HttpPlugin for AiModelRouterPlugin {
     }
 }
 
-/// Simple wildcard glob matching supporting `*` (zero or more characters).
-fn wildcard_match(pattern: &str, text: &str) -> bool {
-    let p = pattern.as_bytes();
-    let t = text.as_bytes();
-    let (mut pi, mut ti) = (0usize, 0usize);
-    let mut star_idx: Option<usize> = None;
-    let mut match_idx = 0usize;
-
-    while ti < t.len() {
-        if pi < p.len() && p[pi] == t[ti] {
-            pi += 1;
-            ti += 1;
-        } else if pi < p.len() && p[pi] == b'*' {
-            star_idx = Some(pi);
-            match_idx = ti;
-            pi += 1;
-        } else if let Some(si) = star_idx {
-            pi = si + 1;
-            match_idx += 1;
-            ti = match_idx;
-        } else {
-            return false;
-        }
-    }
-
-    while pi < p.len() && p[pi] == b'*' {
-        pi += 1;
-    }
-
-    pi == p.len()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,7 +677,8 @@ mod tests {
         }];
         let exposed = vec!["claude-3-5-sonnet-20241022".to_owned(), "smart".to_owned()];
 
-        let (list_bytes, by_id) = compile_models_catalog(&models, &rules, &[], &exposed);
+        let (list_bytes, by_id, entries) = compile_models_catalog(&models, &rules, &[], &exposed);
+        assert_eq!(entries.len(), 3);
         let list: serde_json::Value = serde_json::from_slice(&list_bytes).unwrap();
         let data = list["data"].as_array().unwrap();
         let ids: Vec<&str> = data.iter().map(|d| d["id"].as_str().unwrap()).collect();

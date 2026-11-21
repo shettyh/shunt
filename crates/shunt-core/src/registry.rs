@@ -3,9 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use shunt_plugin_sdk::state::StagedStateMap;
-use shunt_plugin_sdk::{BuildContext, Clock, StateStore, SystemClock};
+use shunt_plugin_sdk::{BuildContext, Clock, DistributedStore, StateStore, SystemClock};
 
 use crate::error::CoreError;
+use crate::redis::{RedisStateStore, RedisStoreConfig};
 use crate::upstream::{UpstreamConfig, UpstreamPool, UpstreamPoolKey};
 
 /// Shared runtime registry persisting warm upstream pools and stateful plugin state
@@ -20,6 +21,7 @@ use crate::upstream::{UpstreamConfig, UpstreamPool, UpstreamPoolKey};
 pub struct RuntimeRegistry {
     next_pool_id: AtomicU64,
     pools: RwLock<HashMap<UpstreamPoolKey, Arc<UpstreamPool>>>,
+    redis_stores: RwLock<HashMap<RedisStoreConfig, Arc<RedisStateStore>>>,
     state_store: Arc<StateStore>,
     clock: Arc<dyn Clock>,
 }
@@ -41,8 +43,42 @@ impl RuntimeRegistry {
         Self {
             next_pool_id: AtomicU64::new(1),
             pools: RwLock::new(HashMap::new()),
+            redis_stores: RwLock::new(HashMap::new()),
             state_store: Arc::new(StateStore::new()),
             clock,
+        }
+    }
+
+    /// Returns a cached warm [`RedisStateStore`] matching `config`, or creates and caches one.
+    pub fn get_or_create_redis_store(&self, config: &RedisStoreConfig) -> Arc<RedisStateStore> {
+        if let Some(existing) = self
+            .redis_stores
+            .read()
+            .expect("RuntimeRegistry redis_stores lock poisoned")
+            .get(config)
+            .cloned()
+        {
+            return existing;
+        }
+        let mut guard = self
+            .redis_stores
+            .write()
+            .expect("RuntimeRegistry redis_stores lock poisoned");
+        guard
+            .entry(config.clone())
+            .or_insert_with(|| Arc::new(RedisStateStore::new(config.clone())))
+            .clone()
+    }
+
+    /// Garbage-collects cached Redis stores other than `active` (call only after snapshot commit).
+    pub fn retain_redis_store(&self, active: Option<&RedisStoreConfig>) {
+        let mut guard = self
+            .redis_stores
+            .write()
+            .expect("RuntimeRegistry redis_stores lock poisoned");
+        match active {
+            Some(cfg) => guard.retain(|k, _| k == cfg),
+            None => guard.clear(),
         }
     }
 
@@ -156,11 +192,20 @@ impl RuntimeRegistry {
     /// and tracks touched scopes so failed compilations never pollute [`StateStore`], while
     /// successful compilations atomically commit staged state and GC orphaned scopes.
     pub fn begin_build_session(&self) -> BuildSession {
+        self.begin_build_session_with_distributed(None)
+    }
+
+    /// Starts a transactional plugin build session with an optional [`DistributedStore`].
+    pub fn begin_build_session_with_distributed(
+        &self,
+        distributed_store: Option<Arc<dyn DistributedStore>>,
+    ) -> BuildSession {
         BuildSession {
             state_store: Arc::clone(&self.state_store),
             touched_scopes: Arc::new(RwLock::new(HashSet::new())),
             staged_state: Arc::new(RwLock::new(HashMap::new())),
             clock: Arc::clone(&self.clock),
+            distributed_store,
         }
     }
 }
@@ -174,6 +219,7 @@ pub struct BuildSession {
     touched_scopes: Arc<RwLock<HashSet<String>>>,
     staged_state: Arc<RwLock<StagedStateMap>>,
     clock: Arc<dyn Clock>,
+    distributed_store: Option<Arc<dyn DistributedStore>>,
 }
 
 impl BuildSession {
@@ -185,6 +231,7 @@ impl BuildSession {
             Arc::clone(&self.staged_state),
             Arc::clone(&self.clock),
         )
+        .with_distributed_store(self.distributed_store.as_ref().map(Arc::clone))
     }
 
     /// Atomically commits all newly staged state entries into [`StateStore`] and

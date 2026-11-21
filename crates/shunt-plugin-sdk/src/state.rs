@@ -6,6 +6,7 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use crate::clock::{Clock, SystemClock};
+use crate::distributed::DistributedStore;
 use crate::plugin::HttpPlugin;
 
 /// Type-erased map used to stage newly created plugin state during transactional builds.
@@ -237,6 +238,7 @@ pub struct BuildContext {
     touched_scopes: Arc<RwLock<HashSet<String>>>,
     staged: Option<Arc<RwLock<StagedStateMap>>>,
     clock: Arc<dyn Clock>,
+    distributed_store: Option<Arc<dyn DistributedStore>>,
 }
 
 impl BuildContext {
@@ -251,6 +253,7 @@ impl BuildContext {
             touched_scopes,
             staged: None,
             clock: SystemClock::shared(),
+            distributed_store: None,
         }
     }
 
@@ -268,12 +271,22 @@ impl BuildContext {
             touched_scopes,
             staged: Some(staged),
             clock,
+            distributed_store: None,
         }
     }
 
     /// Attaches a custom [`Clock`] implementation (e.g., [`crate::ManualClock`] in tests).
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// Attaches an optional distributed state backend (e.g., Redis / Valkey).
+    pub fn with_distributed_store(
+        mut self,
+        distributed_store: Option<Arc<dyn DistributedStore>>,
+    ) -> Self {
+        self.distributed_store = distributed_store;
         self
     }
 
@@ -285,6 +298,14 @@ impl BuildContext {
     /// Monotonic clock shared by this runtime (defaults to [`SystemClock`]).
     pub fn clock(&self) -> Arc<dyn Clock> {
         Arc::clone(&self.clock)
+    }
+
+    /// Optional shared [`DistributedStore`] backend configured at the gateway level.
+    ///
+    /// Returns `None` in the default single-binary in-memory mode so plugins stay on the
+    /// synchronous zero-allocation fast path.
+    pub fn distributed_store(&self) -> Option<Arc<dyn DistributedStore>> {
+        self.distributed_store.as_ref().map(Arc::clone)
     }
 
     /// Requests a scoped [`StateHandle`] whose entries will survive snapshot reloads

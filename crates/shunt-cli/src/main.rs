@@ -482,9 +482,10 @@ async fn wait_for_signals(controller: Arc<ReloadController>) {
 
 fn print_snapshot_table(inspect: &SnapshotInspect) {
     println!(
-        "Snapshot v{} (digest: {})",
+        "Snapshot v{} (digest: {}, state: {})",
         inspect.version,
-        &inspect.digest[..inspect.digest.len().min(12)]
+        &inspect.digest[..inspect.digest.len().min(12)],
+        inspect.state_backend
     );
 
     if !inspect.global_plugins.is_empty() {

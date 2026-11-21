@@ -242,7 +242,12 @@ pub fn verify_bundle(
             .position(|p| p.name == "ai-model-router");
         if let Some(r_idx) = router_pos {
             for (idx, att) in route_ir.plugins.iter().enumerate() {
-                if idx < r_idx && (att.name == "ai-provider-adapter" || att.name == "ai-failover") {
+                if idx < r_idx
+                    && matches!(
+                        att.name.as_str(),
+                        "ai-provider-adapter" | "ai-failover" | "ai-token-rate-limit" | "ai-budget"
+                    )
+                {
                     diags.push(VerifyDiagnostic {
                         rule: "ai.plugin_order".to_owned(),
                         severity: Severity::Error,
@@ -250,6 +255,17 @@ pub fn verify_bundle(
                         message: format!(
                             "plugin `{}` (index {idx}) appears before `ai-model-router` (index {r_idx}) on route `{}`",
                             att.name, route_ir.id
+                        ),
+                    });
+                }
+                if idx > r_idx && att.name == "ai-virtual-keys" {
+                    diags.push(VerifyDiagnostic {
+                        rule: "ai.plugin_order".to_owned(),
+                        severity: Severity::Error,
+                        subject: Some(route_ir.id.clone()),
+                        message: format!(
+                            "plugin `ai-virtual-keys` (index {idx}) appears after `ai-model-router` (index {r_idx}) on route `{}`; place `ai-virtual-keys` first so authentication and model ACLs run before routing",
+                            route_ir.id
                         ),
                     });
                 }

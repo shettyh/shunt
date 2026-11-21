@@ -19,15 +19,20 @@
 
 pub mod aws_eventstream;
 pub mod aws_sigv4;
+pub mod budget;
 pub mod dialects;
 pub mod failover;
 pub mod ingress;
 pub mod model_router;
+pub mod pricing;
 pub mod provider_adapter;
 pub mod sse;
+pub mod token_rate_limit;
+pub mod tokens;
 pub mod translate;
 pub mod types;
 pub mod usage_tracker;
+pub mod virtual_keys;
 
 use std::sync::Arc;
 
@@ -38,6 +43,7 @@ pub use aws_eventstream::{
     crc32_ieee, encode_eventstream_frame,
 };
 pub use aws_sigv4::{AwsSigV4Credentials, SigV4Output, sign_canonical, sign_upstream_request};
+pub use budget::{AiBudgetFactory, AiBudgetPlugin, AiBudgetState, SpendLedgerTable};
 pub use dialects::bedrock::{
     BedrockStreamTranslator, bedrock_converse_path, bedrock_converse_to_openai_response,
     map_bedrock_stop_reason, openai_to_bedrock_converse_request,
@@ -57,28 +63,40 @@ pub use ingress::responses::{
     rewrite_openai_responses_request,
 };
 pub use model_router::{AiModelRouterFactory, AiModelRouterPlugin, ModelRule, TargetSpec};
+pub use pricing::{
+    ModelPricing, NANO_USD_PER_USD, PricingCatalog, nano_usd_to_usd, usd_to_nano_usd,
+};
 pub use provider_adapter::{
     AiProviderAdapterFactory, AiProviderAdapterPlugin, ProviderAuthConfig, ProviderInstanceConfig,
 };
 pub use sse::{SseEvent, SseParser};
+pub use token_rate_limit::{
+    AiTokenRateLimitFactory, AiTokenRateLimitPlugin, AiTokenReservation, QuotaWindowTable,
+};
+pub use tokens::{TokenEstimate, estimate_request_tokens, estimate_text_tokens};
 pub use translate::{
     AnthropicSseTranslator, anthropic_to_openai_response, map_anthropic_stop_reason,
     openai_to_anthropic_request, rewrite_openai_embeddings_request, rewrite_openai_request,
 };
 pub use types::{
-    AiCapability, AiEndpointKind, AiFailoverHistory, AiRequestMeta, AiTarget, AiUsage,
-    AiUsageReport, DetectedEndpoint, FailoverEvent, ProviderDialect, anthropic_error_response,
-    endpoint_error_response, openai_error_response,
+    AiCapability, AiEndpointKind, AiFailoverHistory, AiKeyPolicy, AiRequestMeta, AiTarget, AiUsage,
+    AiUsageReport, BudgetWindow, DetectedEndpoint, FailoverEvent, ProviderDialect,
+    anthropic_error_response, endpoint_error_response, openai_error_response, wildcard_match,
 };
 pub use usage_tracker::{
     AiMetrics, AiMetricsSnapshot, AiUsageTrackerFactory, AiUsageTrackerPlugin, UsageSink,
 };
+pub use virtual_keys::{AiVirtualKeysFactory, AiVirtualKeysPlugin};
 
-/// Registers all `shunt-ai` plugins (`ai-model-router`, `ai-provider-adapter`,
-/// `ai-failover`, `ai-usage-tracker`) into `registry`.
+/// Registers all `shunt-ai` plugins (`ai-virtual-keys`, `ai-model-router`,
+/// `ai-token-rate-limit`, `ai-budget`, `ai-provider-adapter`, `ai-failover`,
+/// `ai-usage-tracker`) into `registry`.
 pub fn register_ai_plugins(registry: &mut PluginRegistry, ai_metrics: Arc<AiMetrics>) {
     registry
+        .register(AiVirtualKeysFactory)
         .register(AiModelRouterFactory)
+        .register(AiTokenRateLimitFactory)
+        .register(AiBudgetFactory::new(Arc::clone(&ai_metrics)))
         .register(AiProviderAdapterFactory)
         .register(AiFailoverFactory)
         .register(AiUsageTrackerFactory::new(ai_metrics));

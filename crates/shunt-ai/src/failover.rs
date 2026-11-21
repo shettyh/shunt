@@ -4,10 +4,11 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use shunt_plugin_sdk::{
-    BuildContext, Clock, Flow, HookMask, HookResult, HttpPlugin, PluginBuildError, PluginConfig,
-    PluginFactory, RequestCtx, ResponseHead, UpstreamSelection, header,
+    BuildContext, Clock, DistributedStore, Flow, HookMask, HookResult, HttpPlugin,
+    PluginBuildError, PluginConfig, PluginFactory, RequestCtx, ResponseHead, UpstreamSelection,
+    header,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::types::{AiFailoverHistory, AiRequestMeta, FailoverEvent};
 
@@ -21,6 +22,10 @@ fn default_failure_threshold() -> usize {
 
 fn default_max_cooldown_ms() -> u64 {
     60_000
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +46,9 @@ struct AiFailoverConfig {
     /// Upper cap on cooldown duration when honoring `Retry-After`.
     #[serde(default = "default_max_cooldown_ms")]
     max_cooldown_ms: u64,
+    /// Share cooldown state via the gateway's distributed store when configured (default: true).
+    #[serde(default = "default_true")]
+    distributed: bool,
 }
 
 impl Default for AiFailoverConfig {
@@ -51,6 +59,7 @@ impl Default for AiFailoverConfig {
             failure_threshold: default_failure_threshold(),
             respect_retry_after: false,
             max_cooldown_ms: default_max_cooldown_ms(),
+            distributed: true,
         }
     }
 }
@@ -151,8 +160,14 @@ impl PluginFactory for AiFailoverFactory {
         } else {
             None
         };
+        let distributed = if cfg.cooldown_ms > 0 && cfg.distributed {
+            ctx.distributed_store()
+        } else {
+            None
+        };
 
         Ok(Arc::new(AiFailoverPlugin {
+            scope_id: ctx.scope_id().to_owned(),
             retry_statuses,
             cooldown: Duration::from_millis(cfg.cooldown_ms),
             failure_threshold: cfg.failure_threshold.max(1),
@@ -160,6 +175,7 @@ impl PluginFactory for AiFailoverFactory {
             max_cooldown: Duration::from_millis(cfg.max_cooldown_ms.max(cfg.cooldown_ms)),
             clock: ctx.clock(),
             circuit,
+            distributed,
         }))
     }
 }
@@ -168,6 +184,7 @@ impl PluginFactory for AiFailoverFactory {
 /// `on_response_headers` and returns `Flow::RetryUpstream` to fail over automatically
 /// to the next provider/model target.
 pub struct AiFailoverPlugin {
+    scope_id: String,
     retry_statuses: HashSet<u16>,
     cooldown: Duration,
     failure_threshold: usize,
@@ -175,11 +192,16 @@ pub struct AiFailoverPlugin {
     max_cooldown: Duration,
     clock: Arc<dyn Clock>,
     circuit: Option<Arc<FailoverCircuitState>>,
+    distributed: Option<Arc<dyn DistributedStore>>,
 }
 
 impl AiFailoverPlugin {
     fn target_key(upstream: &str, model: &str) -> String {
         format!("{upstream}::{model}")
+    }
+
+    fn dist_cooldown_key(&self, upstream: &str, model: &str) -> String {
+        format!("ai_cd:{}:{upstream}:{model}", self.scope_id)
     }
 }
 
@@ -212,6 +234,50 @@ impl HttpPlugin for AiFailoverPlugin {
         let len = meta.targets.len();
         if len <= 1 {
             return HookResult::Ready(Flow::Continue);
+        }
+
+        if let Some(dist) = &self.distributed {
+            let dist = Arc::clone(dist);
+            let now = self.clock.now();
+            let start = meta.active_target_index;
+            let candidates: Vec<(usize, String, String, String, Option<String>)> = (0..len)
+                .map(|offset| {
+                    let idx = (start + offset) % len;
+                    let c = &meta.targets[idx];
+                    (
+                        idx,
+                        Self::target_key(&c.upstream, &c.model),
+                        self.dist_cooldown_key(&c.upstream, &c.model),
+                        c.upstream.clone(),
+                        c.endpoint_override.clone(),
+                    )
+                })
+                .collect();
+            return HookResult::pending(async move {
+                for (idx, local_key, dist_key, upstream, ep_override) in candidates {
+                    if circuit.is_in_cooldown(&local_key, now) {
+                        continue;
+                    }
+                    let dist_cooled = match dist.has_flag(&dist_key).await {
+                        Ok(flag) => flag,
+                        Err(err) => {
+                            warn!(plugin = "ai-failover", error = %err, "distributed cooldown check failed");
+                            false
+                        }
+                    };
+                    if !dist_cooled {
+                        if idx != start {
+                            if let Some(m) = ctx.get_ext_mut::<AiRequestMeta>() {
+                                m.active_target_index = idx;
+                            }
+                            selection.upstream = upstream;
+                            selection.endpoint_override = ep_override;
+                        }
+                        break;
+                    }
+                }
+                Flow::Continue
+            });
         }
 
         let now = self.clock.now();
@@ -260,11 +326,20 @@ impl HttpPlugin for AiFailoverPlugin {
                 && let Some((Some(target), _, _)) = &active_meta
             {
                 circuit.record_success(&Self::target_key(&target.upstream, &target.model));
+                if let Some(dist) = &self.distributed {
+                    let dist = Arc::clone(dist);
+                    let dist_key = self.dist_cooldown_key(&target.upstream, &target.model);
+                    return HookResult::pending(async move {
+                        let _ = dist.delete(&dist_key).await;
+                        Flow::Continue
+                    });
+                }
             }
             return HookResult::Ready(Flow::Continue);
         }
 
         if let Some((Some(target), max_attempts, requested_model)) = active_meta {
+            let mut dist_set: Option<(String, Duration)> = None;
             if let Some(circuit) = &self.circuit {
                 let retry_after_str = res
                     .headers
@@ -276,12 +351,13 @@ impl HttpPlugin for AiFailoverPlugin {
                     self.respect_retry_after,
                     retry_after_str,
                 );
-                circuit.record_failure(
-                    &Self::target_key(&target.upstream, &target.model),
-                    self.failure_threshold,
-                    cd,
-                    self.clock.now(),
-                );
+                let local_key = Self::target_key(&target.upstream, &target.model);
+                circuit.record_failure(&local_key, self.failure_threshold, cd, self.clock.now());
+                if self.distributed.is_some()
+                    && circuit.consecutive_failures(&local_key) >= self.failure_threshold
+                {
+                    dist_set = Some((self.dist_cooldown_key(&target.upstream, &target.model), cd));
+                }
             }
 
             let event = FailoverEvent {
@@ -300,7 +376,7 @@ impl HttpPlugin for AiFailoverPlugin {
                 });
             }
 
-            if ctx.attempt < max_attempts {
+            let next_flow = if ctx.attempt < max_attempts {
                 info!(
                     request_id = ctx.request_id,
                     attempt = ctx.attempt,
@@ -311,10 +387,22 @@ impl HttpPlugin for AiFailoverPlugin {
                     status = status_code,
                     "ai-failover triggering upstream retry"
                 );
-                return HookResult::Ready(Flow::RetryUpstream);
+                Flow::RetryUpstream
+            } else {
+                Flow::Continue
+            };
+
+            if let (Some(dist), Some((dist_key, cd))) = (&self.distributed, dist_set) {
+                let dist = Arc::clone(dist);
+                return HookResult::pending(async move {
+                    if let Err(err) = dist.set_flag(&dist_key, cd).await {
+                        warn!(plugin = "ai-failover", error = %err, "distributed cooldown set failed");
+                    }
+                    next_flow
+                });
             }
 
-            return HookResult::Ready(Flow::Continue);
+            return HookResult::Ready(next_flow);
         }
 
         // Route without ai-model-router: still allow status-based retry on multi-attempt routes.

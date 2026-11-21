@@ -16,7 +16,7 @@ pub use compiler::{
 pub use error::ConfigError;
 pub use ir::{
     AdminConfig, GatewayConfig, PluginAttachment, RouteIr, ServerConfig, ServerTlsConfig,
-    SniCertConfig, UpstreamIr, UpstreamTlsIr, redact_secrets,
+    SniCertConfig, StateBackendKind, StateConfig, UpstreamIr, UpstreamTlsIr, redact_secrets,
 };
 pub use provider::{ConfigProvider, FileConfigProvider, InlineConfigProvider, LoadedConfig};
 pub use reloader::{ConfigWatcherHandle, ReloadController, start_file_watcher};
