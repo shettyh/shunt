@@ -15,12 +15,12 @@ It pairs a tiny, zero-allocation-fast-path HTTP data plane (`shunt-core`) with a
 
 ## Why Shunt?
 
-- **Tiny, readable core (`shunt-core`)**: HTTP/1.1 & HTTP/2 (downstream and upstream), SNI TLS termination with hot-reloadable certificates, streaming bodies (SSE, chunked, H2), WebSocket upgrades, and split timeouts (`connect`, `response_headers` / TTFB, `idle_chunk`).
+- **Tiny, readable core (`shunt-core`)**: HTTP/1.1 & HTTP/2 (downstream and upstream), SNI TLS termination with hot-reloadable certificates, streaming bodies (SSE, chunked, H2), WebSocket upgrades, weighted upstream pools with active HTTP/TCP health probes, optional Redis/Valkey distributed state, zero-dependency OTLP/HTTP trace export, and split timeouts (`connect`, `response_headers` / TTFB, `idle_chunk`).
 - **Everything above transport is a plugin**: First-party plugins (`shunt-plugins`, `shunt-ai`) depend strictly on `shunt-plugin-sdk`—never on `shunt-core`—and never see `hyper` internals.
 - **Pay only for what you use**: Each compiled route carries a precomputed `HookMask` bitmask and uses a hybrid sync (`HookResult::Ready`) / async (`HookResult::Pending`) dispatch model. Routes with no body or I/O plugins run unbuffered and allocation-free on the hot path.
-- **Atomic zero-downtime hot reloads**: Reloading `shunt.toml` (or YAML) compiles a new immutable `GatewaySnapshot` and swaps it lock-free via `ArcSwap`, reusing warm upstream connection pools and `StateStore`-backed plugin state (rate limiters, provider cooldowns) while draining in-flight requests cleanly.
-- **Developer-first CLI (`shunt`)**: Validate configs and inspect compiled routes + `HookMask`s with `shunt check`, or run `shunt dev` for automatic file-watch reloads and live per-hook microsecond trace waterfalls.
-- **AI-agnostic core, AI-proven primitives (`shunt-ai`)**: Zero AI concepts live in `shunt-core`. `shunt-ai` provides an OpenAI-compatible `/v1/chat/completions` frontend across OpenAI and Anthropic, live Anthropic → OpenAI SSE translation, automatic `429`/`5xx`/`529` failover with cooldowns, and token/TTFT Prometheus metrics—implemented 100% through `shunt-plugin-sdk`.
+- **Atomic zero-downtime hot reloads**: Reloading `shunt.toml` (or YAML) compiles a new immutable `GatewaySnapshot` and swaps it lock-free via `ArcSwap`, reusing warm upstream connection pools and `StateStore`-backed plugin state (rate limiters, provider cooldowns, budgets, caches) while draining in-flight requests cleanly.
+- **Developer-first CLI (`shunt`)**: Validate configs and inspect compiled routes + `HookMask`s with `shunt check`, run static policy checks with `shunt verify` and TOML contract suites with `shunt test`, or run `shunt dev --ui` for automatic file-watch reloads, live per-hook µs trace waterfalls, and an opt-in browser Inspector UI.
+- **AI-agnostic core, full-featured AI gateway (`shunt-ai`)**: Zero AI concepts live in `shunt-core`. `shunt-ai` provides multi-protocol ingress (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/models`), 5 upstream dialects (`openai_compatible`, `anthropic`, `azure_openai`, `gemini`/Vertex AI, `bedrock` Converse + SigV4 + EventStream), virtual API keys, RPM/TPM rate limits, nano-USD cost budgets, smart routing (`priority`/`weighted`/`latency`/`cost` + capability guards), automatic failover with cooldowns, exact-match caching, and Prometheus + OTLP GenAI observability—implemented 100% through `shunt-plugin-sdk`.
 
 ---
 
@@ -62,11 +62,17 @@ docker run --rm -p 8080:8080 -p 9090:9090 \
   ghcr.io/shettyh/shunt:latest
 ```
 
-### 2. Validate & Run a Gateway
+### 2. Validate, Verify & Run a Gateway
 
 ```bash
 # Validate config, compile snapshot, and print routes + HookMasks
 shunt check -c examples/shunt.toml
+
+# Run static IR, route-shadowing, AI chain, and declarative policy verification
+shunt verify -c examples/shunt.toml
+
+# Run declarative TOML conformance tests against in-process mocks
+shunt test -s specs/conformance/01-core-routing-and-plugins.spec.toml
 
 # Development mode: file-watch hot reloads + live per-hook µs trace waterfalls (add `--ui` for browser Inspector)
 shunt dev --ui -c examples/shunt.toml
@@ -77,9 +83,9 @@ shunt run -c examples/shunt.toml
 
 Pass `--no-watch` to `shunt run` to disable file watching while keeping `POST /reload` and `SIGHUP` active.
 
-### 3. Run the AI Gateway Example (`shunt-ai`)
+### 3. Run the AI Gateway Examples (`shunt-ai`)
 
-[`examples/shunt-ai.toml`](examples/shunt-ai.toml) configures a unified OpenAI-compatible `/v1/chat/completions` endpoint with model aliases (`smart`, `fast`), automatic OpenAI → Anthropic failover, live SSE translation, and token/TTFT accounting:
+[`examples/shunt-ai.toml`](examples/shunt-ai.toml) configures a unified `/v1/*` AI gateway with model aliases (`smart`, `fast`), automatic failover, live streaming translation, and token/TTFT accounting. Additional ready-to-run configs cover [multi-provider & multi-protocol ingress](examples/shunt-ai-multi-provider.toml), [virtual keys, TPM quotas & spend budgets](examples/shunt-ai-governance.toml), [weighted/latency/cost smart routing & active health probes](examples/shunt-ai-smart-routing.toml), [OTLP tracing & exact-match AI caching](examples/shunt-ai-observability-cache.toml), and the [Admin Inspector UI](examples/shunt-inspector-ui.toml):
 
 ```bash
 export OPENAI_API_KEY="sk-..."
@@ -125,9 +131,10 @@ The read-only Admin API always binds to a separate listener (`127.0.0.1:9090` by
 | `request-id` | Generates or propagates `x-request-id` across request/response headers and context |
 | `access-log` | Structured `tracing` access logging in `on_complete` |
 | `bearer-auth` | Bearer token verification with subject injection into `RequestCtx` |
-| `rate-limit` | Token-bucket rate limiting backed by reload-persistent `StateStore` |
+| `rate-limit` | Token-bucket rate limiting backed by reload-persistent `StateStore` (or Redis/Valkey) |
 | `header-rewrite` | Set/append/remove request and response headers |
 | `cors` | Configurable CORS preflight handling and response headers |
+| `otel-trace` | W3C `traceparent`/`tracestate` propagation and OpenTelemetry span emission via `[telemetry]` |
 | `metrics` | Prometheus request counters and latency histograms served via `GET /metrics` |
 | `dev-waterfall` | Live per-hook microsecond trace waterfall (automatically attached by `shunt dev`) |
 
@@ -135,10 +142,14 @@ The read-only Admin API always binds to a separate listener (`127.0.0.1:9090` by
 
 | Plugin | Purpose |
 | --- | --- |
-| `ai-model-router` | Buffers chat JSON, parses `model`/`stream`, and routes aliases or wildcard rules to ordered provider chains |
-| `ai-provider-adapter` | Injects provider auth/paths and translates OpenAI ↔ Anthropic JSON and live SSE streams |
-| `ai-failover` | Triggers `Flow::RetryUpstream` on `429`/`5xx`/`529` with `StateStore`-backed provider cooldowns and `Retry-After` support |
-| `ai-usage-tracker` | Extracts prompt/completion tokens and TTFT from JSON or SSE streams for Prometheus metrics and structured logs |
+| `ai-virtual-keys` | Constant-time SHA-256 virtual API key auth (`Authorization` / `x-api-key` / custom header) with team, model/provider ACLs, per-key overrides, and quota/budget policies |
+| `ai-model-router` | Serves `/v1/models` & local `/v1/messages/count_tokens`, parses `/v1/chat/completions`, `/v1/messages`, `/v1/responses`, and `/v1/embeddings`, enforces capability guards, and routes via `priority`, `weighted`, `latency`, or `cost` strategies |
+| `ai-cache` | Exact-match SHA-256 response cache for deterministic conversational & embeddings requests (in-memory LRU+TTL or Redis/Valkey) with tenant scoping and `Cache-Control` handling |
+| `ai-token-rate-limit` | Pre-flight token estimation + post-response `AiUsage` reconciliation enforcing RPM/TPM limits locally or across Redis/Valkey replicas |
+| `ai-budget` | Exact integer nano-USD cost accounting & rolling spend budgets (virtual key / team / global) with soft warnings, hard `429`/`402` enforcement, and `shunt_ai_cost_usd_total` metrics |
+| `ai-provider-adapter` | Injects provider auth (Bearer, header, AWS SigV4) and translates JSON, SSE, and AWS EventStream across `openai_compatible`, `anthropic`, `azure_openai`, `gemini`/Vertex AI, and `bedrock` (with zero-copy native passthrough where matching) |
+| `ai-failover` | Triggers `Flow::RetryUpstream` on `429`/`5xx`/`529` with `StateStore`/Redis-backed provider cooldowns and `Retry-After` support |
+| `ai-usage-tracker` | Extracts prompt, cached-prompt, and completion tokens + TTFT across all dialects for Prometheus metrics, structured logs, and OTLP GenAI span enrichment |
 
 ---
 
@@ -201,7 +212,8 @@ impl HttpPlugin for PoweredByPlugin {
 | [`crates/shunt-config`](crates/shunt-config) | Canonical IR, TOML/YAML loader, file watcher, `SnapshotCompiler`, and Admin API |
 | [`crates/shunt-plugins`](crates/shunt-plugins) | First-party HTTP plugins built strictly on `shunt-plugin-sdk` |
 | [`crates/shunt-ai`](crates/shunt-ai) | Multi-provider AI router & gateway plugin pack built 100% on `shunt-plugin-sdk` |
-| [`crates/shunt-cli`](crates/shunt-cli) | `shunt` CLI binary (`check`, `run`, `dev`) |
+| [`crates/shunt-test`](crates/shunt-test) | Declarative TOML conformance test harness (`shunt.spec.toml`) and in-process mock upstreams |
+| [`crates/shunt-cli`](crates/shunt-cli) | `shunt` CLI binary (`check`, `verify`, `test`, `run`, `dev`) |
 | [`benches/shunt-bench`](benches/shunt-bench) | Self-contained mock upstream and HTTP/SSE load generator |
 
 ---
@@ -216,6 +228,13 @@ impl HttpPlugin for PoweredByPlugin {
   - [RFC 0003](rfcs/0003-config-ir-and-admin-plane.md) — Config IR, Hot Reload, Admin API & Dev Ergonomics
   - [RFC 0004](rfcs/0004-shunt-ai-plugin-pack.md) — `shunt-ai`: Multi-Provider AI Gateway as a Pure Plugin Pack
   - [RFC 0005](rfcs/0005-benchmarks-and-hardening.md) — Benchmark Harness vs. Envoy & Caddy & Hardening
+  - [RFC 0006](rfcs/0006-verification-and-spec-testing.md) — Layered Verification, Property Testing & Spec-Driven TOML Testing
+  - [RFC 0007](rfcs/0007-generalized-ai-providers-and-endpoints.md) — Generalized AI Providers & Expanded OpenAI Endpoints
+  - [RFC 0008](rfcs/0008-multi-protocol-ai-ingress.md) — Multi-Protocol AI Ingress (`/v1/messages` & `/v1/responses`)
+  - [RFC 0009](rfcs/0009-virtual-keys-budgets-and-distributed-state.md) — Virtual Keys, Token Rate Limits, Cost Budgets & Distributed `StateStore`
+  - [RFC 0010](rfcs/0010-smart-routing-and-active-health-checks.md) — Smart Routing & Active Upstream Health Checks
+  - [RFC 0011](rfcs/0011-otlp-observability-and-ai-cache.md) — OTLP/HTTP Observability & Exact-Match AI Response Cache
+  - [RFC 0012](rfcs/0012-admin-inspector-ui.md) — Admin Read-Only Inspector UI (`--ui`)
 
 ---
 
