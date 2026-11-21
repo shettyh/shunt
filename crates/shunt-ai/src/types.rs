@@ -50,6 +50,8 @@ impl fmt::Display for ProviderDialect {
 #[serde(rename_all = "snake_case")]
 pub enum AiEndpointKind {
     ChatCompletions,
+    AnthropicMessages,
+    OpenAiResponses,
     Embeddings,
     ModelsList,
     ModelRetrieve,
@@ -59,6 +61,8 @@ impl AiEndpointKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             AiEndpointKind::ChatCompletions => "chat_completions",
+            AiEndpointKind::AnthropicMessages => "anthropic_messages",
+            AiEndpointKind::OpenAiResponses => "openai_responses",
             AiEndpointKind::Embeddings => "embeddings",
             AiEndpointKind::ModelsList => "models_list",
             AiEndpointKind::ModelRetrieve => "model_retrieve",
@@ -69,6 +73,17 @@ impl AiEndpointKind {
         matches!(
             self,
             AiEndpointKind::ModelsList | AiEndpointKind::ModelRetrieve
+        )
+    }
+
+    /// Returns `true` for conversational generation endpoints (`/v1/chat/completions`,
+    /// `/v1/messages`, `/v1/responses`).
+    pub const fn is_conversational(self) -> bool {
+        matches!(
+            self,
+            AiEndpointKind::ChatCompletions
+                | AiEndpointKind::AnthropicMessages
+                | AiEndpointKind::OpenAiResponses
         )
     }
 }
@@ -245,6 +260,75 @@ pub fn openai_error_response(
         br#"{"error":{"message":"internal error","type":"server_error"}}"#.to_vec()
     });
     BufferedResponse::json(status, bytes)
+}
+
+/// Builds a standard Anthropic Messages API JSON error response.
+pub fn anthropic_error_response(
+    status: StatusCode,
+    error_type: &str,
+    message: &str,
+) -> BufferedResponse {
+    let payload = serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": error_type,
+            "message": message,
+        }
+    });
+    let bytes = serde_json::to_vec(&payload).unwrap_or_else(|_| {
+        br#"{"type":"error","error":{"type":"api_error","message":"internal error"}}"#.to_vec()
+    });
+    BufferedResponse::json(status, bytes)
+}
+
+/// Maps an HTTP status / OpenAI-style error type to a canonical Anthropic error `type` string.
+pub fn map_status_to_anthropic_error_type(
+    status: StatusCode,
+    raw_type: Option<&str>,
+) -> &'static str {
+    match status.as_u16() {
+        401 => return "authentication_error",
+        403 => return "permission_error",
+        404 => return "not_found_error",
+        413 => return "request_too_large",
+        429 => return "rate_limit_error",
+        529 => return "overloaded_error",
+        _ => {}
+    }
+    if let Some(t) = raw_type {
+        match t {
+            "invalid_request_error" => return "invalid_request_error",
+            "authentication_error" => return "authentication_error",
+            "permission_error" => return "permission_error",
+            "not_found_error" => return "not_found_error",
+            "rate_limit_error" | "rate_limit_exceeded" => return "rate_limit_error",
+            "overloaded_error" => return "overloaded_error",
+            "request_too_large" => return "request_too_large",
+            "api_error" => return "api_error",
+            _ => {}
+        }
+    }
+    match status.as_u16() {
+        400 => "invalid_request_error",
+        _ => "api_error",
+    }
+}
+
+/// Builds a gateway error response formatted in the native schema of `endpoint`.
+pub fn endpoint_error_response(
+    endpoint: AiEndpointKind,
+    status: StatusCode,
+    error_type: &str,
+    code: Option<&str>,
+    message: &str,
+) -> BufferedResponse {
+    match endpoint {
+        AiEndpointKind::AnthropicMessages => {
+            let anth_type = map_status_to_anthropic_error_type(status, Some(error_type));
+            anthropic_error_response(status, anth_type, message)
+        }
+        _ => openai_error_response(status, error_type, code, message),
+    }
 }
 
 /// Resolves a secret string, supporting `env:VAR_NAME` indirection.

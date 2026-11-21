@@ -784,6 +784,8 @@ async fn check_expectations(
     // SSE assertions
     if expect.sse_contains_text.is_some()
         || expect.sse_ends_with.is_some()
+        || expect.sse_last_event.is_some()
+        || !expect.sse_events_present.is_empty()
         || expect.sse_event_count.is_some()
     {
         let mut parser = SseParser::new();
@@ -808,23 +810,58 @@ async fn check_expectations(
             }
         }
 
+        if let Some(exp_last_ev) = &expect.sse_last_event {
+            let last_ev = events.last().and_then(|e| e.event.as_deref());
+            if last_ev != Some(exp_last_ev.as_str()) {
+                failures.push(format!(
+                    "{step_label}: expected final SSE event name `{exp_last_ev}`, got `{last_ev:?}`"
+                ));
+            }
+        }
+
+        if !expect.sse_events_present.is_empty() {
+            let seen: Vec<&str> = events.iter().filter_map(|e| e.event.as_deref()).collect();
+            for req_ev in &expect.sse_events_present {
+                if !seen.iter().any(|&s| s == req_ev) {
+                    failures.push(format!(
+                        "{step_label}: expected SSE event `{req_ev}` not found in stream (seen: {seen:?})"
+                    ));
+                }
+            }
+        }
+
         if let Some(needle) = &expect.sse_contains_text {
-            // Collect both OpenAI delta content text and raw SSE data lines.
+            // Collect OpenAI Chat, Anthropic Messages, and OpenAI Responses delta text + raw SSE data.
             let mut delta_text = String::new();
             let mut raw_joined = String::new();
             for ev in &events {
                 raw_joined.push_str(&ev.data);
-                if let Ok(v) = serde_json::from_str::<Value>(&ev.data)
-                    && let Some(choices) = v.get("choices").and_then(Value::as_array)
-                {
-                    for ch in choices {
-                        if let Some(c) = ch
-                            .get("delta")
-                            .and_then(|d| d.get("content"))
-                            .and_then(Value::as_str)
-                        {
-                            delta_text.push_str(c);
+                if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
+                    if let Some(choices) = v.get("choices").and_then(Value::as_array) {
+                        for ch in choices {
+                            if let Some(c) = ch
+                                .get("delta")
+                                .and_then(|d| d.get("content"))
+                                .and_then(Value::as_str)
+                            {
+                                delta_text.push_str(c);
+                            }
                         }
+                    }
+                    // Anthropic `content_block_delta` text_delta
+                    if v.get("type").and_then(Value::as_str) == Some("content_block_delta")
+                        && let Some(t) = v
+                            .get("delta")
+                            .and_then(|d| d.get("text"))
+                            .and_then(Value::as_str)
+                    {
+                        delta_text.push_str(t);
+                    }
+                    // OpenAI Responses `response.output_text.delta`
+                    if v.get("type").and_then(Value::as_str) == Some("response.output_text.delta")
+                        && let Some(t) = v.get("delta").and_then(Value::as_str)
+                    {
+                        delta_text.push_str(t);
                     }
                 }
             }

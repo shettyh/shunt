@@ -1,0 +1,350 @@
+[spec]
+name = "multi-protocol-ai-ingress"
+config = "../../examples/shunt-ai-multi-provider.toml"
+
+[env]
+OPENAI_API_KEY = "sk-test-openai-key"
+ANTHROPIC_API_KEY = "sk-test-anthropic-key"
+GROQ_API_KEY = "gsk-test-groq-key"
+AZURE_OPENAI_API_KEY = "az-test-azure-key"
+GEMINI_API_KEY = "AIza-test-gemini-key"
+VERTEX_ACCESS_TOKEN = "ya29.test-vertex-token"
+AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"
+AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+# --- Mocks ---
+
+[[mocks]]
+upstream = "anthropic"
+name = "anthropic_native_json"
+status = 200
+json = { id = "msg_native_1", type = "message", role = "assistant", model = "claude-3-5-sonnet-20241022", content = [{ type = "thinking", thinking = "internal reasoning" }, { type = "text", text = "Native Anthropic reply!" }], stop_reason = "end_turn", stop_sequence = false, usage = { input_tokens = 14, output_tokens = 9 } }
+
+[[mocks]]
+upstream = "anthropic"
+name = "anthropic_native_sse"
+chunk_split_bytes = 11
+sse_raw = [
+  "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_nat_s1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3-5-sonnet-20241022\",\"content\":[],\"usage\":{\"input_tokens\":8,\"output_tokens\":0}}}\n\n",
+  "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+  "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Native \"}}\n\n",
+  "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Claude SSE!\"}}\n\n",
+  "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+  "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":6}}\n\n",
+  "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+]
+
+[[mocks]]
+upstream = "anthropic"
+name = "anthropic_tool_sse"
+chunk_split_bytes = 13
+sse_raw = [
+  "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_tool_1\",\"model\":\"claude-3-5-sonnet-20241022\",\"usage\":{\"input_tokens\":10}}}\n\n",
+  "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_99\",\"name\":\"get_weather\",\"input\":{}}}\n\n",
+  "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"NYC\\\"}\"}}\n\n",
+  "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+  "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":5}}\n\n",
+  "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+]
+
+[[mocks]]
+upstream = "anthropic"
+name = "anthropic_529"
+status = 529
+json = { type = "error", error = { type = "overloaded_error", message = "anthropic overloaded" } }
+
+[[mocks]]
+upstream = "openai"
+name = "openai_chat_json"
+status = 200
+json = { id = "chatcmpl-oai-1", object = "chat.completion", created = 1700000000, model = "gpt-4o", choices = [{ index = 0, message = { role = "assistant", content = "Hello from OpenAI to Anthropic client!" }, finish_reason = "stop" }], usage = { prompt_tokens = 11, completion_tokens = 7, total_tokens = 18 } }
+
+[[mocks]]
+upstream = "openai"
+name = "openai_chat_sse"
+chunk_split_bytes = 15
+sse_raw = [
+  "data: {\"id\":\"chatcmpl-oai-s1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Streamed \"},\"finish_reason\":null}]}\n\n",
+  "data: {\"id\":\"chatcmpl-oai-s1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"from OpenAI!\"},\"finish_reason\":null}]}\n\n",
+  "data: {\"id\":\"chatcmpl-oai-s1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+  "data: {\"id\":\"chatcmpl-oai-s1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":4,\"total_tokens\":13}}\n\n",
+  "data: [DONE]\n\n"
+]
+
+[[mocks]]
+upstream = "openai"
+name = "openai_native_responses_json"
+status = 200
+json = { id = "resp_native_1", object = "response", created_at = 1700000010, status = "completed", model = "gpt-4o", output = [{ id = "msg_nat_1", type = "message", status = "completed", role = "assistant", content = [{ type = "output_text", text = "Native Responses reply!", annotations = [] }] }], usage = { input_tokens = 12, output_tokens = 6, total_tokens = 18 } }
+
+[[mocks]]
+upstream = "openai"
+name = "openai_429"
+status = 429
+json = { error = { message = "openai rate limited", type = "rate_limit_error" } }
+
+[[mocks]]
+upstream = "ollama"
+name = "ollama_chat_json"
+status = 200
+json = { id = "chatcmpl-oll-1", object = "chat.completion", created = 1700000020, model = "llama3.2", choices = [{ index = 0, message = { role = "assistant", content = "Local Ollama via Responses!" }, finish_reason = "stop" }], usage = { prompt_tokens = 6, completion_tokens = 5, total_tokens = 11 } }
+
+[[mocks]]
+upstream = "gemini"
+name = "gemini_json"
+status = 200
+json = { responseId = "gem_mp_1", modelVersion = "gemini-2.5-flash", candidates = [{ content = { role = "model", parts = [{ text = "Hello from Gemini!" }] }, finishReason = "STOP" }], usageMetadata = { promptTokenCount = 10, candidatesTokenCount = 4, totalTokenCount = 14 } }
+
+[[mocks]]
+upstream = "gemini"
+name = "gemini_sse"
+chunk_split_bytes = 12
+sse_raw = [
+  "data: {\"responseId\":\"gem_mp_s1\",\"modelVersion\":\"gemini-2.5-flash\",\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Gemini \"}]}}]}\n\n",
+  "data: {\"responseId\":\"gem_mp_s1\",\"modelVersion\":\"gemini-2.5-flash\",\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"live!\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":8,\"candidatesTokenCount\":3,\"totalTokenCount\":11}}\n\n"
+]
+
+[[mocks]]
+upstream = "gemini"
+name = "gemini_429"
+status = 429
+json = { error = { code = 429, message = "gemini overloaded", status = "RESOURCE_EXHAUSTED" } }
+
+[[mocks]]
+upstream = "bedrock"
+name = "bedrock_converse_stream"
+chunk_split_bytes = 9
+aws_eventstream = [
+  { event_type = "messageStart", json = { role = "assistant" } },
+  { event_type = "contentBlockDelta", json = { contentBlockIndex = 0, delta = { text = "Bedrock " } } },
+  { event_type = "contentBlockDelta", json = { contentBlockIndex = 0, delta = { text = "rescue!" } } },
+  { event_type = "messageStop", json = { stopReason = "end_turn" } },
+  { event_type = "metadata", json = { usage = { inputTokens = 13, outputTokens = 5, totalTokens = 18 } } }
+]
+
+# --- Cases: Anthropic Messages Ingress (POST /v1/messages) ---
+
+[[cases]]
+name = "POST /v1/messages -> Anthropic native passthrough preserves anthropic-beta and thinking blocks"
+use_mocks = ["anthropic_native_json"]
+
+[cases.request]
+method = "POST"
+path = "/v1/messages"
+headers = { "x-api-key" = "client-virtual-key-must-be-replaced", "anthropic-version" = "2023-06-01", "anthropic-beta" = "interleaved-thinking-2025-05-14" }
+json = { model = "claude-3-5-sonnet-20241022", max_tokens = 256, thinking = { type = "enabled", budget_tokens = 128 }, messages = [{ role = "user", content = "Think then answer" }] }
+
+[cases.expect]
+status = 200
+headers = { "x-shunt-provider" = "anthropic", "x-shunt-model" = "claude-3-5-sonnet-20241022" }
+json_path = { "/type" = "message", "/content/0/type" = "thinking", "/content/1/text" = "Native Anthropic reply!", "/usage/input_tokens" = 14, "/usage/output_tokens" = 9 }
+metrics_delta = { "shunt_ai_tokens_total" = 23 }
+
+[[cases.expect.upstream_calls]]
+upstream = "anthropic"
+count = 1
+path = "/v1/messages"
+headers = { "x-api-key" = "sk-test-anthropic-key", "anthropic-version" = "2023-06-01", "anthropic-beta" = "interleaved-thinking-2025-05-14" }
+json_path = { "/thinking/type" = "enabled", "/model" = "claude-3-5-sonnet-20241022" }
+
+[[cases]]
+name = "POST /v1/messages -> OpenAI JSON & fragmented SSE bidirectional translation"
+use_mocks = ["openai_chat_json"]
+
+[cases.request]
+method = "POST"
+path = "/v1/messages"
+headers = { "anthropic-beta" = "must-be-stripped-for-openai" }
+json = { model = "gpt-4o", max_tokens = 128, system = [{ type = "text", text = "Be concise" }], messages = [{ role = "user", content = "Say hi" }] }
+
+[cases.expect]
+status = 200
+headers = { "x-shunt-provider" = "openai", "x-shunt-model" = "gpt-4o" }
+json_path = { "/id" = "msg_oai-1", "/type" = "message", "/role" = "assistant", "/content/0/type" = "text", "/content/0/text" = "Hello from OpenAI to Anthropic client!", "/stop_reason" = "end_turn", "/usage/input_tokens" = 11, "/usage/output_tokens" = 7 }
+metrics_delta = { "shunt_ai_tokens_total" = 18 }
+
+[[cases.expect.upstream_calls]]
+upstream = "openai"
+count = 1
+path = "/v1/chat/completions"
+headers = { "authorization" = "Bearer sk-test-openai-key" }
+headers_absent = ["anthropic-beta", "anthropic-version", "x-api-key"]
+json_path = { "/model" = "gpt-4o", "/messages/0/role" = "system", "/messages/0/content" = "Be concise", "/messages/1/content" = "Say hi" }
+
+[[cases]]
+name = "POST /v1/messages streaming -> OpenAI SSE translates to Anthropic SSE lifecycle"
+use_mocks = ["openai_chat_sse"]
+
+[cases.request]
+method = "POST"
+path = "/v1/messages"
+json = { model = "gpt-4o", max_tokens = 128, stream = true, messages = [{ role = "user", content = "Stream please" }] }
+
+[cases.expect]
+status = 200
+headers = { "x-shunt-provider" = "openai" }
+headers_contains = { "content-type" = "text/event-stream" }
+sse_contains_text = "Streamed from OpenAI!"
+sse_events_present = ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]
+sse_last_event = "message_stop"
+metrics_delta = { "shunt_ai_tokens_total" = 13 }
+
+[[cases.expect.upstream_calls]]
+upstream = "openai"
+count = 1
+path = "/v1/chat/completions"
+json_path = { "/stream" = true, "/stream_options/include_usage" = true }
+
+[[cases]]
+name = "POST /v1/messages -> Gemini SSE & cross-cloud failover to AWS Bedrock binary ConverseStream"
+use_mocks = ["openai_429", "gemini_429", "bedrock_converse_stream"]
+
+[cases.request]
+method = "POST"
+path = "/v1/messages"
+json = { model = "smart", max_tokens = 256, stream = true, system = "You are a coding assistant", messages = [{ role = "user", content = "Fix bug" }] }
+
+[cases.expect]
+status = 200
+headers = { "x-shunt-provider" = "bedrock", "x-shunt-attempt" = "3" }
+headers_contains = { "content-type" = "text/event-stream" }
+sse_contains_text = "Bedrock rescue!"
+sse_events_present = ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]
+sse_last_event = "message_stop"
+metrics_delta = { "shunt_ai_failovers_total" = 2, "shunt_ai_tokens_total" = 18 }
+
+[[cases.expect.upstream_calls]]
+upstream = "bedrock"
+count = 1
+path = "/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/converse-stream"
+headers_contains = { "authorization" = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/" }
+json_path = { "/system/0/text" = "You are a coding assistant", "/messages/0/content/0/text" = "Fix bug" }
+
+[[cases]]
+name = "POST /v1/messages gateway errors use native Anthropic error JSON schema"
+use_mocks = ["anthropic_native_json"]
+
+[cases.request]
+method = "POST"
+path = "/v1/messages"
+json = { model = "unknown-model-xyz", max_tokens = 64, messages = [{ role = "user", content = "hi" }] }
+
+[cases.expect]
+status = 404
+json_path = { "/type" = "error", "/error/type" = "not_found_error" }
+
+# --- Cases: OpenAI Responses Ingress (POST /v1/responses) ---
+
+[[cases]]
+name = "POST /v1/responses -> OpenAI native passthrough via responses_path"
+use_mocks = ["openai_native_responses_json"]
+
+[cases.request]
+method = "POST"
+path = "/v1/responses"
+json = { model = "gpt-4o", instructions = "Be helpful", input = "Hello native Responses" }
+
+[cases.expect]
+status = 200
+headers = { "x-shunt-provider" = "openai", "x-shunt-model" = "gpt-4o" }
+json_path = { "/id" = "resp_native_1", "/object" = "response", "/status" = "completed", "/output/0/content/0/text" = "Native Responses reply!", "/usage/total_tokens" = 18 }
+metrics_delta = { "shunt_ai_tokens_total" = 18 }
+
+[[cases.expect.upstream_calls]]
+upstream = "openai"
+count = 1
+path = "/v1/responses"
+headers = { "authorization" = "Bearer sk-test-openai-key" }
+json_path = { "/model" = "gpt-4o", "/input" = "Hello native Responses" }
+
+[[cases]]
+name = "POST /v1/responses -> local Ollama (without responses_path) translates transparently via Chat Completions"
+use_mocks = ["ollama_chat_json"]
+
+[cases.request]
+method = "POST"
+path = "/v1/responses"
+json = { model = "local", instructions = "Stay local", max_output_tokens = 64, input = "Ping local" }
+
+[cases.expect]
+status = 200
+headers = { "x-shunt-provider" = "ollama", "x-shunt-model" = "llama3.2" }
+json_path = { "/object" = "response", "/status" = "completed", "/output/0/type" = "message", "/output/0/content/0/text" = "Local Ollama via Responses!", "/usage/input_tokens" = 6, "/usage/output_tokens" = 5 }
+metrics_delta = { "shunt_ai_tokens_total" = 11 }
+
+[[cases.expect.upstream_calls]]
+upstream = "ollama"
+count = 1
+path = "/v1/chat/completions"
+headers_absent = ["authorization"]
+json_path = { "/model" = "llama3.2", "/max_tokens" = 64, "/messages/0/role" = "system", "/messages/0/content" = "Stay local", "/messages/1/content" = "Ping local" }
+
+[[cases]]
+name = "POST /v1/responses streaming -> Anthropic tool_use SSE translates to Responses function_call SSE"
+use_mocks = ["anthropic_tool_sse"]
+
+[cases.request]
+method = "POST"
+path = "/v1/responses"
+json = { model = "claude-3-5-sonnet-20241022", stream = true, tools = [{ type = "function", name = "get_weather", description = "Get weather", parameters = { type = "object", properties = { city = { type = "string" } } } }], input = "Weather in NYC?" }
+
+[cases.expect]
+status = 200
+headers = { "x-shunt-provider" = "anthropic" }
+headers_contains = { "content-type" = "text/event-stream" }
+sse_events_present = ["response.created", "response.in_progress", "response.output_item.added", "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done", "response.completed"]
+sse_last_event = "response.completed"
+body_contains = "toolu_99"
+metrics_delta = { "shunt_ai_tokens_total" = 15 }
+
+[[cases.expect.upstream_calls]]
+upstream = "anthropic"
+count = 1
+path = "/v1/messages"
+json_path = { "/tools/0/name" = "get_weather", "/stream" = true }
+
+[[cases]]
+name = "POST /v1/responses failover: OpenAI native 429 -> Gemini live SSE -> OpenAI Responses SSE"
+use_mocks = ["openai_429", "gemini_sse"]
+
+[cases.request]
+method = "POST"
+path = "/v1/responses"
+json = { model = "smart", stream = true, instructions = "Reply briefly", input = "Fallback test" }
+
+[cases.expect]
+status = 200
+headers = { "x-shunt-provider" = "gemini", "x-shunt-attempt" = "2" }
+headers_contains = { "content-type" = "text/event-stream" }
+sse_contains_text = "Gemini live!"
+sse_events_present = ["response.created", "response.in_progress", "response.output_item.added", "response.content_part.added", "response.output_text.delta", "response.output_text.done", "response.content_part.done", "response.output_item.done", "response.completed"]
+sse_last_event = "response.completed"
+metrics_delta = { "shunt_ai_failovers_total" = 1, "shunt_ai_tokens_total" = 11 }
+
+[[cases.expect.upstream_calls]]
+upstream = "openai"
+count = 1
+path = "/v1/responses"
+
+[[cases.expect.upstream_calls]]
+upstream = "gemini"
+count = 1
+path = "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+json_path = { "/systemInstruction/parts/0/text" = "Reply briefly", "/contents/0/parts/0/text" = "Fallback test" }
+
+[[cases]]
+name = "POST /v1/responses cross-cloud failover: OpenAI 429 -> Gemini 429 -> AWS Bedrock ConverseStream -> Responses SSE"
+use_mocks = ["openai_429", "gemini_429", "bedrock_converse_stream"]
+
+[cases.request]
+method = "POST"
+path = "/v1/responses"
+json = { model = "smart", stream = true, input = "Rescue via Bedrock" }
+
+[cases.expect]
+status = 200
+headers = { "x-shunt-provider" = "bedrock", "x-shunt-attempt" = "3" }
+headers_contains = { "content-type" = "text/event-stream" }
+sse_contains_text = "Bedrock rescue!"
+sse_last_event = "response.completed"
+metrics_delta = { "shunt_ai_failovers_total" = 2, "shunt_ai_tokens_total" = 18 }

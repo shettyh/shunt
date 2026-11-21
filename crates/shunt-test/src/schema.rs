@@ -188,6 +188,10 @@ pub struct ExpectSpec {
     pub sse_contains_text: Option<String>,
     /// Assert the final SSE event's data equals this string (e.g. `"[DONE]"`).
     pub sse_ends_with: Option<String>,
+    /// Assert the final SSE event's `event:` name equals this string (e.g. `"message_stop"`, `"response.completed"`).
+    pub sse_last_event: Option<String>,
+    /// Assert every listed SSE `event:` name appeared at least once in the stream.
+    pub sse_events_present: Vec<String>,
     /// Assert exact number of parsed SSE events.
     pub sse_event_count: Option<usize>,
     /// Assert Prometheus metric counter deltas (summed by metric name or exact series selector).
