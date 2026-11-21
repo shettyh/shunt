@@ -459,6 +459,7 @@ pub async fn execute_request(
             uri: req_head.uri.clone(),
             headers: req_head.headers.clone(),
             body: buffered_body.clone(),
+            endpoint_uri: Some(base_uri.clone()),
         };
 
         // 4c: on_upstream_request

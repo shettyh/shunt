@@ -256,7 +256,15 @@ pub fn verify_bundle(
             }
         }
 
-        // ai.unknown_upstream & ai.attempts_insufficient
+        // ai.unknown_upstream, ai.unknown_provider & ai.attempts_insufficient
+        let adapter_providers: Option<HashSet<&str>> = route_ir
+            .plugins
+            .iter()
+            .find(|p| p.name == "ai-provider-adapter")
+            .and_then(|p| p.config.get("providers"))
+            .and_then(Value::as_object)
+            .map(|map| map.keys().map(String::as_str).collect());
+
         for att in &route_ir.plugins {
             if att.name != "ai-model-router" {
                 continue;
@@ -269,14 +277,27 @@ pub fn verify_bundle(
 
             let chains = extract_ai_target_chains(&att.config);
             for (label, targets) in chains {
-                for target_up in &targets {
-                    if !upstream_names.contains(target_up.as_str()) {
+                for target in &targets {
+                    if !upstream_names.contains(target.upstream.as_str()) {
                         diags.push(VerifyDiagnostic {
                             rule: "ai.unknown_upstream".to_owned(),
                             severity: Severity::Error,
                             subject: Some(route_ir.id.clone()),
                             message: format!(
-                                "ai-model-router `{label}` on route `{}` references undeclared upstream `{target_up}`",
+                                "ai-model-router `{label}` on route `{}` references undeclared upstream `{}`",
+                                route_ir.id, target.upstream
+                            ),
+                        });
+                    }
+                    if let (Some(known_provs), Some(prov)) = (&adapter_providers, &target.provider)
+                        && !known_provs.contains(prov.as_str())
+                    {
+                        diags.push(VerifyDiagnostic {
+                            rule: "ai.unknown_provider".to_owned(),
+                            severity: Severity::Error,
+                            subject: Some(route_ir.id.clone()),
+                            message: format!(
+                                "ai-model-router `{label}` on route `{}` references provider `{prov}` not declared in `ai-provider-adapter.providers`",
                                 route_ir.id
                             ),
                         });
@@ -476,7 +497,12 @@ fn path_subsumes(earlier: &PathMatch, later: &PathMatch) -> bool {
     }
 }
 
-fn extract_ai_target_chains(cfg: &Value) -> Vec<(String, Vec<String>)> {
+struct AiTargetRef {
+    upstream: String,
+    provider: Option<String>,
+}
+
+fn extract_ai_target_chains(cfg: &Value) -> Vec<(String, Vec<AiTargetRef>)> {
     let mut chains = Vec::new();
 
     if let Some(models) = cfg.get("models").and_then(Value::as_object) {
@@ -484,8 +510,8 @@ fn extract_ai_target_chains(cfg: &Value) -> Vec<(String, Vec<String>)> {
         keys.sort();
         for model_name in keys {
             if let Some(arr) = models[model_name].as_array() {
-                let ups = extract_upstreams_from_targets(arr);
-                chains.push((format!("models.{model_name}"), ups));
+                let targets = extract_targets_info(arr);
+                chains.push((format!("models.{model_name}"), targets));
             }
         }
     }
@@ -494,8 +520,8 @@ fn extract_ai_target_chains(cfg: &Value) -> Vec<(String, Vec<String>)> {
         for rule in rules {
             let pat = rule.get("pattern").and_then(Value::as_str).unwrap_or("?");
             if let Some(arr) = rule.get("targets").and_then(Value::as_array) {
-                let ups = extract_upstreams_from_targets(arr);
-                chains.push((format!("rules[{pat}]"), ups));
+                let targets = extract_targets_info(arr);
+                chains.push((format!("rules[{pat}]"), targets));
             }
         }
     }
@@ -503,16 +529,20 @@ fn extract_ai_target_chains(cfg: &Value) -> Vec<(String, Vec<String>)> {
     if let Some(defaults) = cfg.get("default_targets").and_then(Value::as_array)
         && !defaults.is_empty()
     {
-        let ups = extract_upstreams_from_targets(defaults);
-        chains.push(("default_targets".to_owned(), ups));
+        let targets = extract_targets_info(defaults);
+        chains.push(("default_targets".to_owned(), targets));
     }
 
     chains
 }
 
-fn extract_upstreams_from_targets(arr: &[Value]) -> Vec<String> {
+fn extract_targets_info(arr: &[Value]) -> Vec<AiTargetRef> {
     arr.iter()
-        .filter_map(|t| t.get("upstream").and_then(Value::as_str).map(str::to_owned))
+        .filter_map(|t| {
+            let upstream = t.get("upstream").and_then(Value::as_str)?.to_owned();
+            let provider = t.get("provider").and_then(Value::as_str).map(str::to_owned);
+            Some(AiTargetRef { upstream, provider })
+        })
         .collect()
 }
 

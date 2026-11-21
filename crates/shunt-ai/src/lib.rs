@@ -2,20 +2,24 @@
 //!
 //! Implemented **100% through `shunt-plugin-sdk`** with zero dependencies on `shunt-core`,
 //! validating Shunt's request buffering, dynamic routing, per-attempt upstream mutation,
-//! automatic failover, live SSE chunk translation, and token accounting primitives.
+//! automatic failover, live SSE / binary EventStream translation, and token accounting primitives.
 //!
 //! ## Included Plugins
-//! - `ai-model-router`: Buffers OpenAI chat requests, parses `model` / `stream`, stores
-//!   [`AiRequestMeta`] in `ctx.extensions`, and steers `on_route` / `on_upstream_select`
-//!   across ordered provider/model fallback chains.
-//! - `ai-provider-adapter`: Adapts OpenAI `/v1/chat/completions` requests & responses across
-//!   OpenAI and Anthropic (including live Anthropic SSE -> OpenAI `chat.completion.chunk` SSE
-//!   and non-streaming JSON translation).
+//! - `ai-model-router`: Serves synthesized `GET /v1/models` & `GET /v1/models/{id}`, buffers
+//!   `/v1/chat/completions` & `/v1/embeddings` requests, stores [`AiRequestMeta`] in
+//!   `ctx.extensions`, and steers `on_route` / `on_upstream_select` across named-provider chains.
+//! - `ai-provider-adapter`: Adapts OpenAI requests & responses across named provider instances
+//!   speaking `openai_compatible`, `anthropic`, `azure_openai`, `gemini` (AI Studio & Vertex AI),
+//!   and `bedrock` (Converse & ConverseStream with pure-Rust AWS SigV4 & EventStream framing).
 //! - `ai-failover`: Triggers automatic `Flow::RetryUpstream` on `429` / `5xx` / `529` responses,
 //!   with optional `StateStore`-backed provider cooldowns that persist across hot reloads.
-//! - `ai-usage-tracker`: Extracts input/output token counts and TTFT from JSON or SSE streams,
-//!   records Prometheus metrics in [`AiMetrics`], and emits structured usage logs in `on_complete`.
+//! - `ai-usage-tracker`: Extracts input/output token counts and TTFT from JSON or SSE streams
+//!   across OpenAI, Anthropic, Gemini, Bedrock, and Embeddings formats, records Prometheus metrics
+//!   in [`AiMetrics`], and emits structured usage logs in `on_complete`.
 
+pub mod aws_eventstream;
+pub mod aws_sigv4;
+pub mod dialects;
 pub mod failover;
 pub mod model_router;
 pub mod provider_adapter;
@@ -28,16 +32,33 @@ use std::sync::Arc;
 
 use shunt_plugin_sdk::PluginRegistry;
 
+pub use aws_eventstream::{
+    AwsEventStreamDecoder, EventStreamError, EventStreamHeaderValue, EventStreamMessage,
+    crc32_ieee, encode_eventstream_frame,
+};
+pub use aws_sigv4::{AwsSigV4Credentials, SigV4Output, sign_canonical, sign_upstream_request};
+pub use dialects::bedrock::{
+    BedrockStreamTranslator, bedrock_converse_path, bedrock_converse_to_openai_response,
+    map_bedrock_stop_reason, openai_to_bedrock_converse_request,
+};
+pub use dialects::gemini::{
+    GeminiSseTranslator, clean_gemini_schema, gemini_chat_path, gemini_embeddings_path,
+    gemini_to_openai_embeddings_response, gemini_to_openai_response, map_gemini_finish_reason,
+    openai_to_gemini_embeddings_request, openai_to_gemini_request,
+};
 pub use failover::{AiFailoverFactory, AiFailoverPlugin};
 pub use model_router::{AiModelRouterFactory, AiModelRouterPlugin, ModelRule, TargetSpec};
-pub use provider_adapter::{AiProviderAdapterFactory, AiProviderAdapterPlugin};
+pub use provider_adapter::{
+    AiProviderAdapterFactory, AiProviderAdapterPlugin, ProviderAuthConfig, ProviderInstanceConfig,
+};
 pub use sse::{SseEvent, SseParser};
 pub use translate::{
     AnthropicSseTranslator, anthropic_to_openai_response, map_anthropic_stop_reason,
-    openai_to_anthropic_request, rewrite_openai_request,
+    openai_to_anthropic_request, rewrite_openai_embeddings_request, rewrite_openai_request,
 };
 pub use types::{
-    AiFailoverHistory, AiProvider, AiRequestMeta, AiTarget, AiUsage, AiUsageReport, FailoverEvent,
+    AiCapability, AiEndpointKind, AiFailoverHistory, AiRequestMeta, AiTarget, AiUsage,
+    AiUsageReport, DetectedEndpoint, FailoverEvent, ProviderDialect,
 };
 pub use usage_tracker::{
     AiMetrics, AiMetricsSnapshot, AiUsageTrackerFactory, AiUsageTrackerPlugin, UsageSink,

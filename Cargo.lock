@@ -1036,6 +1036,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sha2",
  "shunt-config",
  "shunt-core",
  "shunt-plugin-sdk",

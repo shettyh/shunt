@@ -12,7 +12,7 @@ use shunt_plugin_sdk::{
 use tracing::info;
 
 use crate::sse::SseParser;
-use crate::types::{AiFailoverHistory, AiRequestMeta, AiUsage, AiUsageReport};
+use crate::types::{AiFailoverHistory, AiRequestMeta, AiUsage, AiUsageReport, DetectedEndpoint};
 
 const DEFAULT_MAX_JSON_INSPECT_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
 
@@ -126,7 +126,7 @@ impl AiMetrics {
             *data
                 .failovers_total
                 .entry((
-                    ev.provider.as_str().to_owned(),
+                    ev.provider.clone(),
                     report.provider.clone(),
                     report.requested_model.clone(),
                 ))
@@ -404,7 +404,7 @@ impl HttpPlugin for AiUsageTrackerPlugin {
         let provider = ctx
             .get_ext::<AiRequestMeta>()
             .and_then(AiRequestMeta::active_target)
-            .map(|t| t.provider);
+            .map(|t| t.provider.clone());
 
         let collector = if is_sse {
             UsageCollectorState::Sse(SseParser::new())
@@ -483,6 +483,16 @@ impl HttpPlugin for AiUsageTrackerPlugin {
         ctx: &'a RequestCtx,
         summary: &'a RequestSummary,
     ) -> HookResult<'a, ()> {
+        // Synthetic model discovery responses (`GET /v1/models`, `GET /v1/models/{id}`)
+        // do not represent LLM inference invocations.
+        if ctx
+            .get_ext::<DetectedEndpoint>()
+            .map(|d| d.0.is_models_discovery())
+            .unwrap_or(false)
+        {
+            return HookResult::Ready(());
+        }
+
         let meta = ctx.get_ext::<AiRequestMeta>();
         let usage = ctx.get_ext::<AiUsage>();
         let failover_events = ctx
@@ -492,9 +502,8 @@ impl HttpPlugin for AiUsageTrackerPlugin {
 
         let active_target = meta.and_then(AiRequestMeta::active_target);
         let provider = usage
-            .and_then(|u| u.provider)
-            .or_else(|| active_target.map(|t| t.provider))
-            .map(|p| p.as_str().to_owned())
+            .and_then(|u| u.provider.clone())
+            .or_else(|| active_target.map(|t| t.provider.clone()))
             .unwrap_or_else(|| "unknown".to_owned());
 
         let requested_model = meta
@@ -606,13 +615,38 @@ fn contains_first_token(val: &Value) -> bool {
         }
     }
 
+    // Gemini streaming chunk (in case ai-usage-tracker runs before ai-provider-adapter)
+    if let Some(candidates) = val.get("candidates").and_then(Value::as_array) {
+        for cand in candidates {
+            if let Some(parts) = cand
+                .get("content")
+                .and_then(|c| c.get("parts"))
+                .and_then(Value::as_array)
+            {
+                for part in parts {
+                    if part
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false)
+                        || part.get("functionCall").is_some()
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
     // Anthropic streaming chunk (in case ai-usage-tracker runs before ai-provider-adapter)
     val.get("type").and_then(Value::as_str) == Some("content_block_delta")
 }
 
 fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {
-    // Model name (OpenAI top-level or Anthropic message_start.message.model)
+    // Model name (OpenAI top-level, Gemini modelVersion, or Anthropic message_start.message.model)
     if let Some(m) = val.get("model").and_then(Value::as_str) {
+        usage.served_model = Some(m.to_owned());
+    } else if let Some(m) = val.get("modelVersion").and_then(Value::as_str) {
         usage.served_model = Some(m.to_owned());
     } else if let Some(m) = val
         .get("message")
@@ -622,7 +656,7 @@ fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {
         usage.served_model = Some(m.to_owned());
     }
 
-    // Top-level `usage` (OpenAI non-stream/stream, Anthropic non-stream, Anthropic message_delta)
+    // Top-level `usage` (OpenAI chat/embeddings, Anthropic non-stream/message_delta, Bedrock Converse)
     if let Some(u) = val.get("usage").and_then(Value::as_object) {
         if let Some(p) = u.get("prompt_tokens").and_then(Value::as_u64) {
             usage.prompt_tokens = Some(p);
@@ -639,6 +673,16 @@ fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {
         if let Some(o) = u.get("output_tokens").and_then(Value::as_u64) {
             usage.completion_tokens = Some(o);
         }
+        // Bedrock Converse camelCase usage keys
+        if let Some(i) = u.get("inputTokens").and_then(Value::as_u64) {
+            usage.prompt_tokens = Some(i);
+        }
+        if let Some(o) = u.get("outputTokens").and_then(Value::as_u64) {
+            usage.completion_tokens = Some(o);
+        }
+        if let Some(t) = u.get("totalTokens").and_then(Value::as_u64) {
+            usage.total_tokens = Some(t);
+        }
     }
 
     // Anthropic `message_start`: message.usage.{input_tokens, output_tokens}
@@ -652,6 +696,19 @@ fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {
         }
         if let Some(o) = u.get("output_tokens").and_then(Value::as_u64) {
             usage.completion_tokens = Some(o);
+        }
+    }
+
+    // Google Gemini `usageMetadata.{promptTokenCount, candidatesTokenCount, totalTokenCount}`
+    if let Some(u) = val.get("usageMetadata").and_then(Value::as_object) {
+        if let Some(p) = u.get("promptTokenCount").and_then(Value::as_u64) {
+            usage.prompt_tokens = Some(p);
+        }
+        if let Some(c) = u.get("candidatesTokenCount").and_then(Value::as_u64) {
+            usage.completion_tokens = Some(c);
+        }
+        if let Some(t) = u.get("totalTokenCount").and_then(Value::as_u64) {
+            usage.total_tokens = Some(t);
         }
     }
 }

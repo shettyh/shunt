@@ -286,7 +286,7 @@ impl HttpPlugin for AiFailoverPlugin {
 
             let event = FailoverEvent {
                 attempt: ctx.attempt,
-                provider: target.provider,
+                provider: target.provider.clone(),
                 upstream: target.upstream.clone(),
                 model: target.model.clone(),
                 status: status_code,

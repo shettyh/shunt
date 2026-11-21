@@ -282,8 +282,9 @@ default-gpt = [{{ provider = "openai", upstream = "openai", model = "gpt-4o-2024
 
 [[routes.plugins]]
 name = "ai-provider-adapter"
-[routes.plugins.config.openai]
-api_key = "sk-test-openai-secret"
+[routes.plugins.config.providers.openai]
+dialect = "openai_compatible"
+auth = {{ type = "bearer", api_key = "sk-test-openai-secret" }}
 include_stream_usage = true
 
 [[routes.plugins]]
@@ -487,8 +488,9 @@ targets = [{{ provider = "anthropic", upstream = "anthropic" }}]
 
 [[routes.plugins]]
 name = "ai-provider-adapter"
-[routes.plugins.config.anthropic]
-api_key = "sk-ant-test-key"
+[routes.plugins.config.providers.anthropic]
+dialect = "anthropic"
+auth = {{ type = "header", header = "x-api-key", api_key = "sk-ant-test-key" }}
 anthropic_version = "2023-06-01"
 default_max_tokens = 2048
 
@@ -723,10 +725,12 @@ smart = [
 
 [[routes.plugins]]
 name = "ai-provider-adapter"
-[routes.plugins.config.openai]
-api_key = "sk-openai-primary"
-[routes.plugins.config.anthropic]
-api_key = "sk-ant-fallback"
+[routes.plugins.config.providers.openai]
+dialect = "openai_compatible"
+auth = {{ type = "bearer", api_key = "sk-openai-primary" }}
+[routes.plugins.config.providers.anthropic]
+dialect = "anthropic"
+auth = {{ type = "header", header = "x-api-key", api_key = "sk-ant-fallback" }}
 
 [[routes.plugins]]
 name = "ai-failover"
@@ -886,10 +890,12 @@ failure_threshold = 1
 
 [[routes.plugins]]
 name = "ai-provider-adapter"
-[routes.plugins.config.openai]
-api_key = "super-secret-openai-key"
-[routes.plugins.config.anthropic]
-api_key = "super-secret-anthropic-key"
+[routes.plugins.config.providers.openai]
+dialect = "openai_compatible"
+auth = {{ type = "bearer", api_key = "super-secret-openai-key" }}
+[routes.plugins.config.providers.anthropic]
+dialect = "anthropic"
+auth = {{ type = "header", header = "x-api-key", api_key = "super-secret-anthropic-key" }}
 
 [[routes.plugins]]
 name = "ai-usage-tracker"
@@ -1010,8 +1016,9 @@ log_usage = false
 
 [[routes.plugins]]
 name = "ai-provider-adapter"
-[routes.plugins.config.anthropic]
-api_key = "sk-ant-test"
+[routes.plugins.config.providers.anthropic]
+dialect = "anthropic"
+auth = {{ type = "header", header = "x-api-key", api_key = "sk-ant-test" }}
 "#
     );
 
@@ -1111,4 +1118,64 @@ fn example_shunt_ai_toml_compiles_cleanly() {
         .expect("examples/shunt-ai.toml should compile into a valid GatewaySnapshot");
     assert_eq!(bundle.inspect.routes.len(), 1);
     assert_eq!(bundle.inspect.routes[0].id, "ai_chat_completions");
+}
+
+#[test]
+fn example_shunt_ai_multi_provider_toml_compiles_and_verifies_cleanly() {
+    unsafe {
+        std::env::set_var("OPENAI_API_KEY", "sk-example-openai");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-example-anthropic");
+        std::env::set_var("GROQ_API_KEY", "gsk-example-groq");
+        std::env::set_var("AZURE_OPENAI_API_KEY", "az-example-key");
+        std::env::set_var("GEMINI_API_KEY", "AIza-example-gemini");
+        std::env::set_var("VERTEX_ACCESS_TOKEN", "ya29.example-vertex");
+        std::env::set_var("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE");
+        std::env::set_var(
+            "AWS_SECRET_ACCESS_KEY",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        );
+    }
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/shunt-ai-multi-provider.toml");
+    let provider = shunt_config::FileConfigProvider::new(&path);
+    let loaded = provider
+        .load()
+        .expect("examples/shunt-ai-multi-provider.toml should parse");
+
+    let mut reg = PluginRegistry::new();
+    let prom = Arc::new(PrometheusMetrics::new());
+    let ai_metrics = Arc::new(AiMetrics::new());
+    register_builtin_plugins(&mut reg, prom);
+    register_ai_plugins(&mut reg, ai_metrics);
+
+    let compiler = SnapshotCompiler::new(Arc::new(reg), Arc::new(RuntimeRegistry::new()));
+    let bundle = compiler
+        .compile(&loaded)
+        .expect("examples/shunt-ai-multi-provider.toml should compile cleanly");
+
+    // Verify all provider secrets are redacted from SnapshotInspect.
+    let inspect_json = serde_json::to_string(&bundle.inspect).unwrap();
+    for secret in [
+        "sk-example-openai",
+        "sk-example-anthropic",
+        "gsk-example-groq",
+        "az-example-key",
+        "AIza-example-gemini",
+        "ya29.example-vertex",
+        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    ] {
+        assert!(
+            !inspect_json.contains(secret),
+            "secret `{secret}` leaked into SnapshotInspect"
+        );
+    }
+
+    // Static verification passes with zero errors or warnings.
+    let report = shunt_config::verify_bundle(&bundle, None, true);
+    assert!(
+        report.passed,
+        "multi-provider example failed verify: {:?}",
+        report.diagnostics
+    );
 }

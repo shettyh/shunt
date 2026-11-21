@@ -1,0 +1,192 @@
+# Multi-Provider Shunt AI Gateway configuration (RFC 0007)
+#
+# Serves a unified OpenAI-compatible API surface on `/v1`:
+#   - GET  /v1/models
+#   - GET  /v1/models/{id}
+#   - POST /v1/chat/completions
+#   - POST /v1/embeddings
+#
+# Across OpenAI, Anthropic, local Ollama, Groq, Azure OpenAI, Google Gemini (AI Studio
+# & Vertex AI), and AWS Bedrock (Converse & ConverseStream with pure-Rust SigV4).
+#
+# Usage:
+#   shunt verify -c examples/shunt-ai-multi-provider.toml
+
+[server]
+listen = "127.0.0.1:8080"
+drain_timeout_ms = 30000
+
+[admin]
+enabled = true
+listen = "127.0.0.1:9090"
+
+[[plugins]]
+name = "request-id"
+
+[[plugins]]
+name = "metrics"
+
+[[plugins]]
+name = "access-log"
+
+[[upstreams]]
+name = "openai"
+endpoints = ["https://api.openai.com"]
+connect_timeout_ms = 5000
+
+[[upstreams]]
+name = "anthropic"
+endpoints = ["https://api.anthropic.com"]
+connect_timeout_ms = 5000
+
+[[upstreams]]
+name = "ollama"
+endpoints = ["http://127.0.0.1:11434"]
+connect_timeout_ms = 2000
+
+[[upstreams]]
+name = "groq"
+endpoints = ["https://api.groq.com"]
+connect_timeout_ms = 5000
+
+[[upstreams]]
+name = "azure"
+endpoints = ["https://my-resource.openai.azure.com"]
+connect_timeout_ms = 5000
+
+[[upstreams]]
+name = "gemini"
+endpoints = ["https://generativelanguage.googleapis.com"]
+connect_timeout_ms = 5000
+
+[[upstreams]]
+name = "vertex"
+endpoints = ["https://us-central1-aiplatform.googleapis.com"]
+connect_timeout_ms = 5000
+
+[[upstreams]]
+name = "bedrock"
+endpoints = ["https://bedrock-runtime.us-east-1.amazonaws.com"]
+connect_timeout_ms = 5000
+
+[[routes]]
+id = "ai_v1_unified"
+path_prefix = "/v1"
+methods = ["GET", "POST"]
+upstream = "openai"
+max_attempts = 3
+response_headers_timeout_ms = 60000
+idle_chunk_timeout_ms = 30000
+
+[[routes.plugins]]
+name = "ai-model-router"
+[routes.plugins.config]
+max_body_bytes = 2097152
+auto_max_attempts = true
+serve_models_endpoint = true
+exposed_models = [
+    "gpt-4o",
+    "claude-3-5-sonnet-20241022",
+    "gemini-2.5-flash",
+    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+]
+
+[routes.plugins.config.models]
+smart = [
+    { provider = "openai", upstream = "openai", model = "gpt-4o", capabilities = ["chat", "streaming", "tools", "vision"] },
+    { provider = "gemini", upstream = "gemini", model = "gemini-2.5-flash", capabilities = ["chat", "streaming", "tools"] },
+    { provider = "bedrock", upstream = "bedrock", model = "anthropic.claude-3-5-sonnet-20241022-v2:0", capabilities = ["chat", "streaming", "tools"] },
+]
+local = [
+    { provider = "ollama", upstream = "ollama", model = "llama3.2", capabilities = ["chat", "streaming"] },
+]
+fast = [
+    { provider = "groq", upstream = "groq", model = "llama-3.3-70b-versatile", capabilities = ["chat", "streaming"] },
+    { provider = "azure", upstream = "azure", model = "gpt-4o-mini-deploy", capabilities = ["chat", "streaming"] },
+]
+embed-default = [
+    { provider = "openai", upstream = "openai", model = "text-embedding-3-small", capabilities = ["embeddings"] },
+    { provider = "gemini", upstream = "gemini", model = "text-embedding-004", capabilities = ["embeddings"] },
+]
+
+[[routes.plugins.config.rules]]
+pattern = "claude-*"
+targets = [{ provider = "anthropic", upstream = "anthropic" }]
+
+[[routes.plugins.config.rules]]
+pattern = "gemini-*"
+targets = [{ provider = "gemini", upstream = "gemini" }]
+
+[[routes.plugins.config.rules]]
+pattern = "vertex/*"
+targets = [{ provider = "vertex", upstream = "vertex", model = "gemini-2.5-pro" }]
+
+[[routes.plugins.config.rules]]
+pattern = "anthropic.*"
+targets = [{ provider = "bedrock", upstream = "bedrock" }]
+
+[[routes.plugins.config.rules]]
+pattern = "gpt-*"
+targets = [{ provider = "openai", upstream = "openai" }]
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+[routes.plugins.config]
+response_headers = true
+
+[routes.plugins.config.providers.openai]
+dialect = "openai_compatible"
+auth = { type = "bearer", api_key = "env:OPENAI_API_KEY" }
+include_stream_usage = true
+
+[routes.plugins.config.providers.ollama]
+dialect = "openai_compatible"
+chat_path = "/v1/chat/completions"
+embeddings_path = "/v1/embeddings"
+auth = { type = "none" }
+include_stream_usage = false
+
+[routes.plugins.config.providers.groq]
+dialect = "openai_compatible"
+chat_path = "/openai/v1/chat/completions"
+auth = { type = "bearer", api_key = "env:GROQ_API_KEY" }
+
+[routes.plugins.config.providers.anthropic]
+dialect = "anthropic"
+auth = { type = "header", header = "x-api-key", api_key = "env:ANTHROPIC_API_KEY" }
+anthropic_version = "2023-06-01"
+default_max_tokens = 4096
+
+[routes.plugins.config.providers.azure]
+dialect = "azure_openai"
+api_version = "2024-10-21"
+auth = { type = "header", header = "api-key", api_key = "env:AZURE_OPENAI_API_KEY" }
+
+[routes.plugins.config.providers.gemini]
+dialect = "gemini"
+auth = { type = "header", header = "x-goog-api-key", api_key = "env:GEMINI_API_KEY" }
+
+[routes.plugins.config.providers.vertex]
+dialect = "gemini"
+vertex_project = "my-gcp-project"
+vertex_location = "us-central1"
+auth = { type = "bearer", api_key = "env:VERTEX_ACCESS_TOKEN" }
+
+[routes.plugins.config.providers.bedrock]
+dialect = "bedrock"
+region = "us-east-1"
+auth = { type = "aws_sigv4", access_key_id = "env:AWS_ACCESS_KEY_ID", secret_access_key = "env:AWS_SECRET_ACCESS_KEY" }
+
+[[routes.plugins]]
+name = "ai-failover"
+id = "ai-multi-failover"
+[routes.plugins.config]
+retry_statuses = [429, 500, 502, 503, 504, 529]
+cooldown_ms = 15000
+failure_threshold = 2
+respect_retry_after = true
+
+[[routes.plugins]]
+name = "ai-usage-tracker"
+[routes.plugins.config]
+log_usage = true

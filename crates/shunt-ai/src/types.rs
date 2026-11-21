@@ -4,43 +4,121 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use shunt_plugin_sdk::{BufferedResponse, StatusCode};
 
-/// Supported upstream AI backend providers in `shunt-ai`.
+/// Wire protocol dialect spoken by an upstream AI provider instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AiProvider {
-    #[serde(alias = "open_ai")]
-    OpenAi,
+#[serde(rename_all = "snake_case")]
+pub enum ProviderDialect {
+    #[serde(rename = "openai_compatible", alias = "openai")]
+    OpenAiCompatible,
     Anthropic,
+    #[serde(rename = "azure_openai", alias = "azure")]
+    AzureOpenAi,
+    Gemini,
+    Bedrock,
 }
 
-impl AiProvider {
+impl ProviderDialect {
     pub const fn as_str(self) -> &'static str {
         match self {
-            AiProvider::OpenAi => "openai",
-            AiProvider::Anthropic => "anthropic",
+            ProviderDialect::OpenAiCompatible => "openai_compatible",
+            ProviderDialect::Anthropic => "anthropic",
+            ProviderDialect::AzureOpenAi => "azure_openai",
+            ProviderDialect::Gemini => "gemini",
+            ProviderDialect::Bedrock => "bedrock",
         }
+    }
+
+    /// Returns whether this dialect implements `POST /v1/embeddings`.
+    pub const fn supports_embeddings(self) -> bool {
+        matches!(
+            self,
+            ProviderDialect::OpenAiCompatible
+                | ProviderDialect::AzureOpenAi
+                | ProviderDialect::Gemini
+        )
     }
 }
 
-impl fmt::Display for AiProvider {
+impl fmt::Display for ProviderDialect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-/// A single resolved provider/upstream/model candidate in a request's fallback chain.
+/// Logical AI API operation parsed from the incoming request path and HTTP method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiEndpointKind {
+    ChatCompletions,
+    Embeddings,
+    ModelsList,
+    ModelRetrieve,
+}
+
+impl AiEndpointKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            AiEndpointKind::ChatCompletions => "chat_completions",
+            AiEndpointKind::Embeddings => "embeddings",
+            AiEndpointKind::ModelsList => "models_list",
+            AiEndpointKind::ModelRetrieve => "model_retrieve",
+        }
+    }
+
+    pub const fn is_models_discovery(self) -> bool {
+        matches!(
+            self,
+            AiEndpointKind::ModelsList | AiEndpointKind::ModelRetrieve
+        )
+    }
+}
+
+impl fmt::Display for AiEndpointKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Optional capability flags declared per target so incompatible targets are filtered out
+/// cleanly (e.g., skipping chat-only backends on `/v1/embeddings`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiCapability {
+    Chat,
+    Streaming,
+    Tools,
+    Vision,
+    Embeddings,
+}
+
+/// Endpoint classification stored in `RequestCtx::extensions` during `on_request_headers`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetectedEndpoint(pub AiEndpointKind);
+
+/// A single resolved named-provider/upstream/model candidate in a request's fallback chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiTarget {
-    pub provider: AiProvider,
+    /// Named provider ID matching an entry in `ai-provider-adapter`'s `providers` map.
+    pub provider: String,
     pub upstream: String,
     pub model: String,
     pub endpoint_override: Option<String>,
+    /// Optional capability override; when empty, defaults apply per endpoint/dialect.
+    pub capabilities: Vec<AiCapability>,
+}
+
+impl AiTarget {
+    /// Returns `true` if this target supports `capability` (or declares no capability filter).
+    pub fn supports(&self, capability: AiCapability) -> bool {
+        self.capabilities.is_empty() || self.capabilities.contains(&capability)
+    }
 }
 
 /// Typed per-request AI routing metadata stored in [`shunt_plugin_sdk::RequestCtx::extensions`]
 /// by `ai-model-router` and consumed by `ai-provider-adapter`, `ai-failover`, and `ai-usage-tracker`.
 #[derive(Debug, Clone)]
 pub struct AiRequestMeta {
+    pub endpoint: AiEndpointKind,
     pub requested_model: String,
     pub stream: bool,
     pub targets: Vec<AiTarget>,
@@ -49,9 +127,15 @@ pub struct AiRequestMeta {
 }
 
 impl AiRequestMeta {
-    pub fn new(requested_model: String, stream: bool, targets: Vec<AiTarget>) -> Self {
+    pub fn new(
+        endpoint: AiEndpointKind,
+        requested_model: String,
+        stream: bool,
+        targets: Vec<AiTarget>,
+    ) -> Self {
         let max_attempts = targets.len().max(1);
         Self {
+            endpoint,
             requested_model,
             stream,
             targets,
@@ -80,7 +164,7 @@ impl AiRequestMeta {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FailoverEvent {
     pub attempt: usize,
-    pub provider: AiProvider,
+    pub provider: String,
     pub upstream: String,
     pub model: String,
     pub status: u16,
@@ -96,7 +180,7 @@ pub struct AiFailoverHistory {
 /// by `ai-usage-tracker`.
 #[derive(Debug, Clone, Default)]
 pub struct AiUsage {
-    pub provider: Option<AiProvider>,
+    pub provider: Option<String>,
     pub served_model: Option<String>,
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
@@ -169,5 +253,57 @@ pub fn resolve_env_secret(raw: &str) -> Result<String, String> {
         std::env::var(var_name).map_err(|_| format!("environment variable `{var_name}` is not set"))
     } else {
         Ok(raw.to_owned())
+    }
+}
+
+/// Percent-encodes a single URI path segment per RFC 3986 unreserved characters
+/// (`A-Z`, `a-z`, `0-9`, `-`, `_`, `.`, `~`).
+pub fn percent_encode_path_segment(input: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(input.len());
+    for &b in input.as_bytes() {
+        if is_rfc3986_unreserved(b) {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0F) as usize] as char);
+        }
+    }
+    out
+}
+
+/// Decodes `%XX` percent-encoded sequences in a URI component (best-effort UTF-8).
+pub fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[inline]
+pub(crate) const fn is_rfc3986_unreserved(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~')
+}
+
+#[inline]
+const fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }

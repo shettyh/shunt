@@ -44,5 +44,19 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_gemini_sse"
+path = "fuzz_targets/fuzz_gemini_sse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_aws_eventstream"
+path = "fuzz_targets/fuzz_aws_eventstream.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

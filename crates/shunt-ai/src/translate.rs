@@ -64,6 +64,29 @@ pub fn rewrite_openai_request(
         .map_err(|e| format!("failed to serialize OpenAI request: {e}"))
 }
 
+/// Rewrites an OpenAI `/v1/embeddings` JSON request body by updating `"model"` when it differs
+/// from `target_model`. Returns `Ok(None)` when no mutation is needed (zero-copy passthrough).
+pub fn rewrite_openai_embeddings_request(
+    body: &[u8],
+    target_model: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let mut val: Value =
+        serde_json::from_slice(body).map_err(|e| format!("invalid JSON request body: {e}"))?;
+    let obj = val
+        .as_object_mut()
+        .ok_or_else(|| "request body must be a JSON object".to_owned())?;
+
+    let current_model = obj.get("model").and_then(Value::as_str);
+    if current_model == Some(target_model) {
+        return Ok(None);
+    }
+
+    obj.insert("model".to_owned(), Value::String(target_model.to_owned()));
+    serde_json::to_vec(&val)
+        .map(Some)
+        .map_err(|e| format!("failed to serialize OpenAI embeddings request: {e}"))
+}
+
 /// Translates an OpenAI `/v1/chat/completions` JSON request into an Anthropic `/v1/messages` JSON request.
 pub fn openai_to_anthropic_request(
     body: &[u8],
