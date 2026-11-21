@@ -48,3 +48,33 @@ RUST_LOG=error cargo run --release -p shunt-cli -- run --no-watch -c benches/con
 cargo run --release -p shunt-bench -- http --url http://127.0.0.1:18081/ping -c 64 -d 10
 cargo run --release -p shunt-bench -- sse  --url http://127.0.0.1:18081/sse  -c 1000
 ```
+
+## Reference Results (macOS Apple Silicon, Local Loopback)
+
+Measured with `./benches/scripts/run_all.sh` (`DURATION_SECS=6`, `WARMUP_SECS=2`, `HTTP_CONCURRENCY=64`, `SSE_CONCURRENCY=1000`, `SSE_CHUNKS=20`, `SSE_INTERVAL_MS=25`) comparing **Shunt (`--release`)**, **Envoy 1.40.2**, and **Caddy 2.11.9** natively on identical hardware against the same `shunt-bench upstream`:
+
+### Workload 1 — Raw HTTP/1.1 Passthrough (`c=64`, 0 plugins)
+
+| Gateway | Throughput | p50 Latency | p99 Latency | Post-Run RSS | Errors |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| **Shunt** (`HookMask::EMPTY`) | **89,240 req/s** | **713 µs** | **922 µs** | **20.1 MB** | 0 |
+| **Envoy 1.40.2** | 75,515 req/s | 843 µs | 1,010 µs | 57.5 MB | 0 |
+| **Caddy 2.11.9** | 69,264 req/s | 863 µs | 2,089 µs | 71.4 MB | 0 |
+
+### Workload 2 — 3-Plugin Chain (`c=64`)
+
+| Gateway | Throughput | p50 Latency | p99 Latency | Post-Run RSS | Errors |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| **Shunt** (`request-id` + `bearer-auth` + `rate-limit`) | **87,714 req/s** | **724 µs** | **956 µs** | **21.0 MB** | 0 |
+| **Envoy 1.40.2** (`request-id` + auth + `local_ratelimit`) | 76,431 req/s | 832 µs | 1,018 µs | 55.6 MB | 0 |
+| **Caddy 2.11.9** (`headers` + auth) | 45,557 req/s | 891 µs | 12,083 µs | 71.6 MB | 999 |
+
+### Workload 3 — 1,000 Concurrent SSE Streams (`c=1,000`, 20 chunks @ 25ms)
+
+| Gateway | Completed / Failed | Chunks/s | TTFC p50 / p99 | Wall Time | Post-Run RSS |
+| --- | :---: | ---: | ---: | ---: | ---: |
+| **Shunt (SSE passthrough)** | **1,000 / 0** | 30,456/s | **71.8 ms** / 161.1 ms | 0.69s | **83.3 MB** |
+| **Envoy 1.40.2 (SSE passthrough)** | 1,000 / 0 | **30,749/s** | 72.4 ms / 158.6 ms | 0.68s | 92.2 MB |
+| **Caddy 2.11.9 (SSE passthrough)** | 1,000 / 0 | 30,316/s | 85.0 ms / **155.4 ms** | 0.69s | 159.2 MB |
+| **Shunt-AI** *(live Anthropic → OpenAI JSON + SSE translate + usage)* | **1,000 / 0** | 28,990/s *(23k chunks)* | 99.4 ms / 187.3 ms | 0.79s | **93.8 MB** |
+

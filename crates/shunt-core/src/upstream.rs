@@ -501,7 +501,15 @@ async fn connect_uri(
 
     let deadline = Instant::now() + connect_timeout;
 
-    let tcp = tokio::time::timeout(connect_timeout, TcpStream::connect((host.as_str(), port)))
+    let connect_fut = async {
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            TcpStream::connect(std::net::SocketAddr::new(ip, port)).await
+        } else {
+            TcpStream::connect((host.as_str(), port)).await
+        }
+    };
+
+    let tcp = tokio::time::timeout(connect_timeout, connect_fut)
         .await
         .map_err(|_| CoreError::ConnectTimeout(connect_timeout))??;
 

@@ -39,15 +39,35 @@ cleanup() {
 }
 trap cleanup EXIT
 
-wait_for_port() {
+wait_for_port_and_pid() {
     local port="$1"
-    for _ in $(seq 1 50); do
+    local pid="$2"
+    local logfile="$3"
+    for _ in $(seq 1 60); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "error: process (pid=$pid) exited prematurely! Log:" >&2
+            cat "$logfile" >&2 || true
+            return 1
+        fi
         if (echo >/dev/tcp/127.0.0.1/"$port") 2>/dev/null; then
             return 0
         fi
         sleep 0.1
     done
-    echo "error: timed out waiting for 127.0.0.1:$port" >&2
+    echo "error: timed out waiting for 127.0.0.1:$port (pid=$pid). Log:" >&2
+    cat "$logfile" >&2 || true
+    return 1
+}
+
+wait_for_port_free() {
+    local port="$1"
+    for _ in $(seq 1 50); do
+        if ! (echo >/dev/tcp/127.0.0.1/"$port") 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "error: port 127.0.0.1:$port is still in use!" >&2
     return 1
 }
 
@@ -63,18 +83,25 @@ stop_gw() {
         kill "$GW_PID" 2>/dev/null || true
         wait "$GW_PID" 2>/dev/null || true
         GW_PID=""
-        sleep 0.2
+        wait_for_port_free "$GATEWAY_PORT"
     fi
 }
+
+wait_for_port_free "$UPSTREAM_PORT"
+wait_for_port_free "$GATEWAY_PORT"
+
+UPSTREAM_LOG="$(mktemp)"
+GW_LOG="$(mktemp)"
+trap 'cleanup; rm -f "$UPSTREAM_LOG" "$GW_LOG"' EXIT
 
 echo "==> Starting mock upstream on 127.0.0.1:$UPSTREAM_PORT..."
 "$BENCH_BIN" upstream \
     --listen "127.0.0.1:$UPSTREAM_PORT" \
     --payload-bytes 256 \
     --sse-chunks "$SSE_CHUNKS" \
-    --sse-interval-ms "$SSE_INTERVAL_MS" >/dev/null 2>&1 &
+    --sse-interval-ms "$SSE_INTERVAL_MS" >"$UPSTREAM_LOG" 2>&1 &
 UPSTREAM_PID=$!
-wait_for_port "$UPSTREAM_PORT"
+wait_for_port_and_pid "$UPSTREAM_PORT" "$UPSTREAM_PID" "$UPSTREAM_LOG"
 
 run_gateway_workload() {
     local name="$1"
@@ -86,12 +113,14 @@ run_gateway_workload() {
     echo "--------------------------------------------------------------------"
     echo "[$workload] $name"
     echo "--------------------------------------------------------------------"
-    bash -c "exec $start_cmd" >/dev/null 2>&1 &
+    wait_for_port_free "$GATEWAY_PORT"
+    : >"$GW_LOG"
+    bash -c "exec $start_cmd" >"$GW_LOG" 2>&1 &
     GW_PID=$!
-    wait_for_port "$GATEWAY_PORT"
+    wait_for_port_and_pid "$GATEWAY_PORT" "$GW_PID" "$GW_LOG"
 
     eval "$bench_cmd"
-    echo "  RSS (post-run): $(rss_mb "$GW_PID")"
+    echo "  RSS (post-run): $(rss_mb "$GW_PID") (pid=$GW_PID)"
     stop_gw
 }
 

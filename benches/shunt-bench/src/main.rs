@@ -15,7 +15,7 @@ use hyper::service::service_fn;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as AutoServerBuilder;
-use tokio::net::TcpListener;
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 #[derive(Parser, Debug)]
@@ -169,9 +169,13 @@ async fn run_upstream(
     sse_chunks: usize,
     sse_interval_ms: u64,
 ) {
-    let listener = TcpListener::bind(listen)
-        .await
-        .expect("failed to bind upstream listener");
+    let socket = match listen {
+        SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4().expect("v4 socket"),
+        SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6().expect("v6 socket"),
+    };
+    let _ = socket.set_reuseaddr(true);
+    socket.bind(listen).expect("failed to bind upstream socket");
+    let listener = socket.listen(4096).expect("failed to listen");
     let local_addr = listener.local_addr().unwrap();
     eprintln!(
         "shunt-bench upstream listening on {local_addr} (payload={payload_bytes}B, sse_chunks={sse_chunks}, sse_interval={sse_interval_ms}ms)"
@@ -230,14 +234,19 @@ async fn run_upstream(
                 let ant_frames = Arc::clone(&ant_frames);
                 async move {
                     let path = req.uri().path().to_owned();
-                    // Drain any small request body cleanly so keep-alive connections stay reusable.
-                    let _ = req.into_body().collect().await;
-
                     let resp: Response<BoxBody> = match path.as_str() {
                         "/sse" | "/v1/chat/completions" => {
+                            if !req.body().is_end_stream() {
+                                let _ = req.into_body().collect().await;
+                            }
                             stream_sse_response(raw_frames, interval)
                         }
-                        "/v1/messages" => stream_sse_response(ant_frames, interval),
+                        "/v1/messages" => {
+                            if !req.body().is_end_stream() {
+                                let _ = req.into_body().collect().await;
+                            }
+                            stream_sse_response(ant_frames, interval)
+                        }
                         _ => Response::builder()
                             .status(StatusCode::OK)
                             .header(header::CONTENT_TYPE, "application/octet-stream")
@@ -307,15 +316,30 @@ async fn run_http_bench(
 ) {
     let uri: Uri = url.parse().expect("invalid target URL");
     let headers = Arc::new(parse_headers(raw_headers));
+    let host = uri.host().expect("URL missing host").to_owned();
+    let port = uri.port_u16().unwrap_or(80);
+    let authority = uri
+        .authority()
+        .expect("URL missing authority")
+        .as_str()
+        .to_owned();
+    let path_and_query: Uri = uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/")
+        .parse()
+        .expect("valid path_and_query");
 
-    let mut client_builder = Client::builder(TokioExecutor::new());
-    client_builder
-        .pool_max_idle_per_host(concurrency.max(64))
-        .pool_idle_timeout(Duration::from_secs(60));
-    if http2 {
-        client_builder.http2_only(true);
-    }
-    let client = Arc::new(client_builder.build_http::<Full<Bytes>>());
+    let h2_client = if http2 {
+        let mut client_builder = Client::builder(TokioExecutor::new());
+        client_builder
+            .pool_max_idle_per_host(concurrency.max(64))
+            .pool_idle_timeout(Duration::from_secs(60))
+            .http2_only(true);
+        Some(Arc::new(client_builder.build_http::<Full<Bytes>>()))
+    } else {
+        None
+    };
 
     let recording = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
@@ -325,8 +349,11 @@ async fn run_http_bench(
 
     let mut handles = Vec::with_capacity(concurrency);
     for _ in 0..concurrency {
-        let client = Arc::clone(&client);
+        let h2_client = h2_client.clone();
         let uri = uri.clone();
+        let host = host.clone();
+        let authority = authority.clone();
+        let path_and_query = path_and_query.clone();
         let headers = Arc::clone(&headers);
         let recording = Arc::clone(&recording);
         let stop = Arc::clone(&stop);
@@ -335,16 +362,83 @@ async fn run_http_bench(
         let total_bytes = Arc::clone(&total_bytes);
 
         handles.push(tokio::spawn(async move {
-            let mut latencies_us: Vec<u64> = Vec::with_capacity(4096);
-            while !stop.load(Ordering::Relaxed) {
-                let mut builder = Request::builder().method(Method::GET).uri(uri.clone());
-                for (k, v) in headers.iter() {
-                    builder = builder.header(k, v);
-                }
-                let req = builder.body(Full::new(Bytes::new())).unwrap();
+            let mut latencies_us: Vec<u64> = Vec::with_capacity(8192);
+            let mut h1_sender: Option<hyper::client::conn::http1::SendRequest<Full<Bytes>>> = None;
 
+            while !stop.load(Ordering::Relaxed) {
                 let t0 = Instant::now();
-                let res = client.request(req).await;
+                let res = if let Some(client) = &h2_client {
+                    let mut builder = Request::builder().method(Method::GET).uri(uri.clone());
+                    for (k, v) in headers.iter() {
+                        builder = builder.header(k, v);
+                    }
+                    let req = builder.body(Full::new(Bytes::new())).unwrap();
+                    client
+                        .request(req)
+                        .await
+                        .map_err(|_| ())
+                } else {
+                    // Dedicated per-worker keep-alive H1 connection (zero client-pool lock contention).
+                    if h1_sender
+                        .as_ref()
+                        .map(|s| s.is_closed())
+                        .unwrap_or(true)
+                    {
+                        let addr_res = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                            TcpStream::connect(SocketAddr::new(ip, port)).await
+                        } else {
+                            TcpStream::connect((host.as_str(), port)).await
+                        };
+                        match addr_res {
+                            Ok(tcp) => {
+                                let _ = tcp.set_nodelay(true);
+                                match hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await
+                                {
+                                    Ok((sender, conn)) => {
+                                        tokio::spawn(async move {
+                                            let _ = conn.await;
+                                        });
+                                        h1_sender = Some(sender);
+                                    }
+                                    Err(_) => {
+                                        if recording.load(Ordering::Relaxed) {
+                                            err_count.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                if recording.load(Ordering::Relaxed) {
+                                    err_count.fetch_add(1, Ordering::Relaxed);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
+                    let mut builder = Request::builder()
+                        .method(Method::GET)
+                        .uri(path_and_query.clone())
+                        .header(header::HOST, &authority);
+                    for (k, v) in headers.iter() {
+                        builder = builder.header(k, v);
+                    }
+                    let req = builder.body(Full::new(Bytes::new())).unwrap();
+
+                    let sender = h1_sender.as_mut().unwrap();
+                    if sender.ready().await.is_err() {
+                        h1_sender = None;
+                        if recording.load(Ordering::Relaxed) {
+                            err_count.fetch_add(1, Ordering::Relaxed);
+                        }
+                        continue;
+                    }
+                    sender.send_request(req).await.map_err(|_| {
+                        h1_sender = None;
+                    })
+                };
+
                 let rec = recording.load(Ordering::Relaxed);
 
                 match res {
@@ -367,6 +461,7 @@ async fn run_http_bench(
                                 }
                             }
                             Err(_) => {
+                                h1_sender = None;
                                 if rec {
                                     err_count.fetch_add(1, Ordering::Relaxed);
                                 }

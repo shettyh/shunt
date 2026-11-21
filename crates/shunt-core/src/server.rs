@@ -10,7 +10,6 @@ use http::Request;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as AutoServerBuilder;
-use tokio::net::TcpListener;
 use tokio::sync::{Notify, watch};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
@@ -56,7 +55,13 @@ impl GatewayServer {
     /// Binds to `addr` (supports port `0` for OS-assigned ephemeral ports) and starts
     /// accepting connections on the Tokio runtime.
     pub async fn bind(self, addr: SocketAddr) -> Result<ServerHandle, CoreError> {
-        let listener = TcpListener::bind(addr).await?;
+        let socket = match addr {
+            SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
+            SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
+        };
+        let _ = socket.set_reuseaddr(true);
+        socket.bind(addr)?;
+        let listener = socket.listen(4096)?;
         let local_addr = listener.local_addr()?;
 
         let (tls_acceptor, tls_resolver) = match self.tls {
