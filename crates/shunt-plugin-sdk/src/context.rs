@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use http::{Extensions, StatusCode};
 
 use crate::http_types::HookTiming;
+use crate::telemetry::{SpanHandle, TraceAnnotations};
 
 /// Per-request context threaded through every lifecycle hook.
 ///
@@ -74,6 +75,62 @@ impl RequestCtx {
                 hook,
                 duration,
             });
+        }
+    }
+
+    /// Returns `true` if either an active OTel [`SpanHandle`] or opt-in [`TraceAnnotations`]
+    /// collector is attached to this request.
+    #[inline]
+    pub fn has_trace_collectors(&self) -> bool {
+        self.extensions.get::<SpanHandle>().is_some()
+            || self.extensions.get::<TraceAnnotations>().is_some()
+    }
+
+    /// Attaches a string attribute to any active [`SpanHandle`] and/or [`TraceAnnotations`]
+    /// collector on this request (no-op with zero allocations when neither is attached).
+    #[inline]
+    pub fn annotate_str(&self, key: &str, value: &str) {
+        if let Some(span) = self.extensions.get::<SpanHandle>() {
+            span.set_str(key, value);
+        }
+        if let Some(ann) = self.extensions.get::<TraceAnnotations>() {
+            ann.set_str(key, value);
+        }
+    }
+
+    /// Attaches a signed integer attribute to any active [`SpanHandle`] and/or [`TraceAnnotations`]
+    /// collector on this request (no-op when neither is attached).
+    #[inline]
+    pub fn annotate_int(&self, key: &str, value: i64) {
+        if let Some(span) = self.extensions.get::<SpanHandle>() {
+            span.set_int(key, value);
+        }
+        if let Some(ann) = self.extensions.get::<TraceAnnotations>() {
+            ann.set_int(key, value);
+        }
+    }
+
+    /// Attaches a finite floating-point attribute to any active [`SpanHandle`] and/or
+    /// [`TraceAnnotations`] collector on this request (no-op when neither is attached).
+    #[inline]
+    pub fn annotate_float(&self, key: &str, value: f64) {
+        if let Some(span) = self.extensions.get::<SpanHandle>() {
+            span.set_float(key, value);
+        }
+        if let Some(ann) = self.extensions.get::<TraceAnnotations>() {
+            ann.set_float(key, value);
+        }
+    }
+
+    /// Attaches a boolean attribute to any active [`SpanHandle`] and/or [`TraceAnnotations`]
+    /// collector on this request (no-op when neither is attached).
+    #[inline]
+    pub fn annotate_bool(&self, key: &str, value: bool) {
+        if let Some(span) = self.extensions.get::<SpanHandle>() {
+            span.set_bool(key, value);
+        }
+        if let Some(ann) = self.extensions.get::<TraceAnnotations>() {
+            ann.set_bool(key, value);
         }
     }
 }

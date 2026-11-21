@@ -1,36 +1,73 @@
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::{Method, Request, Response, StatusCode, header};
-use http_body_util::Full;
+use http_body::Frame;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use serde::Serialize;
+use shunt_core::{CoreError, ShuntBody};
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::compiler::SnapshotInspect;
 use crate::error::ConfigError;
+use crate::inspector::{
+    InspectorTrace, TraceRingBuffer, TraceRingSummary, format_sse_lagged_event,
+    format_sse_trace_event,
+};
 use crate::reloader::ReloadController;
 
 /// Callback rendering Prometheus text exposition metrics for `GET /metrics`.
 pub type MetricsRenderer = Arc<dyn Fn() -> String + Send + Sync>;
 
-/// Dedicated read-only Admin API server (`127.0.0.1:9090` by default).
+/// Pluggable read-only JSON status provider rendered under `GET /api/status` (`extensions.<name>`).
+///
+/// Allows domain plugin packs (e.g., `shunt-ai`) to expose live usage, cooldowns, latency tables,
+/// and cache stats on the Admin Inspector without coupling `shunt-config` to AI types.
+pub type StatusProvider = Arc<dyn Fn() -> serde_json::Value + Send + Sync>;
+
+/// Whether this build includes the embedded Admin Inspector Web UI assets (`admin-ui` Cargo feature).
+pub const fn ui_feature_compiled() -> bool {
+    cfg!(feature = "admin-ui")
+}
+
+/// Dedicated Admin API server (`127.0.0.1:9090` by default).
 ///
 /// Always bound to a separate listener from the public proxy data plane.
 /// Exposes:
 /// - `GET /health`
 /// - `GET /metrics`
 /// - `GET /snapshot`
+/// - `GET /upstreams`
+/// - `GET /api/status`
 /// - `POST /reload`
+///
+/// And when opt-in Inspector UI / trace capture is enabled (`--ui` or `[admin] ui = true`):
+/// - `GET /` and `GET /ui` (embedded read-only Inspector Web UI)
+/// - `GET /api/traces` (bounded in-memory trace ring buffer + rolling latency/status summary)
+/// - `GET /api/traces/stream` (live SSE stream of completed traces with `Last-Event-ID` replay)
 pub struct AdminServer {
     controller: Arc<ReloadController>,
     metrics_renderer: MetricsRenderer,
+    ui_enabled: bool,
+    trace_store: Option<Arc<TraceRingBuffer>>,
+    status_providers: BTreeMap<String, StatusProvider>,
+}
+
+struct AdminState {
+    controller: Arc<ReloadController>,
+    metrics_renderer: MetricsRenderer,
+    ui_enabled: bool,
+    trace_store: Option<Arc<TraceRingBuffer>>,
+    status_providers: BTreeMap<String, StatusProvider>,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl AdminServer {
@@ -38,7 +75,33 @@ impl AdminServer {
         Self {
             controller,
             metrics_renderer,
+            ui_enabled: false,
+            trace_store: None,
+            status_providers: BTreeMap::new(),
         }
+    }
+
+    /// Enables or disables serving the embedded read-only Admin Inspector Web UI on `/` and `/ui`.
+    pub fn with_ui_enabled(mut self, enabled: bool) -> Self {
+        self.ui_enabled = enabled;
+        self
+    }
+
+    /// Attaches a bounded in-memory [`TraceRingBuffer`] backing `GET /api/traces` and
+    /// `GET /api/traces/stream`.
+    pub fn with_trace_store(mut self, store: Arc<TraceRingBuffer>) -> Self {
+        self.trace_store = Some(store);
+        self
+    }
+
+    /// Registers a named read-only JSON status provider exposed under `GET /api/status`.
+    pub fn with_status_provider(
+        mut self,
+        name: impl Into<String>,
+        provider: StatusProvider,
+    ) -> Self {
+        self.status_providers.insert(name.into(), provider);
+        self
     }
 
     pub async fn bind(self, addr: SocketAddr) -> Result<AdminHandle, ConfigError> {
@@ -50,10 +113,16 @@ impl AdminServer {
             .map_err(|e| ConfigError::Admin(e.to_string()))?;
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let controller = self.controller;
-        let metrics = self.metrics_renderer;
+        let state = Arc::new(AdminState {
+            controller: self.controller,
+            metrics_renderer: self.metrics_renderer,
+            ui_enabled: self.ui_enabled && ui_feature_compiled(),
+            trace_store: self.trace_store,
+            status_providers: self.status_providers,
+            shutdown_rx: shutdown_rx.clone(),
+        });
 
-        info!(%local_addr, "shunt admin listener started");
+        info!(%local_addr, ui = state.ui_enabled, "shunt admin listener started");
 
         let task = tokio::spawn(async move {
             loop {
@@ -72,14 +141,12 @@ impl AdminServer {
                                 continue;
                             }
                         };
-                        let ctrl = Arc::clone(&controller);
-                        let met = Arc::clone(&metrics);
+                        let st = Arc::clone(&state);
                         tokio::spawn(async move {
                             let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
-                                let ctrl = Arc::clone(&ctrl);
-                                let met = Arc::clone(&met);
+                                let st = Arc::clone(&st);
                                 async move {
-                                    Ok::<_, Infallible>(handle_admin_request(req, &ctrl, &met))
+                                    Ok::<_, Infallible>(handle_admin_request(req, &st))
                                 }
                             });
                             if let Err(e) = http1::Builder::new()
@@ -169,14 +236,37 @@ struct ReloadErrBody {
     error: String,
 }
 
+#[derive(Serialize)]
+struct TracesResponseBody {
+    summary: TraceRingSummary,
+    traces: Vec<InspectorTrace>,
+}
+
+#[derive(Serialize)]
+struct StatusResponseBody<'a> {
+    version: u64,
+    digest: &'a str,
+    state_backend: &'a str,
+    telemetry_backend: &'a str,
+    ui_enabled: bool,
+    ui_compiled: bool,
+    trace_capture_enabled: bool,
+    extensions: BTreeMap<String, serde_json::Value>,
+}
+
 fn handle_admin_request(
     req: Request<hyper::body::Incoming>,
-    controller: &ReloadController,
-    metrics_renderer: &MetricsRenderer,
-) -> Response<Full<Bytes>> {
+    state: &AdminState,
+) -> Response<ShuntBody> {
     match (req.method(), req.uri().path()) {
+        (&Method::GET, "/" | "/ui") => {
+            if !state.ui_enabled {
+                return text_response(StatusCode::NOT_FOUND, "not found");
+            }
+            serve_inspector_ui()
+        }
         (&Method::GET, "/health") => {
-            let snap = controller.current_inspect();
+            let snap = state.controller.current_inspect();
             let body = HealthBody {
                 status: "ok",
                 version: snap.version,
@@ -187,11 +277,11 @@ fn handle_admin_request(
             json_response(StatusCode::OK, &body)
         }
         (&Method::GET, "/snapshot") => {
-            let snap = controller.current_inspect();
+            let snap = state.controller.current_inspect();
             json_response(StatusCode::OK, &*snap)
         }
         (&Method::GET, "/upstreams") => {
-            let snapshot = controller.current_snapshot();
+            let snapshot = state.controller.current_snapshot();
             let reports = snapshot.upstream_health_reports();
             let body = UpstreamsResponseBody {
                 version: snapshot.version,
@@ -222,17 +312,60 @@ fn handle_admin_request(
             json_response(StatusCode::OK, &body)
         }
         (&Method::GET, "/metrics") => {
-            let rendered = metrics_renderer();
+            let rendered = (state.metrics_renderer)();
             Response::builder()
                 .status(StatusCode::OK)
                 .header(
                     header::CONTENT_TYPE,
                     "text/plain; version=0.0.4; charset=utf-8",
                 )
-                .body(Full::new(Bytes::from(rendered)))
+                .header(header::CACHE_CONTROL, "no-store")
+                .body(ShuntBody::full(Bytes::from(rendered)))
                 .unwrap()
         }
-        (&Method::POST, "/reload") => match controller.reload() {
+        (&Method::GET, "/api/status") => {
+            let snap = state.controller.current_inspect();
+            let mut extensions = BTreeMap::new();
+            for (name, provider) in &state.status_providers {
+                extensions.insert(name.clone(), provider());
+            }
+            let body = StatusResponseBody {
+                version: snap.version,
+                digest: &snap.digest,
+                state_backend: &snap.state_backend,
+                telemetry_backend: &snap.telemetry_backend,
+                ui_enabled: state.ui_enabled,
+                ui_compiled: ui_feature_compiled(),
+                trace_capture_enabled: state.trace_store.is_some(),
+                extensions,
+            };
+            json_response(StatusCode::OK, &body)
+        }
+        (&Method::GET, "/api/traces") => {
+            let Some(store) = &state.trace_store else {
+                return text_response(StatusCode::NOT_FOUND, "trace inspector disabled");
+            };
+            let after_seq = parse_query_u64(req.uri().query(), "after");
+            let limit = parse_query_u64(req.uri().query(), "limit").map(|v| v as usize);
+            let body = TracesResponseBody {
+                summary: store.summary(),
+                traces: store.recent(after_seq, limit),
+            };
+            json_response(StatusCode::OK, &body)
+        }
+        (&Method::GET, "/api/traces/stream") => {
+            let Some(store) = &state.trace_store else {
+                return text_response(StatusCode::NOT_FOUND, "trace inspector disabled");
+            };
+            let after_seq = req
+                .headers()
+                .get("last-event-id")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .or_else(|| parse_query_u64(req.uri().query(), "after"));
+            serve_trace_sse(Arc::clone(store), after_seq, state.shutdown_rx.clone())
+        }
+        (&Method::POST, "/reload") => match state.controller.reload() {
             Ok(snapshot) => json_response(
                 StatusCode::OK,
                 &ReloadOkBody {
@@ -248,26 +381,160 @@ fn handle_admin_request(
                 },
             ),
         },
-        (_, "/health" | "/snapshot" | "/upstreams" | "/metrics" | "/reload") => {
+        (_, "/health" | "/snapshot" | "/upstreams" | "/metrics" | "/reload" | "/api/status") => {
+            text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+        }
+        (_, "/" | "/ui") if state.ui_enabled => {
+            text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+        }
+        (_, "/api/traces" | "/api/traces/stream") if state.trace_store.is_some() => {
             text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
         }
         _ => text_response(StatusCode::NOT_FOUND, "not found"),
     }
 }
 
-fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> Response<Full<Bytes>> {
+fn serve_inspector_ui() -> Response<ShuntBody> {
+    #[cfg(feature = "admin-ui")]
+    {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .header(header::CACHE_CONTROL, "no-store")
+            .header("x-content-type-options", "nosniff")
+            .header("x-frame-options", "DENY")
+            .header("referrer-policy", "no-referrer")
+            .header(
+                "content-security-policy",
+                "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'",
+            )
+            .body(ShuntBody::full(Bytes::from_static(
+                crate::ui::INSPECTOR_HTML.as_bytes(),
+            )))
+            .unwrap()
+    }
+    #[cfg(not(feature = "admin-ui"))]
+    {
+        text_response(StatusCode::NOT_FOUND, "not found")
+    }
+}
+
+fn serve_trace_sse(
+    store: Arc<TraceRingBuffer>,
+    after_seq: Option<u64>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> Response<ShuntBody> {
+    // Subscribe BEFORE reading the ring-buffer snapshot so no events between replay and live
+    // subscription can ever be lost; duplicate seqs are filtered cleanly via `last_sent_seq`.
+    let mut rx = store.subscribe();
+    let replay = store.recent(after_seq, None);
+    let (tx, body_rx) = mpsc::channel::<Result<Frame<Bytes>, CoreError>>(64);
+
+    tokio::spawn(async move {
+        let mut last_sent_seq = after_seq.unwrap_or(0);
+
+        if tx
+            .send(Ok(Frame::data(Bytes::from_static(b": connected\n\n"))))
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        for trace in replay {
+            if trace.seq <= last_sent_seq {
+                continue;
+            }
+            last_sent_seq = trace.seq;
+            if tx
+                .send(Ok(Frame::data(format_sse_trace_event(&trace))))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+
+        let mut keepalive = tokio::time::interval(Duration::from_secs(15));
+        keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        keepalive.tick().await;
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = tx.closed() => {
+                    break;
+                }
+                recv = rx.recv() => {
+                    match recv {
+                        Ok(trace) => {
+                            if trace.seq <= last_sent_seq {
+                                continue;
+                            }
+                            last_sent_seq = trace.seq;
+                            if tx.send(Ok(Frame::data(format_sse_trace_event(&trace)))).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            if tx.send(Ok(Frame::data(format_sse_lagged_event(skipped)))).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            break;
+                        }
+                    }
+                }
+                _ = keepalive.tick() => {
+                    if tx.send(Ok(Frame::data(Bytes::from_static(b": keep-alive\n\n")))).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-cache, no-store")
+        .header("x-accel-buffering", "no")
+        .body(ShuntBody::channel(body_rx))
+        .unwrap()
+}
+
+fn parse_query_u64(query: Option<&str>, key: &str) -> Option<u64> {
+    let q = query?;
+    for pair in q.split('&') {
+        if let Some((k, v)) = pair.split_once('=')
+            && k == key
+        {
+            return v.parse::<u64>().ok();
+        }
+    }
+    None
+}
+
+fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> Response<ShuntBody> {
     let body = serde_json::to_vec_pretty(payload).unwrap_or_else(|_| b"{}".to_vec());
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Full::new(Bytes::from(body)))
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(ShuntBody::full(Bytes::from(body)))
         .unwrap()
 }
 
-fn text_response(status: StatusCode, body: &'static str) -> Response<Full<Bytes>> {
+fn text_response(status: StatusCode, body: &'static str) -> Response<ShuntBody> {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .body(Full::new(Bytes::from_static(body.as_bytes())))
+        .body(ShuntBody::full(Bytes::from_static(body.as_bytes())))
         .unwrap()
 }

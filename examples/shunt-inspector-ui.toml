@@ -1,0 +1,52 @@
+# Shunt Admin Read-Only Inspector UI Example (RFC 0012)
+#
+# Run with:
+#   shunt dev --ui -c examples/shunt-inspector-ui.toml
+# or:
+#   shunt run -c examples/shunt-inspector-ui.toml
+#
+# Then open http://127.0.0.1:9090/ui in your browser to inspect:
+#   - Live per-hook µs trace waterfalls (SSE)
+#   - Compiled routes, plugins, and HookMask graph
+#   - Upstream endpoint weights and active/passive health
+#   - AI token usage, spend, provider cooldowns, and cache stats
+
+[server]
+listen = "127.0.0.1:8080"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:9090"
+ui = true
+ui_trace_capacity = 256
+
+[[plugins]]
+name = "request-id"
+
+[[plugins]]
+name = "metrics"
+
+[[upstreams]]
+name = "api_pool"
+endpoints = [
+  { url = "http://127.0.0.1:9001", weight = 80 },
+  { url = "http://127.0.0.1:9002", weight = 20 },
+]
+
+[upstreams.health_check]
+kind = "http"
+path = "/health"
+interval_ms = 5000
+timeout_ms = 1000
+
+[[routes]]
+id = "api_v1"
+path_prefix = "/api"
+upstream = "api_pool"
+max_attempts = 2
+
+[[routes.plugins]]
+name = "rate-limit"
+[routes.plugins.config]
+requests_per_second = 50
+burst = 100

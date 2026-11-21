@@ -5,10 +5,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use shunt_ai::{AiMetrics, register_ai_plugins};
+use shunt_ai::{AiMetrics, inspect_ai_runtime, register_ai_plugins};
 use shunt_config::{
-    AdminServer, ConfigProvider, FileConfigProvider, ReloadController, Severity, SnapshotCompiler,
-    SnapshotInspect, load_policy_file, start_file_watcher, verify_bundle,
+    AdminServer, ConfigProvider, FileConfigProvider, InspectorCapturePlugin, ReloadController,
+    Severity, SnapshotCompiler, SnapshotInspect, TraceRingBuffer, load_policy_file,
+    start_file_watcher, ui_feature_compiled, verify_bundle,
 };
 use shunt_core::{DynamicCertResolver, GatewayServer, RuntimeRegistry, TlsListenerConfig};
 use shunt_plugin_sdk::PluginRegistry;
@@ -79,12 +80,18 @@ enum Commands {
         /// Disable automatic file watching (reloads still work via POST /reload or SIGHUP).
         #[arg(long = "no-watch")]
         no_watch: bool,
+        /// Enable the read-only Admin Inspector Web UI and live trace waterfall on the Admin listener.
+        #[arg(long = "ui")]
+        ui: bool,
     },
     /// Run in developer mode with auto file-watch reload and live per-hook µs trace waterfalls.
     Dev {
         /// Path to shunt.toml (or .yaml/.yml).
         #[arg(short = 'c', long = "config", default_value = "shunt.toml")]
         config: PathBuf,
+        /// Enable the read-only Admin Inspector Web UI and live trace waterfall on the Admin listener.
+        #[arg(long = "ui")]
+        ui: bool,
     },
 }
 
@@ -106,13 +113,17 @@ async fn main() -> ExitCode {
             filter,
             format,
         } => run_test(config, spec, filter, format).await,
-        Commands::Run { config, no_watch } => {
+        Commands::Run {
+            config,
+            no_watch,
+            ui,
+        } => {
             init_tracing("info");
-            run_server(config, false, !no_watch).await
+            run_server(config, false, !no_watch, ui).await
         }
-        Commands::Dev { config } => {
+        Commands::Dev { config, ui } => {
             init_tracing("warn,shunt_cli=info,shunt_config=info");
-            run_server(config, true, true).await
+            run_server(config, true, true, ui).await
         }
     }
 }
@@ -301,7 +312,12 @@ async fn run_test(
     }
 }
 
-async fn run_server(config_path: PathBuf, dev_mode: bool, watch_files: bool) -> ExitCode {
+async fn run_server(
+    config_path: PathBuf,
+    dev_mode: bool,
+    watch_files: bool,
+    cli_ui: bool,
+) -> ExitCode {
     let provider = Arc::new(FileConfigProvider::new(&config_path));
     let loaded = match provider.load() {
         Ok(l) => l,
@@ -311,11 +327,33 @@ async fn run_server(config_path: PathBuf, dev_mode: bool, watch_files: bool) -> 
         }
     };
 
+    let ui_enabled = cli_ui || loaded.config.admin.ui;
+    if ui_enabled && !loaded.config.admin.enabled {
+        eprintln!(
+            "error: Admin Inspector UI (`--ui` / `admin.ui = true`) requires `[admin] enabled = true`"
+        );
+        return ExitCode::FAILURE;
+    }
+    if ui_enabled && !ui_feature_compiled() {
+        eprintln!(
+            "error: Admin Inspector UI requested, but this `shunt` binary was compiled without the `admin-ui` Cargo feature"
+        );
+        return ExitCode::FAILURE;
+    }
+
     let (plugins, runtime, metrics, ai_metrics) = build_registries();
     let mut compiler = SnapshotCompiler::new(plugins, Arc::clone(&runtime));
     if dev_mode {
         compiler = compiler.with_extra_global_plugin(Arc::new(DevWaterfallPlugin::stderr()));
     }
+    let trace_store = if ui_enabled {
+        let store = Arc::new(TraceRingBuffer::new(loaded.config.admin.ui_trace_capacity));
+        compiler = compiler
+            .with_extra_global_plugin(Arc::new(InspectorCapturePlugin::new(Arc::clone(&store))));
+        Some(store)
+    } else {
+        None
+    };
     let compiler = Arc::new(compiler);
 
     let bundle = match compiler.compile(&loaded) {
@@ -336,7 +374,7 @@ async fn run_server(config_path: PathBuf, dev_mode: bool, watch_files: bool) -> 
 
     let mut gw = GatewayServer::new(bundle.snapshot)
         .with_drain_timeout(Duration::from_millis(bundle.config.server.drain_timeout_ms))
-        .with_trace_enabled(dev_mode);
+        .with_trace_enabled(dev_mode || ui_enabled);
 
     if let Some(certs) = bundle.cert_store {
         let resolver = Arc::new(DynamicCertResolver::new(certs));
@@ -371,7 +409,9 @@ async fn run_server(config_path: PathBuf, dev_mode: bool, watch_files: bool) -> 
         let ai_metrics_clone = Arc::clone(&ai_metrics);
         let controller_metrics = Arc::clone(&controller);
         let runtime_metrics = Arc::clone(&runtime);
-        let admin = AdminServer::new(
+        let ai_metrics_status = Arc::clone(&ai_metrics);
+        let runtime_status = Arc::clone(&runtime);
+        let mut admin = AdminServer::new(
             Arc::clone(&controller),
             Arc::new(move || {
                 let mut out = metrics_clone.render_prometheus();
@@ -400,7 +440,21 @@ async fn run_server(config_path: PathBuf, dev_mode: bool, watch_files: bool) -> 
                 }
                 out
             }),
+        )
+        .with_ui_enabled(ui_enabled)
+        .with_status_provider(
+            "ai",
+            Arc::new(move || {
+                inspect_ai_runtime(
+                    &ai_metrics_status,
+                    runtime_status.state_store(),
+                    runtime_status.clock().as_ref(),
+                )
+            }),
         );
+        if let Some(store) = trace_store {
+            admin = admin.with_trace_store(store);
+        }
         match admin.bind(admin_addr).await {
             Ok(h) => Some(h),
             Err(err) => {
@@ -436,6 +490,12 @@ async fn run_server(config_path: PathBuf, dev_mode: bool, watch_files: bool) -> 
                 .map(|a| a.local_addr().to_string())
                 .unwrap_or_else(|| "disabled".to_owned())
         );
+        if ui_enabled && let Some(admin) = &admin_handle {
+            eprintln!(
+                "Admin Inspector UI (read-only): http://{}/ui",
+                admin.local_addr()
+            );
+        }
         print_snapshot_table(&bundle.inspect);
         eprintln!("Watching {} for live reloads...\n", config_path.display());
     } else {
@@ -445,6 +505,14 @@ async fn run_server(config_path: PathBuf, dev_mode: bool, watch_files: bool) -> 
                 .as_ref()
                 .map(|a| a.local_addr().to_string())
                 .unwrap_or_else(|| "disabled".to_owned()),
+            inspector_ui = %if ui_enabled {
+                admin_handle
+                    .as_ref()
+                    .map(|a| format!("http://{}/ui", a.local_addr()))
+                    .unwrap_or_else(|| "disabled".to_owned())
+            } else {
+                "disabled".to_owned()
+            },
             version = bundle.inspect.version,
             digest = %bundle.inspect.digest,
             "shunt gateway ready"

@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "CLI binary for Shunt: `shunt check`, `shunt verify`, `shunt test`, `shunt run`, and `shunt dev`"
 
+[features]
+default = ["admin-ui"]
+admin-ui = ["shunt-config/admin-ui"]
+
 [[bin]]
 name = "shunt"
 path = "src/main.rs"

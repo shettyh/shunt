@@ -1083,6 +1083,7 @@ dependencies = [
  "arc-swap",
  "bytes",
  "http",
+ "http-body",
  "http-body-util",
  "hyper",
  "hyper-util",

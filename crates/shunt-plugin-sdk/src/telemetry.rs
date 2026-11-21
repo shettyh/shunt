@@ -175,6 +175,20 @@ pub enum SpanValue {
     Bool(bool),
 }
 
+impl SpanValue {
+    /// Converts this typed attribute value into a JSON representation for read-only inspection APIs.
+    pub fn to_json_value(&self) -> serde_json::Value {
+        match self {
+            SpanValue::String(s) => serde_json::Value::String(s.clone()),
+            SpanValue::Int(i) => serde_json::Value::Number((*i).into()),
+            SpanValue::Float(f) => serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            SpanValue::Bool(b) => serde_json::Value::Bool(*b),
+        }
+    }
+}
+
 /// OpenTelemetry span kind numeric code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
@@ -444,6 +458,57 @@ impl SpanHandle {
     }
 }
 
+/// Interior-mutable per-request key/value annotation bag attached to `RequestCtx::extensions`
+/// by opt-in inspection plugins (e.g., the Admin Inspector UI).
+///
+/// Mirrors [`SpanHandle`]'s interior-mutability pattern so any plugin can attach structured
+/// metadata during immutable `&RequestCtx` `on_complete` hooks without depending on OTLP,
+/// `shunt-core`, or any specific plugin domain.
+#[derive(Debug, Clone, Default)]
+pub struct TraceAnnotations {
+    inner: Arc<Mutex<BTreeMap<String, SpanValue>>>,
+}
+
+impl TraceAnnotations {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_str(&self, key: impl Into<String>, value: impl Into<String>) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.insert(key.into(), SpanValue::String(value.into()));
+        }
+    }
+
+    pub fn set_int(&self, key: impl Into<String>, value: i64) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.insert(key.into(), SpanValue::Int(value));
+        }
+    }
+
+    pub fn set_float(&self, key: impl Into<String>, value: f64) {
+        if value.is_finite()
+            && let Ok(mut guard) = self.inner.lock()
+        {
+            guard.insert(key.into(), SpanValue::Float(value));
+        }
+    }
+
+    pub fn set_bool(&self, key: impl Into<String>, value: bool) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.insert(key.into(), SpanValue::Bool(value));
+        }
+    }
+
+    /// Returns a cloned snapshot of all recorded annotations.
+    pub fn snapshot(&self) -> BTreeMap<String, SpanValue> {
+        self.inner
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+}
+
 /// Returns the current wall-clock timestamp in nanoseconds since Unix epoch.
 pub fn current_unix_nanos() -> u64 {
     SystemTime::now()
@@ -609,6 +674,53 @@ mod tests {
         assert_eq!(
             spans[0].attributes.get("gen_ai.usage.input_tokens"),
             Some(&SpanValue::Int(42))
+        );
+    }
+
+    #[test]
+    fn request_ctx_annotate_populates_both_span_handle_and_trace_annotations() {
+        let sink = Arc::new(InMemoryTelemetrySink::new(8));
+        let trace = TraceContext::new_root(true);
+        let annotations = TraceAnnotations::new();
+        {
+            let mut ctx = crate::RequestCtx::new(7, "127.0.0.1:4000".parse().unwrap(), None);
+            assert!(!ctx.has_trace_collectors());
+            ctx.insert_ext(SpanHandle::start(
+                &trace,
+                "POST /v1/chat/completions",
+                SpanKind::Server,
+                100,
+                Arc::clone(&sink) as Arc<dyn TelemetrySink>,
+            ));
+            ctx.insert_ext(annotations.clone());
+            assert!(ctx.has_trace_collectors());
+
+            ctx.annotate_str("gen_ai.provider.name", "openai");
+            ctx.annotate_int("gen_ai.usage.input_tokens", 12);
+            ctx.annotate_float("shunt.ai.cost_usd", 0.0025);
+            ctx.annotate_bool("shunt.ai.stream", false);
+        }
+
+        let snap = annotations.snapshot();
+        assert_eq!(
+            snap.get("gen_ai.provider.name"),
+            Some(&SpanValue::String("openai".to_owned()))
+        );
+        assert_eq!(
+            snap.get("gen_ai.usage.input_tokens"),
+            Some(&SpanValue::Int(12))
+        );
+        assert_eq!(snap.get("shunt.ai.stream"), Some(&SpanValue::Bool(false)));
+        assert_eq!(
+            snap.get("shunt.ai.cost_usd").unwrap().to_json_value(),
+            serde_json::json!(0.0025)
+        );
+
+        let spans = sink.spans();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            spans[0].attributes.get("gen_ai.provider.name"),
+            Some(&SpanValue::String("openai".to_owned()))
         );
     }
 }

@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use proptest::prelude::*;
 use serde_json::{Map, Value};
 use shunt_config::{
-    ConfigProvider, InlineConfigProvider, SnapshotCompiler, redact_secrets, route_subsumes,
+    ConfigProvider, InlineConfigProvider, InspectorTrace, SnapshotCompiler, TraceRingBuffer,
+    redact_secrets, route_subsumes,
 };
 use shunt_core::{PathMatch, RouteMatch, RuntimeRegistry, UpstreamConfig, UpstreamPoolKey};
 use shunt_plugin_sdk::{
@@ -418,6 +419,73 @@ proptest! {
                     "soundness violation: r1={r1:?} claimed to subsume r2={r2:?}, but r2 matched {req_host}{req_path} while r1 did not"
                 );
             }
+        }
+    }
+
+    /// Invariants of the Admin Inspector `TraceRingBuffer`:
+    /// 1. Buffered count never exceeds `capacity`.
+    /// 2. Sequence numbers are strictly increasing (`1..=N`).
+    /// 3. `recent(Some(after), None)` contains only traces with `seq > after`.
+    /// 4. Percentiles are monotonic (`p50 <= p95 <= p99`).
+    /// 5. Status counters sum to `total_recorded`.
+    #[test]
+    fn trace_ring_buffer_preserves_capacity_monotonic_seq_and_percentile_order(
+        capacity in 1usize..32,
+        events in prop::collection::vec((prop_oneof![Just(Some(200u16)), Just(Some(302u16)), Just(Some(429u16)), Just(Some(502u16)), Just(None)], 0u64..500_000), 1..80),
+        after_offset in 0u64..80,
+    ) {
+        let ring = TraceRingBuffer::new(capacity);
+        let mut last_seq = 0u64;
+        for (idx, (status, total_us)) in events.iter().enumerate() {
+            let pushed = ring.push(InspectorTrace {
+                seq: 0,
+                request_id: idx as u64 + 1,
+                timestamp_unix_ms: 1_700_000_000_000,
+                method: "GET".into(),
+                path: "/p".into(),
+                host: None,
+                route_id: Some("r".into()),
+                upstream: Some("u".into()),
+                endpoint: None,
+                status: *status,
+                attempts: 1,
+                request_bytes: 0,
+                response_bytes: 0,
+                ttfb_us: Some(total_us / 2),
+                total_us: *total_us,
+                aborted_mid_stream: false,
+                error: None,
+                trace_id: None,
+                hooks: Vec::new(),
+                stream_chunks: Vec::new(),
+                attributes: BTreeMap::new(),
+            });
+            prop_assert_eq!(pushed.seq, last_seq + 1);
+            last_seq = pushed.seq;
+        }
+
+        let all = ring.recent(None, None);
+        prop_assert!(all.len() <= capacity);
+        prop_assert_eq!(all.len(), events.len().min(capacity));
+        for w in all.windows(2) {
+            prop_assert!(w[0].seq < w[1].seq);
+        }
+
+        let after_slice = ring.recent(Some(after_offset), None);
+        for t in &after_slice {
+            prop_assert!(t.seq > after_offset);
+        }
+
+        let summary = ring.summary();
+        prop_assert_eq!(summary.buffered, all.len());
+        prop_assert_eq!(summary.total_recorded, events.len() as u64);
+        prop_assert_eq!(
+            summary.status_2xx + summary.status_3xx + summary.status_4xx + summary.status_5xx,
+            summary.total_recorded
+        );
+        if let (Some(p50), Some(p95), Some(p99)) = (summary.p50_us, summary.p95_us, summary.p99_us) {
+            prop_assert!(p50 <= p95);
+            prop_assert!(p95 <= p99);
         }
     }
 }

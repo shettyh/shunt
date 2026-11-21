@@ -8,8 +8,8 @@ use sha2::{Digest, Sha256};
 use shunt_plugin_sdk::{
     BufferedResponse, BuildContext, Bytes, Clock, DistributedStore, FailurePolicy, Flow,
     HeaderName, HeaderValue, HookMask, HookResult, HttpPlugin, PluginBuildError, PluginConfig,
-    PluginFactory, RequestCtx, RequestHead, RequestSummary, ResponseHead, SpanHandle, StatusCode,
-    StreamFlow, encode_hex_lower, header,
+    PluginFactory, RequestCtx, RequestHead, RequestSummary, ResponseHead, StatusCode, StreamFlow,
+    encode_hex_lower, header,
 };
 use tracing::warn;
 
@@ -311,6 +311,12 @@ impl AiCacheTable {
             .lock()
             .expect("AiCacheTable lock poisoned")
             .total_bytes
+    }
+
+    /// Returns `(entries, total_bytes)` consistently under a single lock for Admin inspection.
+    pub fn snapshot_stats(&self) -> (usize, usize) {
+        let guard = self.inner.lock().expect("AiCacheTable lock poisoned");
+        (guard.map.len(), guard.total_bytes)
     }
 
     fn evict_to_fit(
@@ -821,10 +827,8 @@ impl HttpPlugin for AiCachePlugin {
         ctx: &'a RequestCtx,
         summary: &'a RequestSummary,
     ) -> HookResult<'a, ()> {
-        if let Some(span) = ctx.get_ext::<SpanHandle>()
-            && let Some(status) = ctx.get_ext::<AiCacheStatus>()
-        {
-            span.set_str("shunt.ai.cache_status", status.as_str());
+        if let Some(status) = ctx.get_ext::<AiCacheStatus>() {
+            ctx.annotate_str("shunt.ai.cache_status", status.as_str());
         }
 
         let Some(pending) = ctx.get_ext::<AiCachePending>() else {

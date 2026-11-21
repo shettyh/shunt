@@ -54,6 +54,13 @@ pub struct UpstreamInspect {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct RoutePluginInspect {
+    pub name: String,
+    pub scope_id: String,
+    pub hook_mask: HookMask,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RouteInspect {
     pub id: String,
     pub hosts: Vec<String>,
@@ -64,6 +71,7 @@ pub struct RouteInspect {
     pub max_body_bytes: usize,
     pub hook_mask: HookMask,
     pub plugins: Vec<String>,
+    pub plugin_details: Vec<RoutePluginInspect>,
 }
 
 /// Output of a successful atomic snapshot compilation.
@@ -188,8 +196,11 @@ impl SnapshotCompiler {
             builder = builder.upstream(up_cfg);
         }
 
+        let mut route_plugin_details: Vec<Vec<RoutePluginInspect>> =
+            Vec::with_capacity(loaded.config.routes.len());
         for route_ir in &loaded.config.routes {
             let mut spec = compile_route_ir(route_ir)?;
+            let mut details = Vec::with_capacity(route_ir.plugins.len());
             for (idx, att) in route_ir.plugins.iter().enumerate() {
                 let scope_id = format!(
                     "route:{}:{}",
@@ -200,8 +211,14 @@ impl SnapshotCompiler {
                         .unwrap_or_else(|| format!("{}:{idx}", att.name))
                 );
                 let plugin = self.build_plugin(att, &scope_id, &build_session)?;
+                details.push(RoutePluginInspect {
+                    name: plugin.name().to_owned(),
+                    scope_id,
+                    hook_mask: plugin.hook_mask(),
+                });
                 spec = spec.with_plugin(plugin);
             }
+            route_plugin_details.push(details);
             builder = builder.route(spec);
         }
 
@@ -235,7 +252,8 @@ impl SnapshotCompiler {
         let routes_inspect: Vec<RouteInspect> = snapshot
             .routes
             .iter()
-            .map(|r| {
+            .zip(route_plugin_details)
+            .map(|(r, plugin_details)| {
                 let path = match &r.matcher.path {
                     PathMatch::Any => "*".to_owned(),
                     PathMatch::Exact(p) => format!("={p}"),
@@ -251,6 +269,7 @@ impl SnapshotCompiler {
                     max_body_bytes: r.max_body_bytes,
                     hook_mask: r.hook_mask,
                     plugins: r.plugins.iter().map(|p| p.name().to_owned()).collect(),
+                    plugin_details,
                 }
             })
             .collect();

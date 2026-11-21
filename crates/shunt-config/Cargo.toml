@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "Canonical IR, shunt.toml loader/watcher, SnapshotCompiler, and Admin API for Shunt"
 
+[features]
+default = ["admin-ui"]
+admin-ui = []
+
 [dependencies]
 shunt-plugin-sdk.workspace = true
 shunt-core.workspace = true
@@ -14,6 +18,7 @@ shunt-core.workspace = true
 arc-swap.workspace = true
 bytes.workspace = true
 http.workspace = true
+http-body.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true

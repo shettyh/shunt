@@ -24,6 +24,7 @@ pub mod cache;
 pub mod dialects;
 pub mod failover;
 pub mod ingress;
+pub mod inspector;
 pub mod model_router;
 pub mod pricing;
 pub mod provider_adapter;
@@ -60,7 +61,7 @@ pub use dialects::gemini::{
     gemini_to_openai_embeddings_response, gemini_to_openai_response, map_gemini_finish_reason,
     openai_to_gemini_embeddings_request, openai_to_gemini_request,
 };
-pub use failover::{AiFailoverFactory, AiFailoverPlugin};
+pub use failover::{AiFailoverFactory, AiFailoverPlugin, CooldownSnapshot, FailoverCircuitState};
 pub use ingress::anthropic::{
     OpenAiToAnthropicSseTranslator, anthropic_to_openai_request,
     map_openai_finish_to_anthropic_stop, openai_to_anthropic_response, rewrite_anthropic_request,
@@ -68,6 +69,10 @@ pub use ingress::anthropic::{
 pub use ingress::responses::{
     ChatToResponsesSseTranslator, chat_to_responses_response, responses_to_chat_request,
     rewrite_openai_responses_request,
+};
+pub use inspector::{
+    AiRuntimeInspect, ScopedCacheSnapshot, ScopedCooldownSnapshot, ScopedLatencySnapshot,
+    inspect_ai_runtime,
 };
 pub use model_router::{
     AiModelRouterFactory, AiModelRouterPlugin, ModelEntryConfig, ModelRule, TargetSpec,
@@ -79,9 +84,9 @@ pub use provider_adapter::{
     AiProviderAdapterFactory, AiProviderAdapterPlugin, ProviderAuthConfig, ProviderInstanceConfig,
 };
 pub use routing::{
-    LatencyRoutingConfig, RoutingCursorTable, TargetLatencyStats, TargetLatencyTable,
-    UnknownCostPolicy, detect_required_capabilities, order_cost_targets, order_weighted_targets,
-    pick_weighted_primary,
+    LatencyEntrySnapshot, LatencyRoutingConfig, RoutingCursorTable, TargetLatencyStats,
+    TargetLatencyTable, UnknownCostPolicy, detect_required_capabilities, order_cost_targets,
+    order_weighted_targets, pick_weighted_primary,
 };
 pub use sse::{SseEvent, SseParser};
 pub use token_rate_limit::{
@@ -98,7 +103,8 @@ pub use types::{
     anthropic_error_response, endpoint_error_response, openai_error_response, wildcard_match,
 };
 pub use usage_tracker::{
-    AiMetrics, AiMetricsSnapshot, AiUsageTrackerFactory, AiUsageTrackerPlugin, UsageSink,
+    AiDetailedMetricsSnapshot, AiMetrics, AiMetricsSnapshot, AiModelBreakdown,
+    AiUsageTrackerFactory, AiUsageTrackerPlugin, UsageSink,
 };
 pub use virtual_keys::{AiVirtualKeysFactory, AiVirtualKeysPlugin};
 

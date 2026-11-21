@@ -157,6 +157,9 @@ pub struct RequestSpec {
     #[serde(default = "default_method")]
     pub method: String,
     pub path: String,
+    /// When `true`, send this request to the dedicated Admin listener instead of the data-plane listener.
+    #[serde(default)]
+    pub admin: bool,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
