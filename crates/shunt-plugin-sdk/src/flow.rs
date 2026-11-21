@@ -99,11 +99,7 @@ impl BufferedResponse {
         resp
     }
 
-    pub fn with_header(
-        mut self,
-        name: header::HeaderName,
-        value: HeaderValue,
-    ) -> Self {
+    pub fn with_header(mut self, name: header::HeaderName, value: HeaderValue) -> Self {
         self.headers.insert(name, value);
         self
     }

@@ -179,7 +179,10 @@ pub fn openai_to_anthropic_request(
     out.insert("messages".to_owned(), Value::Array(formatted_messages));
 
     if !system_parts.is_empty() {
-        out.insert("system".to_owned(), Value::String(system_parts.join("\n\n")));
+        out.insert(
+            "system".to_owned(),
+            Value::String(system_parts.join("\n\n")),
+        );
     }
 
     if let Some(stream) = obj.get("stream").and_then(Value::as_bool)
@@ -403,10 +406,7 @@ pub fn anthropic_to_openai_response(
             .map_err(|e| format!("failed to serialize OpenAI error: {e}"));
     }
 
-    let raw_id = val
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("anthropic");
+    let raw_id = val.get("id").and_then(Value::as_str).unwrap_or("anthropic");
     let id = format_chatcmpl_id(raw_id);
     let model = val
         .get("model")
@@ -445,8 +445,8 @@ pub fn anthropic_to_openai_response(
         }
     }
 
-    let finish_reason = map_anthropic_stop_reason(val.get("stop_reason").and_then(Value::as_str))
-        .unwrap_or("stop");
+    let finish_reason =
+        map_anthropic_stop_reason(val.get("stop_reason").and_then(Value::as_str)).unwrap_or("stop");
 
     let mut message = Map::new();
     message.insert("role".to_owned(), Value::String("assistant".to_owned()));
@@ -680,10 +680,7 @@ impl AnthropicSseTranslator {
                     }
                     Some("input_json_delta") => {
                         if let Some(partial) = delta.get("partial_json").and_then(Value::as_str) {
-                            let tool_idx = *self
-                                .block_to_tool_index
-                                .get(&block_idx)
-                                .unwrap_or(&0);
+                            let tool_idx = *self.block_to_tool_index.get(&block_idx).unwrap_or(&0);
                             self.emit_chunk(
                                 out,
                                 json!([{
@@ -879,7 +876,10 @@ mod tests {
         assert_eq!(out["object"], "chat.completion");
         assert_eq!(out["model"], "claude-3-5-sonnet-20241022");
         assert_eq!(out["choices"][0]["message"]["role"], "assistant");
-        assert_eq!(out["choices"][0]["message"]["content"], "Hello from Claude!");
+        assert_eq!(
+            out["choices"][0]["message"]["content"],
+            "Hello from Claude!"
+        );
         assert_eq!(out["choices"][0]["finish_reason"], "stop");
         assert_eq!(out["usage"]["prompt_tokens"], 12);
         assert_eq!(out["usage"]["completion_tokens"], 6);

@@ -10,8 +10,7 @@ pub mod reloader;
 
 pub use admin::{AdminHandle, AdminServer, MetricsRenderer};
 pub use compiler::{
-    CompiledBundle, PluginInspect, RouteInspect, SnapshotCompiler, SnapshotInspect,
-    UpstreamInspect,
+    CompiledBundle, PluginInspect, RouteInspect, SnapshotCompiler, SnapshotInspect, UpstreamInspect,
 };
 pub use error::ConfigError;
 pub use ir::{

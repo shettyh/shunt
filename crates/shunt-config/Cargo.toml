@@ -2,7 +2,9 @@
 name = "shunt-config"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Canonical IR, shunt.toml loader/watcher, SnapshotCompiler, and Admin API for Shunt"
 
 [dependencies]

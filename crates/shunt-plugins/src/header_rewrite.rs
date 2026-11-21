@@ -51,12 +51,11 @@ fn compile_pairs(
 ) -> Result<Vec<(HeaderName, HeaderValue)>, PluginBuildError> {
     let mut out = Vec::with_capacity(map.len());
     for (k, v) in map {
-        let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
-            PluginBuildError::BuildFailed {
+        let name =
+            HeaderName::from_bytes(k.as_bytes()).map_err(|e| PluginBuildError::BuildFailed {
                 plugin: plugin.to_owned(),
                 message: format!("invalid header name `{k}`: {e}"),
-            }
-        })?;
+            })?;
         let val = HeaderValue::from_str(&v).map_err(|e| PluginBuildError::BuildFailed {
             plugin: plugin.to_owned(),
             message: format!("invalid header value for `{k}`: {e}"),

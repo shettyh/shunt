@@ -56,8 +56,7 @@ impl PathMatch {
                 if path == trimmed {
                     return true;
                 }
-                path.starts_with(trimmed)
-                    && path.as_bytes().get(trimmed.len()) == Some(&b'/')
+                path.starts_with(trimmed) && path.as_bytes().get(trimmed.len()) == Some(&b'/')
             }
         }
     }
@@ -117,7 +116,11 @@ impl RouteMatch {
             let Some(host) = req_host else {
                 return false;
             };
-            if !self.hosts.iter().any(|pattern| host_matches(pattern, &host)) {
+            if !self
+                .hosts
+                .iter()
+                .any(|pattern| host_matches(pattern, &host))
+            {
                 return false;
             }
         }

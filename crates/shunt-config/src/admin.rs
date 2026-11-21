@@ -42,9 +42,9 @@ impl AdminServer {
     }
 
     pub async fn bind(self, addr: SocketAddr) -> Result<AdminHandle, ConfigError> {
-        let listener = TcpListener::bind(addr)
-            .await
-            .map_err(|e| ConfigError::Admin(format!("failed to bind admin listener {addr}: {e}")))?;
+        let listener = TcpListener::bind(addr).await.map_err(|e| {
+            ConfigError::Admin(format!("failed to bind admin listener {addr}: {e}"))
+        })?;
         let local_addr = listener
             .local_addr()
             .map_err(|e| ConfigError::Admin(e.to_string()))?;

@@ -47,10 +47,7 @@ async fn spawn_ok_upstream() -> SocketAddr {
 async fn rapid_corrupt_and_valid_reloads_preserve_lkg_and_rate_limit_state() {
     let upstream = spawn_ok_upstream().await;
 
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "shunt-hardening-{}",
-        std::process::id()
-    ));
+    let tmp_dir = std::env::temp_dir().join(format!("shunt-hardening-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp_dir);
     let cfg_path = tmp_dir.join("shunt.toml");
 

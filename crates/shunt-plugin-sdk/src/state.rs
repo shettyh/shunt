@@ -43,10 +43,15 @@ impl PluginConfig {
         &self.value
     }
 
-    pub fn deserialize<T: DeserializeOwned>(&self, plugin_name: &str) -> Result<T, PluginBuildError> {
-        serde_json::from_value(self.value.clone()).map_err(|source| PluginBuildError::InvalidConfig {
-            plugin: plugin_name.to_owned(),
-            source,
+    pub fn deserialize<T: DeserializeOwned>(
+        &self,
+        plugin_name: &str,
+    ) -> Result<T, PluginBuildError> {
+        serde_json::from_value(self.value.clone()).map_err(|source| {
+            PluginBuildError::InvalidConfig {
+                plugin: plugin_name.to_owned(),
+                source,
+            }
         })
     }
 }
@@ -219,8 +224,7 @@ impl PluginRegistry {
     }
 
     pub fn register_arc(&mut self, factory: Arc<dyn PluginFactory>) -> &mut Self {
-        self.factories
-            .insert(factory.name().to_owned(), factory);
+        self.factories.insert(factory.name().to_owned(), factory);
         self
     }
 
@@ -258,12 +262,20 @@ mod tests {
         let store = Arc::new(StateStore::new());
         let touched = Arc::new(RwLock::new(HashSet::new()));
 
-        let ctx1 = BuildContext::new("route:api:rate-limit", Arc::clone(&store), Arc::clone(&touched));
+        let ctx1 = BuildContext::new(
+            "route:api:rate-limit",
+            Arc::clone(&store),
+            Arc::clone(&touched),
+        );
         let h1 = ctx1.state_handle();
         let counter1 = h1.get_or_init("hits", || AtomicU64::new(0));
         counter1.fetch_add(5, Ordering::Relaxed);
 
-        let ctx2 = BuildContext::new("route:old:rate-limit", Arc::clone(&store), Arc::clone(&touched));
+        let ctx2 = BuildContext::new(
+            "route:old:rate-limit",
+            Arc::clone(&store),
+            Arc::clone(&touched),
+        );
         let h2 = ctx2.state_handle();
         let _ = h2.get_or_init("hits", || AtomicU64::new(1));
 

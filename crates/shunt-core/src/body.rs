@@ -143,9 +143,9 @@ where
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e.into()))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => match self.sleep.as_mut().poll(cx) {
-                Poll::Ready(()) => Poll::Ready(Some(Err(CoreError::IdleChunkTimeout(
-                    self.idle_timeout,
-                )))),
+                Poll::Ready(()) => {
+                    Poll::Ready(Some(Err(CoreError::IdleChunkTimeout(self.idle_timeout))))
+                }
                 Poll::Pending => Poll::Pending,
             },
         }

@@ -6,9 +6,8 @@ use std::time::Duration;
 use http::Method;
 use serde::Serialize;
 use shunt_core::{
-    CertStore, GatewaySnapshot, PathMatch, RouteMatch, RouteSpec, RuntimeRegistry,
-    SnapshotBuilder, TimeoutConfig, UpstreamConfig, UpstreamPoolKey, UpstreamTlsConfig,
-    load_certified_key_pem,
+    CertStore, GatewaySnapshot, PathMatch, RouteMatch, RouteSpec, RuntimeRegistry, SnapshotBuilder,
+    TimeoutConfig, UpstreamConfig, UpstreamPoolKey, UpstreamTlsConfig, load_certified_key_pem,
 };
 use shunt_plugin_sdk::{HookMask, HttpPlugin, PluginConfig, PluginRegistry};
 

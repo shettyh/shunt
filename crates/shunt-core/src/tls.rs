@@ -176,7 +176,10 @@ impl Default for UpstreamTlsConfig {
 }
 
 impl UpstreamTlsConfig {
-    pub fn build_client_config(&self, alpn_override: Option<Vec<Vec<u8>>>) -> Result<Arc<ClientConfig>, CoreError> {
+    pub fn build_client_config(
+        &self,
+        alpn_override: Option<Vec<Vec<u8>>>,
+    ) -> Result<Arc<ClientConfig>, CoreError> {
         ensure_crypto_provider();
 
         let mut cfg = if self.insecure_skip_verify {

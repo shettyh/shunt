@@ -50,7 +50,9 @@ async fn spawn_http_and_sse_upstream() -> SocketAddr {
                                     break;
                                 }
                             }
-                            let _ = tx.send(Ok(Frame::data(Bytes::from_static(b"data: [DONE]\n\n")))).await;
+                            let _ = tx
+                                .send(Ok(Frame::data(Bytes::from_static(b"data: [DONE]\n\n"))))
+                                .await;
                         });
                         let resp = Response::builder()
                             .status(StatusCode::OK)
@@ -212,7 +214,8 @@ async fn reload_under_load_zero_dropped_requests_and_pool_gc() {
                     Ok(res) if res.status() == StatusCode::OK => {
                         match res.into_body().collect().await {
                             Ok(collected) => {
-                                let text = String::from_utf8_lossy(&collected.to_bytes()).into_owned();
+                                let text =
+                                    String::from_utf8_lossy(&collected.to_bytes()).into_owned();
                                 if text.contains("chunk-0")
                                     && text.contains("chunk-7")
                                     && text.contains("data: [DONE]")
@@ -251,19 +254,40 @@ async fn reload_under_load_zero_dropped_requests_and_pool_gc() {
     // Final reload without temp upstream -> verify orphaned pool was GC'd cleanly.
     let final_snap = build_snap(27, false);
     reloader.swap_snapshot(final_snap);
-    assert_eq!(registry.pool_count(), 1, "ephemeral upstream pool should be GC'd");
+    assert_eq!(
+        registry.pool_count(),
+        1,
+        "ephemeral upstream pool should be GC'd"
+    );
 
     stop.store(true, Ordering::Release);
     for w in workers {
         w.await.unwrap();
     }
 
-    assert_eq!(http_err.load(Ordering::Relaxed), 0, "zero HTTP errors during reload soak");
-    assert_eq!(sse_err.load(Ordering::Relaxed), 0, "zero SSE errors/truncations during reload soak");
-    assert!(http_ok.load(Ordering::Relaxed) > 50, "expected substantial HTTP traffic");
-    assert!(sse_ok.load(Ordering::Relaxed) >= 6, "expected completed SSE streams across reloads");
+    assert_eq!(
+        http_err.load(Ordering::Relaxed),
+        0,
+        "zero HTTP errors during reload soak"
+    );
+    assert_eq!(
+        sse_err.load(Ordering::Relaxed),
+        0,
+        "zero SSE errors/truncations during reload soak"
+    );
+    assert!(
+        http_ok.load(Ordering::Relaxed) > 50,
+        "expected substantial HTTP traffic"
+    );
+    assert!(
+        sse_ok.load(Ordering::Relaxed) >= 6,
+        "expected completed SSE streams across reloads"
+    );
 
-    assert!(gw.shutdown().await, "graceful shutdown should drain cleanly");
+    assert!(
+        gw.shutdown().await,
+        "graceful shutdown should drain cleanly"
+    );
 }
 
 // =============================================================================
@@ -444,8 +468,15 @@ async fn async_hook_panics_isolated_across_every_stage() {
     });
 
     let snap = SnapshotBuilder::new(1)
-        .upstream(UpstreamConfig::new("up", vec![format!("http://{upstream}")]))
-        .route(RouteSpec::new("healthy", RouteMatch::exact("/healthy"), "up"))
+        .upstream(UpstreamConfig::new(
+            "up",
+            vec![format!("http://{upstream}")],
+        ))
+        .route(RouteSpec::new(
+            "healthy",
+            RouteMatch::exact("/healthy"),
+            "up",
+        ))
         .route(
             RouteSpec::new("p_req_h", RouteMatch::exact("/p_req_h"), "up")
                 .with_plugin(Arc::new(AsyncPanicPlugin {
@@ -520,7 +551,14 @@ async fn async_hook_panics_isolated_across_every_stage() {
     let client = Client::builder(TokioExecutor::new()).build_http::<Full<Bytes>>();
 
     // All 6 pre-flush async panics must return clean 500 without crashing the server.
-    for path in ["/p_req_h", "/p_req_b", "/p_route", "/p_sel", "/p_up_req", "/p_res_h"] {
+    for path in [
+        "/p_req_h",
+        "/p_req_b",
+        "/p_route",
+        "/p_sel",
+        "/p_up_req",
+        "/p_res_h",
+    ] {
         let req = Request::builder()
             .method("POST")
             .uri(format!("http://{addr}{path}"))
@@ -543,7 +581,10 @@ async fn async_hook_panics_isolated_across_every_stage() {
         let res = client.request(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let collect_res = res.into_body().collect().await;
-        assert!(collect_res.is_err(), "expected stream error on async panic at {path}");
+        assert!(
+            collect_res.is_err(),
+            "expected stream error on async panic at {path}"
+        );
     }
 
     // Panic in on_complete still lets response succeed AND still runs the subsequent observer plugin.
@@ -609,7 +650,8 @@ async fn mid_stream_upstream_truncation_detected_in_passthrough_and_hooked_modes
             tokio::spawn(async move {
                 let mut buf = [0u8; 1024];
                 let _ = sock.read(&mut buf).await;
-                let partial = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n";
+                let partial =
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n";
                 let _ = sock.write_all(partial).await;
                 let _ = sock.flush().await;
                 // Abrupt close without terminating chunk!

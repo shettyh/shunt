@@ -325,10 +325,7 @@ impl GatewayConfig {
                 ));
             }
             if route.max_attempts == 0 {
-                errors.push(format!(
-                    "routes.{}: `max_attempts` must be >= 1",
-                    route.id
-                ));
+                errors.push(format!("routes.{}: `max_attempts` must be >= 1", route.id));
             }
             for m in &route.methods {
                 if Method::from_bytes(m.as_bytes()).is_err() {

@@ -113,7 +113,10 @@ pub fn format_waterfall(ctx: &RequestCtx, summary: &RequestSummary) -> String {
         ));
     }
 
-    segments.push(format!("total: {}", format_duration(summary.total_duration)));
+    segments.push(format!(
+        "total: {}",
+        format_duration(summary.total_duration)
+    ));
 
     if let Some(err) = &summary.error {
         segments.push(format!("ERR: {err}"));
@@ -183,9 +186,15 @@ mod tests {
         };
 
         let line = format_waterfall(&ctx, &summary);
-        assert!(line.contains("200 POST /v1/chat/completions"), "got: {line}");
+        assert!(
+            line.contains("200 POST /v1/chat/completions"),
+            "got: {line}"
+        );
         assert!(line.contains("bearer-auth: 4µs"), "got: {line}");
         assert!(line.contains("upstream TTFB: 312.0ms"), "got: {line}");
-        assert!(line.contains("sse-translate: 3µs/chunk (2 chunks)"), "got: {line}");
+        assert!(
+            line.contains("sse-translate: 3µs/chunk (2 chunks)"),
+            "got: {line}"
+        );
     }
 }

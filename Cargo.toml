@@ -13,15 +13,16 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0 OR MIT"
+rust-version = "1.85"
+license = "Apache-2.0"
 repository = "https://github.com/shunt-rs/shunt"
 
 [workspace.dependencies]
-shunt-plugin-sdk = { path = "crates/shunt-plugin-sdk" }
-shunt-core = { path = "crates/shunt-core" }
-shunt-plugins = { path = "crates/shunt-plugins" }
-shunt-ai = { path = "crates/shunt-ai" }
-shunt-config = { path = "crates/shunt-config" }
+shunt-plugin-sdk = { version = "0.1.0", path = "crates/shunt-plugin-sdk" }
+shunt-core = { version = "0.1.0", path = "crates/shunt-core" }
+shunt-plugins = { version = "0.1.0", path = "crates/shunt-plugins" }
+shunt-ai = { version = "0.1.0", path = "crates/shunt-ai" }
+shunt-config = { version = "0.1.0", path = "crates/shunt-config" }
 
 arc-swap = "1"
 bytes = "1"
@@ -48,3 +49,9 @@ tower-service = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 webpki-roots = "0.26"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

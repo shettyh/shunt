@@ -2,7 +2,10 @@
 name = "shunt-bench"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+publish = false
 description = "Reproducible mock upstream and HTTP/SSE load generator for benchmarking Shunt vs. Envoy & Caddy"
 
 [[bin]]

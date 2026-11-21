@@ -57,7 +57,9 @@ impl TokenBucket {
 
     /// Attempts to consume 1 token. Returns `Ok(remaining)` or `Err(retry_after_secs)`.
     fn try_consume(&mut self, rps: f64, burst: f64, now: Instant) -> Result<u32, u64> {
-        let elapsed = now.saturating_duration_since(self.last_refill).as_secs_f64();
+        let elapsed = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
         if elapsed > 0.0 {
             self.tokens = (self.tokens + elapsed * rps).min(burst);
             self.last_refill = now;
@@ -106,12 +108,13 @@ impl PluginFactory for RateLimitFactory {
         }
 
         let header_name = if cfg.key == KeyStrategy::Header {
-            let raw = cfg.header_name.as_deref().ok_or_else(|| {
-                PluginBuildError::BuildFailed {
+            let raw = cfg
+                .header_name
+                .as_deref()
+                .ok_or_else(|| PluginBuildError::BuildFailed {
                     plugin: self.name().to_owned(),
                     message: "`header_name` is required when `key = \"header\"`".to_owned(),
-                }
-            })?;
+                })?;
             Some(HeaderName::from_bytes(raw.as_bytes()).map_err(|e| {
                 PluginBuildError::BuildFailed {
                     plugin: self.name().to_owned(),
@@ -174,7 +177,11 @@ impl HttpPlugin for RateLimitPlugin {
 
         let now = Instant::now();
         let outcome = {
-            let mut map = self.state.buckets.lock().expect("BucketTable lock poisoned");
+            let mut map = self
+                .state
+                .buckets
+                .lock()
+                .expect("BucketTable lock poisoned");
             let bucket = map
                 .entry(bucket_key)
                 .or_insert_with(|| TokenBucket::new(self.burst));

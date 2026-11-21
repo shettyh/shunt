@@ -135,10 +135,11 @@ impl PluginFactory for AiProviderAdapterFactory {
 
         let openai_auth = match &cfg.openai.api_key {
             Some(raw) => {
-                let secret = resolve_env_secret(raw).map_err(|msg| PluginBuildError::BuildFailed {
-                    plugin: self.name().to_owned(),
-                    message: format!("openai.api_key: {msg}"),
-                })?;
+                let secret =
+                    resolve_env_secret(raw).map_err(|msg| PluginBuildError::BuildFailed {
+                        plugin: self.name().to_owned(),
+                        message: format!("openai.api_key: {msg}"),
+                    })?;
                 let val = HeaderValue::from_str(&format!("Bearer {secret}")).map_err(|e| {
                     PluginBuildError::BuildFailed {
                         plugin: self.name().to_owned(),
@@ -164,19 +165,17 @@ impl PluginFactory for AiProviderAdapterFactory {
             "openai.organization",
             cfg.openai.organization.as_deref(),
         )?;
-        let project = parse_optional_header(
-            self.name(),
-            "openai.project",
-            cfg.openai.project.as_deref(),
-        )?;
+        let project =
+            parse_optional_header(self.name(), "openai.project", cfg.openai.project.as_deref())?;
         let openai_extra = compile_extra_headers(self.name(), &cfg.openai.extra_headers)?;
 
         let anthropic_key = match &cfg.anthropic.api_key {
             Some(raw) => {
-                let secret = resolve_env_secret(raw).map_err(|msg| PluginBuildError::BuildFailed {
-                    plugin: self.name().to_owned(),
-                    message: format!("anthropic.api_key: {msg}"),
-                })?;
+                let secret =
+                    resolve_env_secret(raw).map_err(|msg| PluginBuildError::BuildFailed {
+                        plugin: self.name().to_owned(),
+                        message: format!("anthropic.api_key: {msg}"),
+                    })?;
                 let val =
                     HeaderValue::from_str(&secret).map_err(|e| PluginBuildError::BuildFailed {
                         plugin: self.name().to_owned(),
@@ -250,10 +249,11 @@ fn compile_extra_headers(
 ) -> Result<Vec<(HeaderName, HeaderValue)>, PluginBuildError> {
     let mut out = Vec::with_capacity(map.len());
     for (k, v) in map {
-        let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| PluginBuildError::BuildFailed {
-            plugin: plugin.to_owned(),
-            message: format!("invalid header name `{k}`: {e}"),
-        })?;
+        let name =
+            HeaderName::from_bytes(k.as_bytes()).map_err(|e| PluginBuildError::BuildFailed {
+                plugin: plugin.to_owned(),
+                message: format!("invalid header name `{k}`: {e}"),
+            })?;
         let val = HeaderValue::from_str(v).map_err(|e| PluginBuildError::BuildFailed {
             plugin: plugin.to_owned(),
             message: format!("invalid header value for `{k}`: {e}"),
@@ -436,10 +436,8 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                         header::CONTENT_TYPE,
                         HeaderValue::from_static("text/event-stream; charset=utf-8"),
                     );
-                    res.headers.insert(
-                        header::CACHE_CONTROL,
-                        HeaderValue::from_static("no-cache"),
-                    );
+                    res.headers
+                        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
                     ctx.insert_ext(AdapterResponseState::AnthropicSse(Box::new(
                         AnthropicSseTranslator::new(target.model),
                     )));
