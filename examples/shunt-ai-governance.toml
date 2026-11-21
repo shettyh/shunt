@@ -1,0 +1,173 @@
+# Shunt AI Gateway — Governance, Virtual Keys, Quotas & Spend Budgets (RFC 0009)
+#
+# Demonstrates multi-tenant virtual keys, model ACLs, provider overrides,
+# RPM/TPM token-aware rate limiting with post-response reconciliation,
+# model pricing & rolling USD spend budgets, and optional Redis/Valkey
+# distributed state for multi-replica deployments.
+#
+# Run locally:
+#   export OPENAI_API_KEY="sk-..."
+#   export ANTHROPIC_API_KEY="sk-ant-..."
+#   export ALICE_VIRTUAL_KEY="sk-shunt-alice"
+#   export BOB_VIRTUAL_KEY="sk-shunt-bob"
+#   shunt verify -c examples/shunt-ai-governance.toml
+#   shunt dev -c examples/shunt-ai-governance.toml
+
+[server]
+listen = "127.0.0.1:8080"
+drain_timeout_ms = 30000
+
+[admin]
+enabled = true
+listen = "127.0.0.1:9090"
+
+# Default zero-dependency in-process StateStore (zero-alloc sync fast path).
+# Switch to `backend = "redis"` for multi-replica shared rate limits, budgets & cooldowns:
+#
+# [state]
+# backend = "redis"
+# url = "env:SHUNT_REDIS_URL"   # e.g. redis://:secret@127.0.0.1:6379/0 or rediss://...
+# key_prefix = "shunt:"
+# pool_size = 8
+# connect_timeout_ms = 1000
+# command_timeout_ms = 250
+# failure_policy = "fail_open"  # or "fail_closed"
+[state]
+backend = "memory"
+
+[[plugins]]
+name = "request-id"
+
+[[plugins]]
+name = "metrics"
+
+[[upstreams]]
+name = "openai"
+endpoints = ["https://api.openai.com"]
+connect_timeout_ms = 5000
+
+[[upstreams]]
+name = "anthropic"
+endpoints = ["https://api.anthropic.com"]
+connect_timeout_ms = 5000
+
+[[routes]]
+id = "ai_governed_gateway"
+path_prefix = "/v1"
+upstream = "openai"
+max_body_bytes = 2097152
+max_attempts = 2
+response_headers_timeout_ms = 60000
+idle_chunk_timeout_ms = 60000
+
+# 1. Authenticate client virtual keys & attach multi-tenant policy (strips client key before upstream)
+[[routes.plugins]]
+name = "ai-virtual-keys"
+id = "vkeys"
+[routes.plugins.config]
+strip_key_header = true
+accept_bearer = true
+accept_x_api_key = true
+
+[[routes.plugins.config.keys]]
+id = "eng-alice"
+api_key = "env:ALICE_VIRTUAL_KEY"
+team = "engineering"
+allowed_models = ["smart", "fast", "claude-*", "gpt-4o*"]
+rpm = 60
+tpm = 100000
+budget_usd = 25.0
+budget_soft_limit_usd = 20.0
+budget_window = "daily"
+
+[[routes.plugins.config.keys]]
+id = "intern-bob"
+api_key = "env:BOB_VIRTUAL_KEY"
+team = "engineering"
+allowed_models = ["fast"]
+allowed_providers = ["openai"]
+rpm = 10
+tpm = 20000
+budget_usd = 5.0
+budget_window = "daily"
+
+# 2. Route model aliases, enforce virtual-key model ACLs, serve /v1/models & /v1/messages/count_tokens
+[[routes.plugins]]
+name = "ai-model-router"
+id = "router"
+[routes.plugins.config]
+auto_max_attempts = true
+serve_models_endpoint = true
+serve_count_tokens_endpoint = true
+exposed_models = ["gpt-4o", "claude-3-5-sonnet-20241022"]
+
+[routes.plugins.config.models]
+smart = [
+  { provider = "openai", upstream = "openai", model = "gpt-4o" },
+  { provider = "anthropic", upstream = "anthropic", model = "claude-3-5-sonnet-20241022" },
+]
+fast = [
+  { provider = "openai", upstream = "openai", model = "gpt-4o-mini" },
+]
+
+# 3. Enforce per-key / default RPM & TPM with pre-flight estimation + post-response reconciliation
+[[routes.plugins]]
+name = "ai-token-rate-limit"
+id = "token_rl"
+[routes.plugins.config]
+rpm = 30
+tpm = 50000
+window_secs = 60
+key_by = "virtual_key"
+reconcile_usage = true
+
+# 4. Enforce per-key & per-team spend budgets and emit `shunt_ai_cost_usd_total`
+[[routes.plugins]]
+name = "ai-budget"
+id = "budget"
+[routes.plugins.config]
+scope = "virtual_key"
+default_limit_usd = 10.0
+soft_warning_ratio = 0.8
+window = "daily"
+mode = "hard"
+reject_status = 429
+use_builtin_pricing = true
+
+[routes.plugins.config.team_budgets.engineering]
+limit_usd = 200.0
+soft_limit_usd = 160.0
+window = "monthly"
+
+[routes.plugins.config.pricing."gpt-4o"]
+input_per_million_usd = 2.50
+output_per_million_usd = 10.00
+cached_input_per_million_usd = 1.25
+
+# 5. Translate & authenticate upstream provider requests (credentials isolated from client virtual keys)
+[[routes.plugins]]
+name = "ai-provider-adapter"
+id = "adapter"
+[routes.plugins.config.providers.openai]
+dialect = "openai_compatible"
+responses_path = "/v1/responses"
+auth = { type = "bearer", api_key = "env:OPENAI_API_KEY" }
+
+[routes.plugins.config.providers.anthropic]
+dialect = "anthropic"
+auth = { type = "header", header = "x-api-key", api_key = "env:ANTHROPIC_API_KEY" }
+
+# 6. Automatic failover with cooldown circuit breaker
+[[routes.plugins]]
+name = "ai-failover"
+id = "failover"
+[routes.plugins.config]
+retry_statuses = [429, 500, 502, 503, 504, 529]
+cooldown_ms = 30000
+
+# 7. Usage & TTFT accounting (feeds token reconciliation and cost attribution in on_complete)
+[[routes.plugins]]
+name = "ai-usage-tracker"
+id = "usage"
+[routes.plugins.config]
+log_usage = true

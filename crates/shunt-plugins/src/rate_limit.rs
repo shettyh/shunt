@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use shunt_plugin_sdk::{
-    BufferedResponse, BuildContext, Clock, Flow, HeaderName, HeaderValue, HookMask, HookResult,
-    HttpPlugin, PluginBuildError, PluginConfig, PluginFactory, RequestCtx, RequestHead,
-    ResponseHead, StatusCode, header,
+    BufferedResponse, BuildContext, Clock, DistributedStore, FailurePolicy, Flow, HeaderName,
+    HeaderValue, HookMask, HookResult, HttpPlugin, PluginBuildError, PluginConfig, PluginFactory,
+    RequestCtx, RequestHead, ResponseHead, StatusCode, header,
 };
+use tracing::warn;
 
 const DEFAULT_MAX_ENTRIES: usize = 100_000;
 const DEFAULT_IDLE_TTL_MS: u64 = 300_000; // 5 minutes
@@ -39,6 +40,8 @@ struct RateLimitConfig {
     /// Evict idle buckets untouched for longer than this duration in milliseconds (default: 300,000).
     /// Set to `0` to disable time-based idle eviction (hard `max_entries` cap still applies).
     idle_ttl_ms: u64,
+    /// Use the gateway's configured distributed store (e.g., Redis/Valkey) when available (default: true).
+    distributed: bool,
 }
 
 impl Default for RateLimitConfig {
@@ -50,6 +53,7 @@ impl Default for RateLimitConfig {
             header_name: None,
             max_entries: DEFAULT_MAX_ENTRIES,
             idle_ttl_ms: DEFAULT_IDLE_TTL_MS,
+            distributed: true,
         }
     }
 }
@@ -376,7 +380,14 @@ impl PluginFactory for RateLimitFactory {
             .get_or_init("token_buckets", BucketTable::new);
         state.shrink_to(cfg.max_entries);
 
+        let distributed = if cfg.distributed {
+            ctx.distributed_store()
+        } else {
+            None
+        };
+
         Ok(Arc::new(RateLimitPlugin {
+            scope_id: ctx.scope_id().to_owned(),
             rps: cfg.requests_per_second,
             burst: cfg.burst,
             key_strategy: cfg.key,
@@ -385,11 +396,13 @@ impl PluginFactory for RateLimitFactory {
             idle_ttl: Duration::from_millis(cfg.idle_ttl_ms),
             clock: ctx.clock(),
             state,
+            distributed,
         }))
     }
 }
 
 pub struct RateLimitPlugin {
+    scope_id: String,
     rps: f64,
     burst: u32,
     key_strategy: KeyStrategy,
@@ -398,6 +411,28 @@ pub struct RateLimitPlugin {
     idle_ttl: Duration,
     clock: Arc<dyn Clock>,
     state: Arc<BucketTable>,
+    distributed: Option<Arc<dyn DistributedStore>>,
+}
+
+impl RateLimitPlugin {
+    fn rate_limit_response(&self, retry_after: u64) -> BufferedResponse {
+        let mut resp = BufferedResponse::json(
+            StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":"rate_limit_exceeded"}"#,
+        );
+        if let Ok(v) = HeaderValue::from_str(&retry_after.to_string()) {
+            resp.headers.insert(header::RETRY_AFTER, v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&self.burst.to_string()) {
+            resp.headers
+                .insert(HeaderName::from_static("x-ratelimit-limit"), v);
+        }
+        resp.headers.insert(
+            HeaderName::from_static("x-ratelimit-remaining"),
+            HeaderValue::from_static("0"),
+        );
+        resp
+    }
 }
 
 impl HttpPlugin for RateLimitPlugin {
@@ -426,6 +461,43 @@ impl HttpPlugin for RateLimitPlugin {
                 .unwrap_or_else(|| ctx.client_addr.ip().to_string()),
         };
 
+        if let Some(dist) = &self.distributed {
+            let dist = Arc::clone(dist);
+            let dist_key = format!("rl:{}:{bucket_key}", self.scope_id);
+            let limit = u64::from(self.burst);
+            let window_secs = (f64::from(self.burst) / self.rps).max(1.0);
+            let window = Duration::from_secs_f64(window_secs);
+            return HookResult::pending(async move {
+                match dist.try_consume_quota(&dist_key, 1, limit, window).await {
+                    Ok(outcome) if outcome.allowed => {
+                        ctx.insert_ext(RateLimitRemaining(
+                            outcome.remaining.min(u64::from(u32::MAX)) as u32,
+                        ));
+                        Flow::Continue
+                    }
+                    Ok(outcome) => {
+                        Flow::Respond(self.rate_limit_response(outcome.retry_after_secs))
+                    }
+                    Err(err) => {
+                        warn!(
+                            plugin = "rate-limit",
+                            backend = dist.backend_name(),
+                            error = %err,
+                            policy = ?dist.failure_policy(),
+                            "distributed rate-limit store error"
+                        );
+                        match dist.failure_policy() {
+                            FailurePolicy::FailOpen => Flow::Continue,
+                            FailurePolicy::FailClosed => Flow::Respond(BufferedResponse::json(
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                r#"{"error":"rate_limit_store_unavailable"}"#,
+                            )),
+                        }
+                    }
+                }
+            });
+        }
+
         let now = self.clock.now();
         let outcome = self.state.check_and_consume(
             bucket_key,
@@ -442,22 +514,7 @@ impl HttpPlugin for RateLimitPlugin {
                 HookResult::Ready(Flow::Continue)
             }
             Err(retry_after) => {
-                let mut resp = BufferedResponse::json(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    r#"{"error":"rate_limit_exceeded"}"#,
-                );
-                if let Ok(v) = HeaderValue::from_str(&retry_after.to_string()) {
-                    resp.headers.insert(header::RETRY_AFTER, v);
-                }
-                if let Ok(v) = HeaderValue::from_str(&self.burst.to_string()) {
-                    resp.headers
-                        .insert(HeaderName::from_static("x-ratelimit-limit"), v);
-                }
-                resp.headers.insert(
-                    HeaderName::from_static("x-ratelimit-remaining"),
-                    HeaderValue::from_static("0"),
-                );
-                HookResult::Ready(Flow::Respond(resp))
+                HookResult::Ready(Flow::Respond(self.rate_limit_response(retry_after)))
             }
         }
     }

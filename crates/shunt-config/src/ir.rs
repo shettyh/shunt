@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use http::Method;
 use serde::{Deserialize, Serialize};
+use shunt_core::RedisStoreConfig;
+use shunt_plugin_sdk::FailurePolicy;
 
 use crate::error::ConfigError;
 use crate::verify::VerifyPolicy;
@@ -15,6 +17,8 @@ pub struct GatewayConfig {
     pub server: ServerConfig,
     pub admin: AdminConfig,
     #[serde(default)]
+    pub state: StateConfig,
+    #[serde(default)]
     pub plugins: Vec<PluginAttachment>,
     #[serde(default)]
     pub upstreams: Vec<UpstreamIr>,
@@ -22,6 +26,59 @@ pub struct GatewayConfig {
     pub routes: Vec<RouteIr>,
     #[serde(default)]
     pub verify: VerifyPolicy,
+}
+
+/// Backing store mode for stateful plugins across Shunt replicas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateBackendKind {
+    /// Zero-dependency in-process `StateStore` (sync zero-allocation fast path).
+    #[default]
+    Memory,
+    /// Shared Redis / Valkey distributed backend for multi-replica coordination.
+    Redis,
+}
+
+/// Optional gateway-level `[state]` configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct StateConfig {
+    pub backend: StateBackendKind,
+    /// Redis / Valkey URL (`redis://...`, `rediss://...`, or `env:VAR_NAME`).
+    pub url: Option<String>,
+    /// Optional password override (plain or `env:VAR_NAME`).
+    pub password: Option<String>,
+    /// Optional Redis ACL username override.
+    pub username: Option<String>,
+    /// Prefix prepended to all keys stored in Redis/Valkey (default: `"shunt:"`).
+    pub key_prefix: String,
+    /// Max pooled connections to Redis/Valkey (default: `8`).
+    pub pool_size: usize,
+    /// TCP/TLS connect timeout in ms (default: `1000`).
+    pub connect_timeout_ms: u64,
+    /// Command round-trip timeout in ms (default: `250`).
+    pub command_timeout_ms: u64,
+    /// Behavior when Redis/Valkey is unreachable (`fail_open` default or `fail_closed`).
+    pub failure_policy: FailurePolicy,
+    /// Skip TLS verification for `rediss://` (dev/testing only).
+    pub insecure_skip_verify: bool,
+}
+
+impl Default for StateConfig {
+    fn default() -> Self {
+        Self {
+            backend: StateBackendKind::Memory,
+            url: None,
+            password: None,
+            username: None,
+            key_prefix: "shunt:".to_owned(),
+            pool_size: 8,
+            connect_timeout_ms: 1_000,
+            command_timeout_ms: 250,
+            failure_policy: FailurePolicy::FailOpen,
+            insecure_skip_verify: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -265,6 +322,29 @@ impl GatewayConfig {
                     "server.tls: specify a default `cert`/`key` pair or at least one `sni` entry"
                         .into(),
                 );
+            }
+        }
+
+        if self.state.backend == StateBackendKind::Redis {
+            match self.state.url.as_deref().map(str::trim) {
+                None | Some("") => {
+                    errors.push("state.url: required when `state.backend = \"redis\"`".into());
+                }
+                Some(raw_url) if !raw_url.starts_with("env:") => {
+                    if let Err(err) = RedisStoreConfig::from_url(raw_url) {
+                        errors.push(format!("state.url: {err}"));
+                    }
+                }
+                Some(_) => {}
+            }
+            if self.state.pool_size == 0 {
+                errors.push("state.pool_size: must be >= 1".into());
+            }
+            if self.state.connect_timeout_ms == 0 {
+                errors.push("state.connect_timeout_ms: must be >= 1".into());
+            }
+            if self.state.command_timeout_ms == 0 {
+                errors.push("state.command_timeout_ms: must be >= 1".into());
             }
         }
 

@@ -72,5 +72,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_resp_parser"
+path = "fuzz_targets/fuzz_resp_parser.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

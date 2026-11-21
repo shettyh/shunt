@@ -323,4 +323,36 @@ proptest! {
             }
         }
     }
+
+    #[test]
+    fn resp2_frame_roundtrip_and_prefix_invariance(
+        simple in "[a-zA-Z0-9 _:-]{0,32}",
+        err_msg in "[a-zA-Z0-9 _:-]{0,32}",
+        num in any::<i64>(),
+        bulk in prop::option::of(prop::collection::vec(any::<u8>(), 0..64)),
+    ) {
+        let frame = shunt_core::RespValue::Array(Some(vec![
+            shunt_core::RespValue::SimpleString(simple),
+            shunt_core::RespValue::Error(err_msg),
+            shunt_core::RespValue::Integer(num),
+            shunt_core::RespValue::BulkString(bulk),
+            shunt_core::RespValue::Array(None),
+        ]));
+        let mut wire = Vec::new();
+        shunt_core::encode_resp_value(&frame, &mut wire);
+
+        for cut in 0..wire.len() {
+            prop_assert_eq!(shunt_core::decode_resp_frame(&wire[..cut]), Ok(None));
+        }
+        let decoded = shunt_core::decode_resp_frame(&wire).unwrap().unwrap();
+        prop_assert_eq!(decoded.0, frame);
+        prop_assert_eq!(decoded.1, wire.len());
+    }
+
+    #[test]
+    fn resp2_decoder_never_panics_on_arbitrary_bytes(
+        raw in prop::collection::vec(any::<u8>(), 0..256),
+    ) {
+        let _ = shunt_core::decode_resp_frame(&raw);
+    }
 }

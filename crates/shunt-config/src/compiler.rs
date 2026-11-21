@@ -5,14 +5,16 @@ use std::time::Duration;
 use http::Method;
 use serde::Serialize;
 use shunt_core::{
-    CertStore, GatewaySnapshot, PathMatch, RouteMatch, RouteSpec, RuntimeRegistry, SnapshotBuilder,
-    TimeoutConfig, UpstreamConfig, UpstreamTlsConfig, load_certified_key_pem,
+    CertStore, GatewaySnapshot, PathMatch, RedisStoreConfig, RouteMatch, RouteSpec,
+    RuntimeRegistry, SnapshotBuilder, TimeoutConfig, UpstreamConfig, UpstreamTlsConfig,
+    load_certified_key_pem,
 };
-use shunt_plugin_sdk::{HookMask, HttpPlugin, PluginConfig, PluginRegistry};
+use shunt_plugin_sdk::{DistributedStore, HookMask, HttpPlugin, PluginConfig, PluginRegistry};
 
 use crate::error::ConfigError;
 use crate::ir::{
-    GatewayConfig, PluginAttachment, RouteIr, ServerTlsConfig, UpstreamIr, redact_secrets,
+    GatewayConfig, PluginAttachment, RouteIr, ServerTlsConfig, StateBackendKind, StateConfig,
+    UpstreamIr, redact_secrets,
 };
 use crate::provider::LoadedConfig;
 
@@ -23,6 +25,7 @@ pub struct SnapshotInspect {
     pub version: u64,
     pub digest: String,
     pub source: String,
+    pub state_backend: String,
     pub global_plugins: Vec<PluginInspect>,
     pub upstreams: Vec<UpstreamInspect>,
     pub routes: Vec<RouteInspect>,
@@ -111,8 +114,25 @@ impl SnapshotCompiler {
             None => None,
         };
 
+        // Resolve optional distributed state backend upfront so invalid env/URL fails cleanly.
+        let (redis_cfg, distributed_store, state_backend): (
+            Option<RedisStoreConfig>,
+            Option<Arc<dyn DistributedStore>>,
+            String,
+        ) = match loaded.config.state.backend {
+            StateBackendKind::Memory => (None, None, "memory".to_owned()),
+            StateBackendKind::Redis => {
+                let rcfg = compile_redis_state_config(&loaded.config.state)?;
+                let store = self.runtime_registry.get_or_create_redis_store(&rcfg);
+                let dyn_store: Arc<dyn DistributedStore> = store;
+                (Some(rcfg), Some(dyn_store), "redis".to_owned())
+            }
+        };
+
         let version = self.next_version.fetch_add(1, Ordering::Relaxed);
-        let build_session = self.runtime_registry.begin_build_session();
+        let build_session = self
+            .runtime_registry
+            .begin_build_session_with_distributed(distributed_store);
 
         let mut builder = SnapshotBuilder::new(version);
         let mut global_inspect = Vec::new();
@@ -167,6 +187,7 @@ impl SnapshotCompiler {
 
         // Compilation fully succeeded: atomically commit staged plugin state & GC orphans.
         build_session.commit_gc();
+        self.runtime_registry.retain_redis_store(redis_cfg.as_ref());
 
         let mut upstreams_inspect: Vec<UpstreamInspect> = loaded
             .config
@@ -210,6 +231,7 @@ impl SnapshotCompiler {
             version,
             digest: loaded.digest.clone(),
             source: loaded.source_name.clone(),
+            state_backend,
             global_plugins: global_inspect,
             upstreams: upstreams_inspect,
             routes: routes_inspect,
@@ -238,6 +260,47 @@ impl SnapshotCompiler {
                 plugin: att.name.clone(),
                 source,
             })
+    }
+}
+
+fn compile_redis_state_config(state: &StateConfig) -> Result<RedisStoreConfig, ConfigError> {
+    let raw_url = state
+        .url
+        .as_deref()
+        .ok_or_else(|| ConfigError::Validation(vec!["state.url is required for redis".into()]))?;
+    let resolved_url = resolve_env_var(raw_url, "state.url")?;
+    let mut cfg = RedisStoreConfig::from_url(&resolved_url)
+        .map_err(|e| ConfigError::Validation(vec![format!("state.url: {e}")]))?;
+
+    if let Some(raw_pw) = &state.password {
+        let pw = resolve_env_var(raw_pw, "state.password")?;
+        if !pw.is_empty() {
+            cfg.password = Some(pw);
+        }
+    }
+    if let Some(user) = &state.username
+        && !user.is_empty()
+    {
+        cfg.username = Some(user.clone());
+    }
+    cfg.key_prefix = state.key_prefix.clone();
+    cfg.pool_size = state.pool_size.max(1);
+    cfg.connect_timeout = Duration::from_millis(state.connect_timeout_ms.max(1));
+    cfg.command_timeout = Duration::from_millis(state.command_timeout_ms.max(1));
+    cfg.failure_policy = state.failure_policy;
+    cfg.insecure_skip_verify = state.insecure_skip_verify;
+    Ok(cfg)
+}
+
+fn resolve_env_var(raw: &str, field: &str) -> Result<String, ConfigError> {
+    if let Some(var) = raw.strip_prefix("env:") {
+        std::env::var(var).map_err(|_| {
+            ConfigError::Validation(vec![format!(
+                "{field}: environment variable `{var}` is not set"
+            )])
+        })
+    } else {
+        Ok(raw.to_owned())
     }
 }
 

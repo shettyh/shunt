@@ -11,8 +11,11 @@ use shunt_plugin_sdk::{
 };
 use tracing::info;
 
+use crate::pricing::nano_usd_to_usd;
 use crate::sse::SseParser;
-use crate::types::{AiFailoverHistory, AiRequestMeta, AiUsage, AiUsageReport, DetectedEndpoint};
+use crate::types::{
+    AiFailoverHistory, AiKeyPolicy, AiRequestMeta, AiUsage, AiUsageReport, DetectedEndpoint,
+};
 
 const DEFAULT_MAX_JSON_INSPECT_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
 
@@ -58,6 +61,8 @@ struct AiMetricsData {
     requests_total: BTreeMap<(String, String, bool, u16), u64>,
     /// (provider, model, kind="prompt"|"completion") -> tokens
     tokens_total: BTreeMap<(String, String, &'static str), u64>,
+    /// (provider, model, key_id, team) -> nano-USD spend
+    cost_nano_usd_total: BTreeMap<(String, String, String, String), u64>,
     /// (from_provider, to_provider, model) -> count
     failovers_total: BTreeMap<(String, String, String), u64>,
     /// (provider, model, stream) -> TTFT histogram
@@ -73,6 +78,7 @@ pub struct AiMetricsSnapshot {
     pub total_prompt_tokens: u64,
     pub total_completion_tokens: u64,
     pub total_failovers: u64,
+    pub total_cost_usd: f64,
 }
 
 /// Thread-safe Prometheus-compatible AI metrics store updated by [`AiUsageTrackerPlugin`]
@@ -154,6 +160,31 @@ impl AiMetrics {
             .observe(report.total_duration.as_secs_f64());
     }
 
+    /// Records attributed LLM spend (in exact integer nano-USD) for Prometheus `shunt_ai_cost_usd_total`.
+    pub fn record_cost(
+        &self,
+        provider: &str,
+        model: &str,
+        key_id: &str,
+        team: &str,
+        cost_nano_usd: u64,
+    ) {
+        if cost_nano_usd == 0 {
+            return;
+        }
+        let mut data = self.inner.write().expect("AiMetrics lock poisoned");
+        let entry = data
+            .cost_nano_usd_total
+            .entry((
+                provider.to_owned(),
+                model.to_owned(),
+                key_id.to_owned(),
+                team.to_owned(),
+            ))
+            .or_insert(0);
+        *entry = entry.saturating_add(cost_nano_usd);
+    }
+
     pub fn snapshot(&self) -> AiMetricsSnapshot {
         let data = self.inner.read().expect("AiMetrics lock poisoned");
         let total_requests = data.requests_total.values().copied().sum();
@@ -170,36 +201,44 @@ impl AiMetrics {
             .map(|(_, &v)| v)
             .sum();
         let total_failovers = data.failovers_total.values().copied().sum();
+        let total_cost_nano: u64 = data
+            .cost_nano_usd_total
+            .values()
+            .copied()
+            .fold(0u64, u64::saturating_add);
         AiMetricsSnapshot {
             total_requests,
             total_prompt_tokens,
             total_completion_tokens,
             total_failovers,
+            total_cost_usd: nano_usd_to_usd(total_cost_nano),
         }
     }
 
     /// Renders collected AI metrics in Prometheus exposition text format (v0.0.4).
-    /// Returns an empty string if no AI requests have been observed yet.
+    /// Returns an empty string if no AI requests or costs have been observed yet.
     pub fn render_prometheus(&self) -> String {
         let data = self.inner.read().expect("AiMetrics lock poisoned");
-        if data.requests_total.is_empty() {
+        if data.requests_total.is_empty() && data.cost_nano_usd_total.is_empty() {
             return String::new();
         }
 
         let mut out = String::with_capacity(2048);
 
-        out.push_str("# HELP shunt_ai_requests_total Total AI gateway requests handled.\n");
-        out.push_str("# TYPE shunt_ai_requests_total counter\n");
-        for ((provider, model, stream, status), count) in &data.requests_total {
-            let _ = writeln!(
-                out,
-                "shunt_ai_requests_total{{provider=\"{}\",model=\"{}\",stream=\"{}\",status=\"{}\"}} {}",
-                escape_label(provider),
-                escape_label(model),
-                stream,
-                status,
-                count
-            );
+        if !data.requests_total.is_empty() {
+            out.push_str("# HELP shunt_ai_requests_total Total AI gateway requests handled.\n");
+            out.push_str("# TYPE shunt_ai_requests_total counter\n");
+            for ((provider, model, stream, status), count) in &data.requests_total {
+                let _ = writeln!(
+                    out,
+                    "shunt_ai_requests_total{{provider=\"{}\",model=\"{}\",stream=\"{}\",status=\"{}\"}} {}",
+                    escape_label(provider),
+                    escape_label(model),
+                    stream,
+                    status,
+                    count
+                );
+            }
         }
 
         if !data.tokens_total.is_empty() {
@@ -213,6 +252,22 @@ impl AiMetrics {
                     escape_label(model),
                     kind,
                     count
+                );
+            }
+        }
+
+        if !data.cost_nano_usd_total.is_empty() {
+            out.push_str("# HELP shunt_ai_cost_usd_total Total attributed LLM spend in USD.\n");
+            out.push_str("# TYPE shunt_ai_cost_usd_total counter\n");
+            for ((provider, model, key_id, team), nano) in &data.cost_nano_usd_total {
+                let _ = writeln!(
+                    out,
+                    "shunt_ai_cost_usd_total{{provider=\"{}\",model=\"{}\",key=\"{}\",team=\"{}\"}} {:.9}",
+                    escape_label(provider),
+                    escape_label(model),
+                    escape_label(key_id),
+                    escape_label(team),
+                    nano_usd_to_usd(*nano)
                 );
             }
         }
@@ -516,8 +571,12 @@ impl HttpPlugin for AiUsageTrackerPlugin {
         let stream = meta.map(|m| m.stream).unwrap_or(false);
 
         let prompt_tokens = usage.and_then(|u| u.prompt_tokens);
+        let cached_prompt_tokens = usage.and_then(|u| u.cached_prompt_tokens);
         let completion_tokens = usage.and_then(|u| u.completion_tokens);
         let total_tokens = usage.and_then(AiUsage::effective_total_tokens);
+        let key_policy = ctx.get_ext::<AiKeyPolicy>();
+        let key_id = key_policy.map(|p| p.key_id.clone());
+        let team = key_policy.and_then(|p| p.team.clone());
 
         // True TTFT for streams (first non-empty content/tool token chunk); falls back to TTFB.
         let ttft = usage
@@ -528,6 +587,8 @@ impl HttpPlugin for AiUsageTrackerPlugin {
         let report = AiUsageReport {
             request_id: summary.request_id,
             route_id: summary.route_id.clone(),
+            key_id,
+            team,
             provider,
             upstream: summary.upstream.clone(),
             requested_model,
@@ -537,6 +598,7 @@ impl HttpPlugin for AiUsageTrackerPlugin {
             attempts: summary.attempts,
             failover_events,
             prompt_tokens,
+            cached_prompt_tokens,
             completion_tokens,
             total_tokens,
             ttft,
@@ -697,6 +759,21 @@ fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {
         if let Some(t) = u.get("totalTokens").and_then(Value::as_u64) {
             usage.total_tokens = Some(t);
         }
+        // Cached prompt tokens (OpenAI prompt_tokens_details / input_tokens_details, Anthropic, Bedrock)
+        if let Some(cached) = u
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                u.get("input_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(Value::as_u64)
+            })
+            .or_else(|| u.get("cache_read_input_tokens").and_then(Value::as_u64))
+            .or_else(|| u.get("cacheReadInputTokens").and_then(Value::as_u64))
+        {
+            usage.cached_prompt_tokens = Some(cached);
+        }
     }
 
     // OpenAI Responses SSE (`response.completed` / `response.incomplete`): response.usage
@@ -714,9 +791,16 @@ fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {
         if let Some(t) = u.get("total_tokens").and_then(Value::as_u64) {
             usage.total_tokens = Some(t);
         }
+        if let Some(cached) = u
+            .get("input_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(Value::as_u64)
+        {
+            usage.cached_prompt_tokens = Some(cached);
+        }
     }
 
-    // Anthropic `message_start`: message.usage.{input_tokens, output_tokens}
+    // Anthropic `message_start`: message.usage.{input_tokens, output_tokens, cache_read_input_tokens}
     if let Some(u) = val
         .get("message")
         .and_then(|m| m.get("usage"))
@@ -728,9 +812,12 @@ fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {
         if let Some(o) = u.get("output_tokens").and_then(Value::as_u64) {
             usage.completion_tokens = Some(o);
         }
+        if let Some(cached) = u.get("cache_read_input_tokens").and_then(Value::as_u64) {
+            usage.cached_prompt_tokens = Some(cached);
+        }
     }
 
-    // Google Gemini `usageMetadata.{promptTokenCount, candidatesTokenCount, totalTokenCount}`
+    // Google Gemini `usageMetadata.{promptTokenCount, candidatesTokenCount, totalTokenCount, cachedContentTokenCount}`
     if let Some(u) = val.get("usageMetadata").and_then(Value::as_object) {
         if let Some(p) = u.get("promptTokenCount").and_then(Value::as_u64) {
             usage.prompt_tokens = Some(p);
@@ -740,6 +827,9 @@ fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {
         }
         if let Some(t) = u.get("totalTokenCount").and_then(Value::as_u64) {
             usage.total_tokens = Some(t);
+        }
+        if let Some(cached) = u.get("cachedContentTokenCount").and_then(Value::as_u64) {
+            usage.cached_prompt_tokens = Some(cached);
         }
     }
 }
