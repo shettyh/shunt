@@ -15,7 +15,7 @@ version = "0.0.1" # x-release-please-version
 edition = "2024"
 rust-version = "1.91"
 license = "Apache-2.0"
-repository = "https://github.com/shunt-rs/shunt"
+repository = "https://github.com/shettyh/shunt"
 
 [workspace.dependencies]
 shunt-plugin-sdk = { version = "0.0.1", path = "crates/shunt-plugin-sdk" } # x-release-please-version

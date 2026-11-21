@@ -30,7 +30,7 @@ FROM gcr.io/distroless/cc-debian12:nonroot
 
 LABEL org.opencontainers.image.title="shunt" \
       org.opencontainers.image.description="Ultra-lean, pluggable Rust HTTP & AI gateway" \
-      org.opencontainers.image.source="https://github.com/shunt-rs/shunt" \
+      org.opencontainers.image.source="https://github.com/shettyh/shunt" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 COPY --from=builder /usr/local/bin/shunt /usr/local/bin/shunt
