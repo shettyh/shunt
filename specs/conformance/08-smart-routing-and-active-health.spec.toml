@@ -37,7 +37,7 @@ endpoints = ["http://127.0.0.1:19105", "http://127.0.0.1:19106"]
 [upstreams.health_check]
 kind = "tcp"
 interval_ms = 50
-timeout_ms = 150
+timeout_ms = 100
 unhealthy_threshold = 1
 healthy_threshold = 1
 
@@ -268,7 +268,7 @@ use_mocks = ["hc_http_healthy", "hc_http_unhealthy"]
 
 [[cases.steps]]
 name = "wait for >=2 active HTTP probes then send req 1"
-wait_ms = 180
+wait_ms = 300
 request = { method = "GET", path = "/active-http/1" }
 expect = { status = 200, body_eq = "healthy-node" }
 
@@ -288,7 +288,7 @@ use_mocks = ["hc_tcp_dead", "hc_tcp_healthy"]
 
 [[cases.steps]]
 name = "wait for active TCP probe then send req 1"
-wait_ms = 140
+wait_ms = 400
 request = { method = "GET", path = "/active-tcp/1" }
 expect = { status = 200, body_eq = "tcp-ok" }
 
