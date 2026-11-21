@@ -1,78 +1,121 @@
 name: Release
 
+# Normal merges to `main` open/update a Release Please PR based on conventional
+# commits. Merging that PR creates a draft GitHub Release + tag, builds all
+# cross-platform binaries and the multi-arch GHCR Docker image, publishes the
+# GitHub Release once all builds succeed, and publishes workspace crates to
+# crates.io in dependency order.
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches: [main]
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Build all release artifacts without publishing to GitHub Releases, GHCR, or crates.io"
+        description: "Build all 7 release binaries from this ref without publishing"
         type: boolean
         default: true
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
-  contents: read
+  actions: write
+  contents: write
+  issues: write
+  pull-requests: write
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
 
 jobs:
-  validate:
-    name: Validate Release
+  release_please:
+    name: Release Please
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
-      tag: ${{ steps.meta.outputs.tag }}
+      tag_name: ${{ steps.meta.outputs.tag_name }}
+      checkout_ref: ${{ steps.meta.outputs.checkout_ref }}
       is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
-      publish: ${{ steps.meta.outputs.publish }}
+      should_build: ${{ steps.meta.outputs.should_build }}
+      should_publish: ${{ steps.meta.outputs.should_publish }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Run Release Please
+        if: github.event_name == 'push'
+        id: release
+        uses: googleapis/release-please-action@v5
 
-      - name: Validate version and release metadata
+      # Pull requests opened or updated with GITHUB_TOKEN do not emit another
+      # pull_request event. Dispatch required checks explicitly so the Release
+      # PR gets checked without requiring a personal access token.
+      - name: Run checks for Release PR
+        if: github.event_name == 'push' && steps.release.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
+        run: |
+          branch=$(printf '%s' "$RELEASE_PR" | jq -r '.headBranchName')
+          test -n "$branch" && test "$branch" != "null"
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"
+          gh workflow run security.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"
+
+      - name: Checkout for manual dry-run metadata
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v7
+
+      - name: Resolve release metadata
         id: meta
+        env:
+          RELEASE_CREATED: ${{ steps.release.outputs.release_created || 'false' }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name || '' }}
         run: |
           python3 - <<'PY'
           import os, tomllib
-          from pathlib import Path
 
-          with open("Cargo.toml", "rb") as f:
-              cargo = tomllib.load(f)
-
-          workspace_ver = cargo["workspace"]["package"]["version"]
           event_name = os.environ["GITHUB_EVENT_NAME"]
-          ref_name = os.environ["GITHUB_REF_NAME"]
-          dry_run = os.environ.get("INPUT_DRY_RUN", "false").lower() == "true"
+          release_created = os.environ.get("RELEASE_CREATED", "false") == "true"
 
           if event_name == "push":
-              tag = ref_name
-              expected_tag = f"v{workspace_ver}"
-              if tag != expected_tag:
-                  raise SystemExit(
-                      f"Tag '{tag}' does not match Cargo.toml workspace.package.version '{workspace_ver}' (expected '{expected_tag}')"
-                  )
-              publish = "true"
+              if release_created:
+                  tag_name = os.environ["RELEASE_TAG"]
+                  version = tag_name.removeprefix("v")
+                  checkout_ref = tag_name
+                  should_build = "true"
+                  should_publish = "true"
+              else:
+                  tag_name = ""
+                  version = ""
+                  checkout_ref = ""
+                  should_build = "false"
+                  should_publish = "false"
           else:
-              tag = f"v{workspace_ver}"
-              publish = "false" if dry_run else "true"
+              with open("Cargo.toml", "rb") as f:
+                  version = tomllib.load(f)["workspace"]["package"]["version"]
+              tag_name = f"v{version}"
+              checkout_ref = os.environ["GITHUB_SHA"]
+              should_build = "true"
+              should_publish = "false"
 
-          is_prerelease = "true" if "-" in workspace_ver else "false"
+          is_prerelease = "true" if "-" in version else "false"
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-              out.write(f"version={workspace_ver}\n")
-              out.write(f"tag={tag}\n")
+              out.write(f"version={version}\n")
+              out.write(f"tag_name={tag_name}\n")
+              out.write(f"checkout_ref={checkout_ref}\n")
               out.write(f"is_prerelease={is_prerelease}\n")
-              out.write(f"publish={publish}\n")
+              out.write(f"should_build={should_build}\n")
+              out.write(f"should_publish={should_publish}\n")
 
-          print(f"Release validated: version={workspace_ver}, tag={tag}, prerelease={is_prerelease}, publish={publish}")
+          print(f"Release meta: version={version}, tag={tag_name}, build={should_build}, publish={should_publish}")
           PY
-        env:
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
 
   build-binaries:
     name: Build (${{ matrix.target }})
-    needs: validate
+    needs: release_please
+    if: needs.release_please.outputs.should_build == 'true'
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -114,7 +157,9 @@ jobs:
             ext: ".exe"
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release_please.outputs.checkout_ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -137,7 +182,7 @@ jobs:
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
-          pkg="shunt-${{ needs.validate.outputs.tag }}-${{ matrix.target }}"
+          pkg="shunt-${{ needs.release_please.outputs.tag_name }}-${{ matrix.target }}"
           mkdir -p "dist/${pkg}/examples"
           cp "target/${{ matrix.target }}/release/shunt" "dist/${pkg}/shunt"
           cp LICENSE "dist/${pkg}/LICENSE"
@@ -149,7 +194,7 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $pkg = "shunt-${{ needs.validate.outputs.tag }}-${{ matrix.target }}"
+          $pkg = "shunt-${{ needs.release_please.outputs.tag_name }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$pkg/examples" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/shunt.exe" "dist/$pkg/shunt.exe"
           Copy-Item "LICENSE" "dist/$pkg/LICENSE"
@@ -164,10 +209,72 @@ jobs:
           path: dist/shunt-*
           if-no-files-found: error
 
-  github-release:
+  docker-publish:
+    name: Publish Docker Image (GHCR)
+    needs: release_please
+    if: needs.release_please.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release_please.outputs.tag_name }}
+
+      - name: Set lowercased image name
+        id: img
+        run: |
+          repo="$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          echo "name=ghcr.io/${repo}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.name }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.release_please.outputs.tag_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release_please.outputs.tag_name }}
+            type=semver,pattern={{major}},value=${{ needs.release_please.outputs.tag_name }}
+            type=raw,value=latest,enable=${{ needs.release_please.outputs.is_prerelease != 'true' }}
+            type=sha
+
+      - name: Build and push multi-arch image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Attest container image provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.img.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  publish-release:
     name: Publish GitHub Release
-    needs: [validate, build-binaries]
-    if: needs.validate.outputs.publish == 'true'
+    needs: [release_please, build-binaries, docker-publish]
+    if: needs.release_please.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -192,90 +299,39 @@ jobs:
         with:
           subject-path: dist/*
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.validate.outputs.tag }}
-          name: Shunt ${{ needs.validate.outputs.tag }}
-          generate_release_notes: true
-          prerelease: ${{ needs.validate.outputs.is_prerelease == 'true' }}
-          files: dist/*
-
-  docker-publish:
-    name: Publish Docker Image (GHCR)
-    needs: validate
-    if: needs.validate.outputs.publish == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set lowercased image name
-        id: img
+      - name: Upload assets and publish draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.release_please.outputs.tag_name }}
+          IS_PRERELEASE: ${{ needs.release_please.outputs.is_prerelease }}
         run: |
-          repo="$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
-          echo "name=ghcr.io/${repo}" >> "$GITHUB_OUTPUT"
-
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ steps.img.outputs.name }}
-          tags: |
-            type=semver,pattern={{version}},value=${{ needs.validate.outputs.tag }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ needs.validate.outputs.tag }}
-            type=semver,pattern={{major}},value=${{ needs.validate.outputs.tag }}
-            type=raw,value=latest,enable=${{ needs.validate.outputs.is_prerelease != 'true' }}
-            type=sha
-
-      - name: Build and push multi-arch image
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Attest container image provenance
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-name: ${{ steps.img.outputs.name }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
+          gh release upload "$TAG_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            gh release edit "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --title "Shunt $TAG_NAME" --draft=false --prerelease
+          else
+            gh release edit "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --title "Shunt $TAG_NAME" --draft=false --latest
+          fi
 
   crates-publish:
     name: Publish to crates.io
-    needs: [validate, github-release]
-    if: needs.validate.outputs.publish == 'true'
+    needs: [release_please, publish-release]
+    if: needs.release_please.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
     environment: crates-io
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release_please.outputs.tag_name }}
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
       - name: Publish workspace crates in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_VERSION: ${{ needs.release_please.outputs.version }}
         run: |
           if [[ -z "${CARGO_REGISTRY_TOKEN}" ]]; then
             echo "error: CARGO_REGISTRY_TOKEN secret is not configured in the 'crates-io' environment." >&2

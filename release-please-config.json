@@ -1,0 +1,59 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "always-update": true,
+  "bump-minor-pre-major": true,
+  "packages": {
+    ".": {
+      "release-type": "simple",
+      "changelog-type": "github",
+      "include-component-in-tag": false,
+      "include-v-in-tag": true,
+      "include-v-in-release-name": true,
+      "pull-request-title-pattern": "chore: release v${version}",
+      "draft": true,
+      "force-tag-creation": true,
+      "exclude-paths": ["benches/results"],
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "Cargo.toml"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==\"shunt-plugin-sdk\")].version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==\"shunt-core\")].version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==\"shunt-plugins\")].version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==\"shunt-ai\")].version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==\"shunt-config\")].version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==\"shunt-cli\")].version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==\"shunt-bench\")].version"
+        }
+      ]
+    }
+  }
+}
