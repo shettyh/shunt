@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use http::Method;
+use http::header::{HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use shunt_core::RedisStoreConfig;
 use shunt_plugin_sdk::FailurePolicy;
@@ -146,10 +147,101 @@ fn default_empty_object() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }
 
+/// Canonical endpoint entry in `upstreams[].endpoints`: accepts either a bare URL string
+/// (implicit `weight = 1`) or an explicit `{ url = "...", weight = N }` table.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum UpstreamEndpointIr {
+    Url(String),
+    Weighted {
+        url: String,
+        #[serde(default = "default_endpoint_weight")]
+        weight: u32,
+    },
+}
+
+fn default_endpoint_weight() -> u32 {
+    1
+}
+
+impl UpstreamEndpointIr {
+    pub fn url(&self) -> &str {
+        match self {
+            UpstreamEndpointIr::Url(u) => u.as_str(),
+            UpstreamEndpointIr::Weighted { url, .. } => url.as_str(),
+        }
+    }
+
+    pub fn weight(&self) -> u32 {
+        match self {
+            UpstreamEndpointIr::Url(_) => 1,
+            UpstreamEndpointIr::Weighted { weight, .. } => *weight,
+        }
+    }
+
+    pub fn set_url(&mut self, next_url: String) {
+        match self {
+            UpstreamEndpointIr::Url(u) => *u = next_url,
+            UpstreamEndpointIr::Weighted { url, .. } => *url = next_url,
+        }
+    }
+}
+
+/// Active health check probe protocol (`http` or `tcp`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActiveProbeKindIr {
+    #[default]
+    Http,
+    Tcp,
+}
+
+/// Optional `[upstreams.health_check]` background probe configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ActiveHealthCheckIr {
+    pub kind: ActiveProbeKindIr,
+    /// HTTP probe request path (default: `"/health"`).
+    pub path: String,
+    /// HTTP probe method (default: `"GET"`).
+    pub method: String,
+    /// HTTP status codes considered healthy (default: `[200]`).
+    pub expected_statuses: Vec<u16>,
+    /// Optional HTTP headers attached to probe requests.
+    pub headers: BTreeMap<String, String>,
+    /// Interval between probe cycles in milliseconds (default: `10000`).
+    pub interval_ms: u64,
+    /// Per-probe timeout in milliseconds (default: `2000`).
+    pub timeout_ms: u64,
+    /// Consecutive failed probes before ejecting an endpoint (default: `2`).
+    pub unhealthy_threshold: usize,
+    /// Consecutive successful probes before recovering an endpoint (default: `1`).
+    pub healthy_threshold: usize,
+    /// Initial active health state before the first probe finishes (default: `true`).
+    pub initial_healthy: bool,
+}
+
+impl Default for ActiveHealthCheckIr {
+    fn default() -> Self {
+        Self {
+            kind: ActiveProbeKindIr::Http,
+            path: "/health".to_owned(),
+            method: "GET".to_owned(),
+            expected_statuses: vec![200],
+            headers: BTreeMap::new(),
+            interval_ms: 10_000,
+            timeout_ms: 2_000,
+            unhealthy_threshold: 2,
+            healthy_threshold: 1,
+            initial_healthy: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UpstreamIr {
     pub name: String,
-    pub endpoints: Vec<String>,
+    pub endpoints: Vec<UpstreamEndpointIr>,
     #[serde(default)]
     pub http2_only: bool,
     #[serde(default = "default_connect_timeout_ms")]
@@ -164,6 +256,8 @@ pub struct UpstreamIr {
     pub unhealthy_cooldown_ms: u64,
     #[serde(default)]
     pub tls: UpstreamTlsIr,
+    #[serde(default)]
+    pub health_check: Option<ActiveHealthCheckIr>,
 }
 
 fn default_connect_timeout_ms() -> u64 {
@@ -362,27 +456,105 @@ impl GatewayConfig {
                 ));
             }
             for ep in &up.endpoints {
-                match ep.parse::<http::Uri>() {
+                if ep.weight() == 0 {
+                    errors.push(format!(
+                        "upstreams.{}: endpoint `{}` weight must be >= 1",
+                        up.name,
+                        ep.url()
+                    ));
+                }
+                match ep.url().parse::<http::Uri>() {
                     Ok(uri) => {
                         let scheme = uri.scheme_str().unwrap_or("");
                         if scheme != "http" && scheme != "https" {
                             errors.push(format!(
-                                "upstreams.{}: endpoint `{ep}` must use http:// or https://",
-                                up.name
+                                "upstreams.{}: endpoint `{}` must use http:// or https://",
+                                up.name,
+                                ep.url()
                             ));
                         }
                         if uri.authority().is_none() {
                             errors.push(format!(
-                                "upstreams.{}: endpoint `{ep}` is missing host/authority",
-                                up.name
+                                "upstreams.{}: endpoint `{}` is missing host/authority",
+                                up.name,
+                                ep.url()
                             ));
                         }
                     }
                     Err(e) => {
                         errors.push(format!(
-                            "upstreams.{}: invalid endpoint URI `{ep}`: {e}",
+                            "upstreams.{}: invalid endpoint URI `{}`: {e}",
+                            up.name,
+                            ep.url()
+                        ));
+                    }
+                }
+            }
+            if let Some(hc) = &up.health_check {
+                if hc.interval_ms == 0 {
+                    errors.push(format!(
+                        "upstreams.{}.health_check.interval_ms: must be >= 1",
+                        up.name
+                    ));
+                }
+                if hc.timeout_ms == 0 {
+                    errors.push(format!(
+                        "upstreams.{}.health_check.timeout_ms: must be >= 1",
+                        up.name
+                    ));
+                }
+                if hc.unhealthy_threshold == 0 {
+                    errors.push(format!(
+                        "upstreams.{}.health_check.unhealthy_threshold: must be >= 1",
+                        up.name
+                    ));
+                }
+                if hc.healthy_threshold == 0 {
+                    errors.push(format!(
+                        "upstreams.{}.health_check.healthy_threshold: must be >= 1",
+                        up.name
+                    ));
+                }
+                if hc.kind == ActiveProbeKindIr::Http {
+                    if !hc.path.starts_with('/') {
+                        errors.push(format!(
+                            "upstreams.{}.health_check.path: `{}` must start with `/`",
+                            up.name, hc.path
+                        ));
+                    }
+                    if Method::from_bytes(hc.method.as_bytes()).is_err() {
+                        errors.push(format!(
+                            "upstreams.{}.health_check.method: invalid HTTP method `{}`",
+                            up.name, hc.method
+                        ));
+                    }
+                    if hc.expected_statuses.is_empty() {
+                        errors.push(format!(
+                            "upstreams.{}.health_check.expected_statuses: cannot be empty",
                             up.name
                         ));
+                    }
+                    for &code in &hc.expected_statuses {
+                        if !(100..=599).contains(&code) {
+                            errors.push(format!(
+                                "upstreams.{}.health_check.expected_statuses: invalid HTTP status `{code}`",
+                                up.name
+                            ));
+                        }
+                    }
+                    for (k, v) in &hc.headers {
+                        if HeaderName::from_bytes(k.as_bytes()).is_err() {
+                            errors.push(format!(
+                                "upstreams.{}.health_check.headers: invalid header name `{k}`",
+                                up.name
+                            ));
+                        }
+                        if HeaderValue::from_str(v).is_err() {
+                            errors.push(format!(
+                                "upstreams.{}.health_check.headers.{k}: invalid header value",
+                                up.name
+                            ));
+                        }
                     }
                 }
             }

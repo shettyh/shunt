@@ -73,6 +73,8 @@ pub struct MockResponseSpec {
     pub chunks: Vec<String>,
     /// Optional byte chunking size to simulate fragmented TCP frames.
     pub chunk_split_bytes: Option<usize>,
+    /// Optional initial delay (ms) before sending response headers (useful for latency routing tests).
+    pub delay_ms: Option<u64>,
     /// Optional delay (ms) between streamed chunks.
     pub chunk_delay_ms: Option<u64>,
     /// Optional fault injection behavior.
@@ -132,6 +134,8 @@ pub struct StepSpec {
     pub name: Option<String>,
     /// Advance the injected `ManualClock` deterministically by this many milliseconds.
     pub advance_clock_ms: Option<u64>,
+    /// Sleep wall-clock time (ms) before this step (useful for waiting on background health probes).
+    pub wait_ms: Option<u64>,
     /// Trigger an atomic hot reload with new inline TOML config (upstreams are auto-rebound).
     pub reload_config_inline: Option<String>,
     /// Expected outcome of `reload_config_inline` (defaults to `true` = expect reload success).

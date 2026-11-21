@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::CoreError;
 use crate::pipeline::execute_request;
+use crate::probe::ProbeSupervisor;
 use crate::snapshot::GatewaySnapshot;
 use crate::tls::{CertStore, DynamicCertResolver, TlsListenerConfig};
 
@@ -79,6 +80,8 @@ impl GatewayServer {
         let active_conns = Arc::new(AtomicUsize::new(0));
         let drain_notify = Arc::new(Notify::new());
         let next_request_id = Arc::new(AtomicU64::new(1));
+        let probes = Arc::new(ProbeSupervisor::new());
+        probes.reconcile(&self.snapshot.load());
 
         let snapshot_ref = Arc::clone(&self.snapshot);
         let active_conns_loop = Arc::clone(&active_conns);
@@ -171,6 +174,7 @@ impl GatewayServer {
             snapshot: self.snapshot,
             tls_resolver,
             trace_enabled: self.trace_enabled,
+            probes,
             shutdown_tx,
             active_conns,
             drain_notify,
@@ -250,10 +254,12 @@ impl Drop for ActiveConnGuard {
 pub struct ServerReloader {
     snapshot: Arc<ArcSwap<GatewaySnapshot>>,
     tls_resolver: Option<Arc<DynamicCertResolver>>,
+    probes: Arc<ProbeSupervisor>,
 }
 
 impl ServerReloader {
     pub fn swap_snapshot(&self, next: Arc<GatewaySnapshot>) {
+        self.probes.reconcile(&next);
         self.snapshot.store(next);
     }
 
@@ -274,6 +280,7 @@ pub struct ServerHandle {
     snapshot: Arc<ArcSwap<GatewaySnapshot>>,
     tls_resolver: Option<Arc<DynamicCertResolver>>,
     trace_enabled: Arc<AtomicBool>,
+    probes: Arc<ProbeSupervisor>,
     shutdown_tx: watch::Sender<bool>,
     active_conns: Arc<AtomicUsize>,
     drain_notify: Arc<Notify>,
@@ -292,6 +299,7 @@ impl ServerHandle {
         ServerReloader {
             snapshot: Arc::clone(&self.snapshot),
             tls_resolver: self.tls_resolver.clone(),
+            probes: Arc::clone(&self.probes),
         }
     }
 
@@ -300,7 +308,13 @@ impl ServerHandle {
     /// In-flight requests continue on the previous `Arc<GatewaySnapshot>` until complete,
     /// while all new requests immediately observe the new snapshot.
     pub fn swap_snapshot(&self, next: Arc<GatewaySnapshot>) {
+        self.probes.reconcile(&next);
         self.snapshot.store(next);
+    }
+
+    /// Returns the number of currently running active health check probe tasks.
+    pub fn active_probe_tasks(&self) -> usize {
+        self.probes.active_task_count()
     }
 
     /// Returns a reference to the currently active [`GatewaySnapshot`].
@@ -329,6 +343,7 @@ impl ServerHandle {
     /// HTTP/2 `graceful_shutdown()`, and awaits draining of all active connections up to
     /// `drain_timeout`. Returns `true` if all connections drained cleanly before timeout.
     pub async fn shutdown(mut self) -> bool {
+        self.probes.shutdown_all().await;
         let _ = self.shutdown_tx.send(true);
         if let Some(task) = self.accept_task.take() {
             let _ = task.await;

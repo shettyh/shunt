@@ -192,11 +192,12 @@ To execute Path A immediately while laying clean rails for Path B, the recommend
 | **1** | **RFC 0007 — Generalized AI Providers & Endpoints** | OpenAI-compatible custom providers (Ollama, vLLM, Groq, DeepSeek, Fireworks, OpenRouter), Gemini + Azure + Bedrock adapters, `/v1/models` and `/v1/embeddings` | Path A (A1) |
 | **2** | **RFC 0008 — Multi-Protocol AI Ingress** | Anthropic `/v1/messages` frontend + OpenAI `/v1/responses` support (bidirectional translation across backends) | Path A (A1) |
 | **3** | **RFC 0009 — Virtual Keys, TPM Limits, Cost Budgets & Distributed `StateStore`** | Virtual API keys, pricing catalog, cost budgets, TPM/RPM limiter, optional Redis/Valkey `StateStore` | Path A (A2) + Path B |
-| **4** | **RFC 0010 — Smart Routing, Active Health Checks & OTLP Observability** | Weighted/TTFT/cost routing, active upstream probes, OpenTelemetry HTTP + GenAI tracing, Grafana dashboards | Path A (A3) + Path B (B1) |
-| **5** | **RFC 0011 — Admin Read-Only Inspector UI (`--ui`)** | Opt-in embedded read-only Web UI on Admin listener for live trace waterfalls, snapshot/HookMask graph & AI usage | Path A + Path B |
-| **6** | **RFC 0012 — JWT/OIDC Auth & Kubernetes Gateway API** | JWKS/JWT auth plugin + K8s Gateway API `ConfigProvider` | Path B (B1–B2) |
-| **7** | **RFC 0013 — Wasm Component Model Plugin Host** | Tier 2 hot-reloadable Wasm plugins on `shunt-plugin-sdk` | Path B (B3) |
-| **8** | **RFC 0014 — Companion Control Plane (`shunt-console`)** | Separate optional DB-backed management UI & control plane for both AI Gateway (keys, budgets, models, playground) and API Gateway (routes, upstreams, canaries, plugins, TLS, fleet rollouts) driving `shunt` via `ConfigProvider` | Path A + Path B |
+| **4** | **RFC 0010 — Smart Routing & Active Upstream Health Checks** | Weighted upstream pools, active HTTP/TCP upstream probes, weighted/TTFT/cost AI routing, multi-protocol capability guards | Path A (A3) + Path B (B1) |
+| **5** | **RFC 0011 — OTLP Observability, AI Cache & Grafana Dashboards** | Bounded async telemetry bus, OpenTelemetry HTTP + GenAI tracing, exact-match `ai-cache`, starter Grafana dashboards | Path A (A3) + Path B (B1) |
+| **6** | **RFC 0012 — Admin Read-Only Inspector UI (`--ui`)** | Opt-in embedded read-only Web UI on Admin listener for live trace waterfalls, snapshot/HookMask graph & AI usage | Path A + Path B |
+| **7** | **RFC 0013 — JWT/OIDC Auth & Kubernetes Gateway API** | JWKS/JWT auth plugin + K8s Gateway API `ConfigProvider` | Path B (B1–B2) |
+| **8** | **RFC 0014 — Wasm Component Model Plugin Host** | Tier 2 hot-reloadable Wasm plugins on `shunt-plugin-sdk` | Path B (B3) |
+| **9** | **RFC 0015 — Companion Control Plane (`shunt-console`)** | Separate optional DB-backed management UI & control plane for both AI Gateway (keys, budgets, models, playground) and API Gateway (routes, upstreams, canaries, plugins, TLS, fleet rollouts) driving `shunt` via `ConfigProvider` | Path A + Path B |
 
 ---
 

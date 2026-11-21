@@ -2,20 +2,39 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use shunt_plugin_sdk::{
-    BufferedResponse, BuildContext, Bytes, Flow, HookMask, HookResult, HttpPlugin, Method,
-    PluginBuildError, PluginConfig, PluginFactory, RequestCtx, RequestHead, RouteDecision,
-    StatusCode, UpstreamSelection,
+    BufferedResponse, BuildContext, Bytes, Clock, Flow, HeaderName, HeaderValue, HookMask,
+    HookResult, HttpPlugin, Method, PluginBuildError, PluginConfig, PluginFactory, RequestCtx,
+    RequestHead, RequestSummary, ResponseHead, RouteDecision, StatusCode, UpstreamSelection,
 };
 
+use crate::pricing::{ModelPricing, PricingCatalog};
+use crate::routing::{
+    LatencyRoutingConfig, RoutingCursorTable, TargetLatencyTable, UnknownCostPolicy,
+    detect_required_capabilities, order_cost_targets, order_weighted_targets,
+};
 use crate::tokens::estimate_request_tokens;
 use crate::types::{
-    AiCapability, AiEndpointKind, AiKeyPolicy, AiRequestMeta, AiTarget, DetectedEndpoint,
-    endpoint_error_response, openai_error_response, percent_decode, wildcard_match,
+    AiCapability, AiEndpointKind, AiFailoverHistory, AiKeyPolicy, AiRequestMeta, AiTarget, AiUsage,
+    DetectedEndpoint, RoutingStrategy, endpoint_error_response, openai_error_response,
+    percent_decode, wildcard_match,
 };
 
 const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
+const DEFAULT_COST_OUTPUT_TOKENS: u64 = 256;
+
+fn default_weight() -> u32 {
+    1
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_cost_output_tokens() -> u64 {
+    DEFAULT_COST_OUTPUT_TOKENS
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TargetSpec {
@@ -28,9 +47,12 @@ pub struct TargetSpec {
     /// Optional explicit endpoint override passed to `UpstreamSelection::endpoint_override`.
     #[serde(default)]
     pub endpoint_override: Option<String>,
-    /// Optional capability tags (`chat`, `streaming`, `tools`, `vision`, `embeddings`).
+    /// Optional capability tags (`chat`, `streaming`, `tools`, `vision`, `json_schema`, `reasoning`, `embeddings`).
     #[serde(default)]
     pub capabilities: Vec<AiCapability>,
+    /// Relative traffic weight used by `strategy = "weighted"` (default: `1`, must be `>= 1`).
+    #[serde(default = "default_weight")]
+    pub weight: u32,
 }
 
 impl TargetSpec {
@@ -44,6 +66,36 @@ impl TargetSpec {
                 .unwrap_or_else(|| requested_model.to_owned()),
             endpoint_override: self.endpoint_override.clone(),
             capabilities: self.capabilities.clone(),
+            weight: self.weight.max(1),
+        }
+    }
+}
+
+/// Entry under `models.<alias>`: accepts either a compact target array (inheriting router `strategy`)
+/// or a structured `{ strategy = "...", targets = [...] }` table.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ModelEntryConfig {
+    Targets(Vec<TargetSpec>),
+    Detailed {
+        #[serde(default)]
+        strategy: Option<RoutingStrategy>,
+        targets: Vec<TargetSpec>,
+    },
+}
+
+impl ModelEntryConfig {
+    fn targets(&self) -> &[TargetSpec] {
+        match self {
+            ModelEntryConfig::Targets(t) => t,
+            ModelEntryConfig::Detailed { targets, .. } => targets,
+        }
+    }
+
+    fn strategy(&self, fallback: RoutingStrategy) -> RoutingStrategy {
+        match self {
+            ModelEntryConfig::Targets(_) => fallback,
+            ModelEntryConfig::Detailed { strategy, .. } => strategy.unwrap_or(fallback),
         }
     }
 }
@@ -52,11 +104,10 @@ impl TargetSpec {
 pub struct ModelRule {
     /// Glob-style pattern supporting `*` wildcards (e.g. `"claude-*"`, `"gpt-4*"`, `"*"`).
     pub pattern: String,
+    /// Optional per-rule routing strategy override (defaults to router-level `strategy`).
+    #[serde(default)]
+    pub strategy: Option<RoutingStrategy>,
     pub targets: Vec<TargetSpec>,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,11 +127,39 @@ struct AiModelRouterConfig {
     /// token estimator without calling upstream providers (default: true).
     #[serde(default = "default_true")]
     serve_count_tokens_endpoint: bool,
+    /// Default smart routing strategy across models/rules/defaults (`priority`, `weighted`, `latency`, `cost`).
+    #[serde(default)]
+    strategy: RoutingStrategy,
+    /// Optional explicit strategy override for `default_targets`.
+    #[serde(default)]
+    default_strategy: Option<RoutingStrategy>,
+    /// Emit `x-shunt-routing-strategy`, `x-shunt-selected-provider`, and `x-shunt-selected-model`
+    /// response headers (default: false; enables `ON_RESPONSE_HEADERS` only when true).
+    #[serde(default)]
+    include_routing_headers: bool,
+    /// Tuning parameters for `strategy = "latency"`.
+    #[serde(default)]
+    latency: LatencyRoutingConfig,
+    /// Custom per-model pricing overrides for `strategy = "cost"`.
+    #[serde(default)]
+    pricing: HashMap<String, ModelPricing>,
+    /// Include Shunt's built-in reference model pricing catalog for `strategy = "cost"` (default: true).
+    #[serde(default = "default_true")]
+    use_builtin_pricing: bool,
+    /// Optional fallback pricing for models not found in `pricing` or built-ins.
+    #[serde(default)]
+    default_pricing: Option<ModelPricing>,
+    /// How `strategy = "cost"` ranks targets whose model has no pricing entry (`last` or `free`).
+    #[serde(default)]
+    unknown_cost_policy: UnknownCostPolicy,
+    /// Estimated output tokens used when ranking targets by `strategy = "cost"` (default: 256).
+    #[serde(default = "default_cost_output_tokens")]
+    cost_estimated_output_tokens: u64,
     /// Additional concrete model IDs to advertise on `GET /v1/models` (useful for
     /// wildcard-routed models like `"claude-3-5-sonnet-20241022"` or `"gemini-2.5-flash"`).
     exposed_models: Vec<String>,
-    /// Exact model name -> ordered provider/upstream fallback targets.
-    models: HashMap<String, Vec<TargetSpec>>,
+    /// Exact model name -> target list or `{ strategy, targets }` table.
+    models: HashMap<String, ModelEntryConfig>,
     /// Ordered wildcard pattern rules checked when no exact match exists in `models`.
     rules: Vec<ModelRule>,
     /// Catch-all fallback targets when neither `models` nor `rules` match.
@@ -94,19 +173,21 @@ impl Default for AiModelRouterConfig {
             auto_max_attempts: true,
             serve_models_endpoint: true,
             serve_count_tokens_endpoint: true,
+            strategy: RoutingStrategy::Priority,
+            default_strategy: None,
+            include_routing_headers: false,
+            latency: LatencyRoutingConfig::default(),
+            pricing: HashMap::new(),
+            use_builtin_pricing: true,
+            default_pricing: None,
+            unknown_cost_policy: UnknownCostPolicy::Last,
+            cost_estimated_output_tokens: DEFAULT_COST_OUTPUT_TOKENS,
             exposed_models: Vec::new(),
             models: HashMap::new(),
             rules: Vec::new(),
             default_targets: Vec::new(),
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct ModelRequestProbe {
-    model: Option<String>,
-    #[serde(default)]
-    stream: bool,
 }
 
 /// Factory for the `ai-model-router` plugin.
@@ -120,7 +201,7 @@ impl PluginFactory for AiModelRouterFactory {
     fn build(
         &self,
         config: &PluginConfig,
-        _ctx: &BuildContext,
+        ctx: &BuildContext,
     ) -> Result<Arc<dyn HttpPlugin>, PluginBuildError> {
         let cfg: AiModelRouterConfig = config.deserialize(self.name())?;
 
@@ -128,6 +209,13 @@ impl PluginFactory for AiModelRouterFactory {
             return Err(PluginBuildError::BuildFailed {
                 plugin: self.name().to_owned(),
                 message: "`max_body_bytes` must be > 0".to_owned(),
+            });
+        }
+
+        if let Err(msg) = cfg.latency.validate() {
+            return Err(PluginBuildError::BuildFailed {
+                plugin: self.name().to_owned(),
+                message: msg,
             });
         }
 
@@ -139,8 +227,8 @@ impl PluginFactory for AiModelRouterFactory {
             });
         }
 
-        for (model, targets) in &cfg.models {
-            validate_targets(self.name(), &format!("models.{model}"), targets)?;
+        for (model, entry) in &cfg.models {
+            validate_targets(self.name(), &format!("models.{model}"), entry.targets())?;
         }
         for rule in &cfg.rules {
             if rule.pattern.trim().is_empty() {
@@ -159,6 +247,54 @@ impl PluginFactory for AiModelRouterFactory {
             validate_targets(self.name(), "default_targets", &cfg.default_targets)?;
         }
 
+        let pricing_catalog =
+            PricingCatalog::new(cfg.pricing, cfg.use_builtin_pricing, cfg.default_pricing)
+                .map_err(|message| PluginBuildError::BuildFailed {
+                    plugin: self.name().to_owned(),
+                    message,
+                })?;
+
+        let uses_latency = cfg.strategy == RoutingStrategy::Latency
+            || cfg.default_strategy == Some(RoutingStrategy::Latency)
+            || cfg
+                .models
+                .values()
+                .any(|e| e.strategy(cfg.strategy) == RoutingStrategy::Latency)
+            || cfg
+                .rules
+                .iter()
+                .any(|r| r.strategy.unwrap_or(cfg.strategy) == RoutingStrategy::Latency);
+
+        let uses_cursors = uses_latency
+            || cfg.strategy == RoutingStrategy::Weighted
+            || cfg.default_strategy == Some(RoutingStrategy::Weighted)
+            || cfg
+                .models
+                .values()
+                .any(|e| e.strategy(cfg.strategy) == RoutingStrategy::Weighted)
+            || cfg
+                .rules
+                .iter()
+                .any(|r| r.strategy.unwrap_or(cfg.strategy) == RoutingStrategy::Weighted);
+
+        let cursors = if uses_cursors {
+            Some(
+                ctx.state_handle()
+                    .get_or_init("routing_cursors", RoutingCursorTable::default),
+            )
+        } else {
+            None
+        };
+
+        let latency_table = if uses_latency {
+            Some(
+                ctx.state_handle()
+                    .get_or_init("routing_latency", TargetLatencyTable::default),
+            )
+        } else {
+            None
+        };
+
         let (models_list_json, models_by_id, catalog_entries) = compile_models_catalog(
             &cfg.models,
             &cfg.rules,
@@ -171,6 +307,16 @@ impl PluginFactory for AiModelRouterFactory {
             auto_max_attempts: cfg.auto_max_attempts,
             serve_models_endpoint: cfg.serve_models_endpoint,
             serve_count_tokens_endpoint: cfg.serve_count_tokens_endpoint,
+            default_router_strategy: cfg.strategy,
+            default_targets_strategy: cfg.default_strategy.unwrap_or(cfg.strategy),
+            include_routing_headers: cfg.include_routing_headers,
+            latency_cfg: cfg.latency,
+            pricing_catalog,
+            unknown_cost_policy: cfg.unknown_cost_policy,
+            cost_estimated_output_tokens: cfg.cost_estimated_output_tokens,
+            clock: ctx.clock(),
+            cursors,
+            latency_table,
             models: cfg.models,
             rules: cfg.rules,
             default_targets: cfg.default_targets,
@@ -205,6 +351,12 @@ fn validate_targets(
                 message: format!("`{label}[{idx}].upstream` cannot be empty"),
             });
         }
+        if t.weight == 0 {
+            return Err(PluginBuildError::BuildFailed {
+                plugin: plugin.to_owned(),
+                message: format!("`{label}[{idx}].weight` must be >= 1"),
+            });
+        }
     }
     Ok(())
 }
@@ -212,7 +364,7 @@ fn validate_targets(
 /// Pre-serializes deterministic OpenAI `GET /v1/models` and `GET /v1/models/{id}` payloads
 /// once at snapshot compilation time (zero per-request sorting or serialization).
 fn compile_models_catalog(
-    models: &HashMap<String, Vec<TargetSpec>>,
+    models: &HashMap<String, ModelEntryConfig>,
     rules: &[ModelRule],
     default_targets: &[TargetSpec],
     exposed_models: &[String],
@@ -221,8 +373,9 @@ fn compile_models_catalog(
     let mut catalog: BTreeMap<String, String> = BTreeMap::new();
 
     // 1. Explicit model aliases in `models`.
-    for (alias, targets) in models {
-        let owner = targets
+    for (alias, entry) in models {
+        let owner = entry
+            .targets()
             .first()
             .map(|t| t.provider.clone())
             .unwrap_or_else(|| "shunt".to_owned());
@@ -278,12 +431,12 @@ fn compile_models_catalog(
 
 fn resolve_owner_for_exposed(
     model_id: &str,
-    models: &HashMap<String, Vec<TargetSpec>>,
+    models: &HashMap<String, ModelEntryConfig>,
     rules: &[ModelRule],
     default_targets: &[TargetSpec],
 ) -> String {
-    if let Some(specs) = models.get(model_id)
-        && let Some(first) = specs.first()
+    if let Some(entry) = models.get(model_id)
+        && let Some(first) = entry.targets().first()
     {
         return first.provider.clone();
     }
@@ -300,15 +453,26 @@ fn resolve_owner_for_exposed(
     "shunt".to_owned()
 }
 
-/// Parses incoming OpenAI-compatible AI requests (`/v1/chat/completions`, `/v1/embeddings`,
-/// `GET /v1/models`, `GET /v1/models/{id}`), stores typed [`AiRequestMeta`] in `ctx.extensions`,
-/// and steers `on_route` / `on_upstream_select` across an ordered named-provider fallback chain.
+/// Parses incoming AI requests (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`,
+/// `/v1/embeddings`, `GET /v1/models`, `POST /v1/messages/count_tokens`), enforces capability
+/// guards, applies smart routing strategies (`priority`, `weighted`, `latency`, `cost`),
+/// and stores typed [`AiRequestMeta`] in `ctx.extensions`.
 pub struct AiModelRouterPlugin {
     max_body_bytes: usize,
     auto_max_attempts: bool,
     serve_models_endpoint: bool,
     serve_count_tokens_endpoint: bool,
-    models: HashMap<String, Vec<TargetSpec>>,
+    default_router_strategy: RoutingStrategy,
+    default_targets_strategy: RoutingStrategy,
+    include_routing_headers: bool,
+    latency_cfg: LatencyRoutingConfig,
+    pricing_catalog: PricingCatalog,
+    unknown_cost_policy: UnknownCostPolicy,
+    cost_estimated_output_tokens: u64,
+    clock: Arc<dyn Clock>,
+    cursors: Option<Arc<RoutingCursorTable>>,
+    latency_table: Option<Arc<TargetLatencyTable>>,
+    models: HashMap<String, ModelEntryConfig>,
     rules: Vec<ModelRule>,
     default_targets: Vec<TargetSpec>,
     models_list_json: Bytes,
@@ -317,29 +481,85 @@ pub struct AiModelRouterPlugin {
 }
 
 impl AiModelRouterPlugin {
-    fn resolve_targets(&self, requested_model: &str) -> Option<Vec<AiTarget>> {
-        if let Some(specs) = self.models.get(requested_model) {
-            return Some(specs.iter().map(|s| s.resolve(requested_model)).collect());
+    fn resolve_targets_with_strategy(
+        &self,
+        requested_model: &str,
+    ) -> Option<(String, RoutingStrategy, Vec<AiTarget>)> {
+        if let Some(entry) = self.models.get(requested_model) {
+            let strategy = entry.strategy(self.default_router_strategy);
+            let targets = entry
+                .targets()
+                .iter()
+                .map(|s| s.resolve(requested_model))
+                .collect();
+            return Some((format!("model:{requested_model}"), strategy, targets));
         }
         for rule in &self.rules {
             if wildcard_match(&rule.pattern, requested_model) {
-                return Some(
-                    rule.targets
-                        .iter()
-                        .map(|s| s.resolve(requested_model))
-                        .collect(),
-                );
+                let strategy = rule.strategy.unwrap_or(self.default_router_strategy);
+                let targets = rule
+                    .targets
+                    .iter()
+                    .map(|s| s.resolve(requested_model))
+                    .collect();
+                return Some((format!("rule:{}", rule.pattern), strategy, targets));
             }
         }
         if !self.default_targets.is_empty() {
-            return Some(
-                self.default_targets
-                    .iter()
-                    .map(|s| s.resolve(requested_model))
-                    .collect(),
-            );
+            let targets = self
+                .default_targets
+                .iter()
+                .map(|s| s.resolve(requested_model))
+                .collect();
+            return Some(("default".to_owned(), self.default_targets_strategy, targets));
         }
         None
+    }
+
+    fn apply_strategy(
+        &self,
+        group_key: &str,
+        strategy: RoutingStrategy,
+        targets: Vec<AiTarget>,
+        endpoint: AiEndpointKind,
+        requested_model: &str,
+        raw_body: &[u8],
+    ) -> Vec<AiTarget> {
+        if targets.len() <= 1 {
+            return targets;
+        }
+        match strategy {
+            RoutingStrategy::Priority => targets,
+            RoutingStrategy::Weighted => {
+                let cursor = self
+                    .cursors
+                    .as_ref()
+                    .map(|c| c.next(group_key))
+                    .unwrap_or(0);
+                order_weighted_targets(targets, cursor)
+            }
+            RoutingStrategy::Latency => {
+                let Some(table) = &self.latency_table else {
+                    return targets;
+                };
+                let cursor = self
+                    .cursors
+                    .as_ref()
+                    .map(|c| c.next(group_key))
+                    .unwrap_or(0);
+                let now_ms = self.clock.now_ms();
+                table.order_targets(targets, &self.latency_cfg, now_ms, cursor)
+            }
+            RoutingStrategy::Cost => order_cost_targets(
+                targets,
+                &self.pricing_catalog,
+                endpoint,
+                requested_model,
+                raw_body,
+                self.cost_estimated_output_tokens,
+                self.unknown_cost_policy,
+            ),
+        }
     }
 }
 
@@ -349,10 +569,17 @@ impl HttpPlugin for AiModelRouterPlugin {
     }
 
     fn hook_mask(&self) -> HookMask {
-        HookMask::ON_REQUEST_HEADERS
+        let mut mask = HookMask::ON_REQUEST_HEADERS
             | HookMask::REQUEST_BODY_BUFFERED
             | HookMask::ON_ROUTE
-            | HookMask::ON_UPSTREAM_SELECT
+            | HookMask::ON_UPSTREAM_SELECT;
+        if self.include_routing_headers {
+            mask |= HookMask::ON_RESPONSE_HEADERS;
+        }
+        if self.latency_table.is_some() {
+            mask |= HookMask::ON_COMPLETE;
+        }
+        mask
     }
 
     fn max_request_body_bytes(&self) -> Option<usize> {
@@ -376,7 +603,7 @@ impl HttpPlugin for AiModelRouterPlugin {
                 ctx.insert_ext(DetectedEndpoint(AiEndpointKind::ModelsList));
                 let payload = match ctx.get_ext::<AiKeyPolicy>() {
                     Some(policy) if !policy.allowed_models.is_empty() => {
-                        let filtered: Vec<serde_json::Value> = self
+                        let filtered: Vec<Value> = self
                             .catalog_entries
                             .iter()
                             .filter(|(id, _)| policy.allows_model(id))
@@ -463,8 +690,8 @@ impl HttpPlugin for AiModelRouterPlugin {
             .map(|d| d.0)
             .unwrap_or(AiEndpointKind::ChatCompletions);
 
-        let probe: ModelRequestProbe = match serde_json::from_slice(body) {
-            Ok(p) => p,
+        let parsed: Value = match serde_json::from_slice(body) {
+            Ok(v) => v,
             Err(err) => {
                 let resp = endpoint_error_response(
                     endpoint,
@@ -477,7 +704,12 @@ impl HttpPlugin for AiModelRouterPlugin {
             }
         };
 
-        let Some(model) = probe.model.filter(|m| !m.trim().is_empty()) else {
+        let Some(model) = parsed
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|m| !m.trim().is_empty())
+            .map(str::to_owned)
+        else {
             let resp = endpoint_error_response(
                 endpoint,
                 StatusCode::BAD_REQUEST,
@@ -487,6 +719,11 @@ impl HttpPlugin for AiModelRouterPlugin {
             );
             return HookResult::Ready(Flow::Respond(resp));
         };
+
+        let probe_stream = parsed
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
         // Enforce virtual key model ACL before routing or local count_tokens.
         if let Some(policy) = ctx.get_ext::<AiKeyPolicy>()
@@ -518,7 +755,10 @@ impl HttpPlugin for AiModelRouterPlugin {
             .get_ext::<AiKeyPolicy>()
             .and_then(|p| p.override_targets(&model));
 
-        let Some(all_targets) = override_targets.or_else(|| self.resolve_targets(&model)) else {
+        let Some((group_key, strategy, all_targets)) = override_targets
+            .map(|t| (format!("override:{model}"), RoutingStrategy::Priority, t))
+            .or_else(|| self.resolve_targets_with_strategy(&model))
+        else {
             let resp = endpoint_error_response(
                 endpoint,
                 StatusCode::NOT_FOUND,
@@ -553,43 +793,67 @@ impl HttpPlugin for AiModelRouterPlugin {
             return HookResult::Ready(Flow::Respond(resp));
         }
 
-        let required_cap = match endpoint {
-            AiEndpointKind::Embeddings => Some(AiCapability::Embeddings),
-            AiEndpointKind::ChatCompletions
-            | AiEndpointKind::AnthropicMessages
-            | AiEndpointKind::AnthropicCountTokens
-            | AiEndpointKind::OpenAiResponses => Some(AiCapability::Chat),
-            AiEndpointKind::ModelsList | AiEndpointKind::ModelRetrieve => None,
-        };
-
-        let targets: Vec<AiTarget> = match required_cap {
-            Some(cap) => allowed_targets
+        // Enforce multi-protocol capability guards before ordering/failover.
+        let required_caps = detect_required_capabilities(endpoint, &parsed);
+        let capable_targets: Vec<AiTarget> = if required_caps.is_empty() {
+            allowed_targets
+        } else {
+            allowed_targets
                 .into_iter()
-                .filter(|t| t.supports(cap))
-                .collect(),
-            None => allowed_targets,
+                .filter(|t| t.supports_all(&required_caps))
+                .collect()
         };
 
-        if targets.is_empty() {
+        if capable_targets.is_empty() {
+            let (code, msg) = if required_caps.len() == 1
+                && matches!(
+                    required_caps[0],
+                    AiCapability::Embeddings | AiCapability::Chat
+                ) {
+                (
+                    "unsupported_endpoint",
+                    format!("No configured targets for model `{model}` support `{endpoint}`"),
+                )
+            } else {
+                let cap_names: Vec<&str> = required_caps.iter().map(|c| c.as_str()).collect();
+                (
+                    "unsupported_capability",
+                    format!(
+                        "No configured targets for model `{model}` support required capabilities: [{}]",
+                        cap_names.join(", ")
+                    ),
+                )
+            };
             let resp = endpoint_error_response(
                 endpoint,
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
-                Some("unsupported_endpoint"),
-                &format!("No configured targets for model `{model}` support `{endpoint}`"),
+                Some(code),
+                &msg,
             );
             return HookResult::Ready(Flow::Respond(resp));
         }
 
+        // Rank/order eligible targets according to the active smart routing strategy.
+        let targets = self.apply_strategy(
+            &group_key,
+            strategy,
+            capable_targets,
+            endpoint,
+            &model,
+            body,
+        );
+
         let effective_stream = match endpoint {
             AiEndpointKind::Embeddings => false,
-            _ => probe.stream,
+            _ => probe_stream,
         };
 
-        ctx.insert_ext(AiRequestMeta::new(
+        ctx.insert_ext(AiRequestMeta::with_strategy(
             endpoint,
             model,
             effective_stream,
+            strategy,
             targets,
         ));
         HookResult::Ready(Flow::Continue)
@@ -625,6 +889,84 @@ impl HttpPlugin for AiModelRouterPlugin {
         }
         HookResult::Ready(Flow::Continue)
     }
+
+    fn on_response_headers<'a>(
+        &'a self,
+        ctx: &'a mut RequestCtx,
+        res: &'a mut ResponseHead,
+    ) -> HookResult<'a, Flow> {
+        if self.include_routing_headers
+            && let Some(meta) = ctx.get_ext::<AiRequestMeta>()
+        {
+            if let Ok(val) = HeaderValue::from_str(meta.routing_strategy.as_str()) {
+                res.headers
+                    .insert(HeaderName::from_static("x-shunt-routing-strategy"), val);
+            }
+            if let Some(target) = meta.active_target() {
+                if let Ok(val) = HeaderValue::from_str(&target.provider) {
+                    res.headers
+                        .insert(HeaderName::from_static("x-shunt-selected-provider"), val);
+                }
+                if let Ok(val) = HeaderValue::from_str(&target.model) {
+                    res.headers
+                        .insert(HeaderName::from_static("x-shunt-selected-model"), val);
+                }
+            }
+        }
+        HookResult::Ready(Flow::Continue)
+    }
+
+    fn on_complete<'a>(
+        &'a self,
+        ctx: &'a RequestCtx,
+        summary: &'a RequestSummary,
+    ) -> HookResult<'a, ()> {
+        let Some(table) = &self.latency_table else {
+            return HookResult::Ready(());
+        };
+        if summary.attempts == 0 {
+            return HookResult::Ready(());
+        }
+        let Some(meta) = ctx.get_ext::<AiRequestMeta>() else {
+            return HookResult::Ready(());
+        };
+
+        let now_ms = self.clock.now_ms();
+        let alpha = self.latency_cfg.ewma_alpha;
+
+        // Penalize every target that failed during failover attempts.
+        if let Some(history) = ctx.get_ext::<AiFailoverHistory>() {
+            for ev in &history.events {
+                let key = TargetLatencyTable::target_key(&ev.provider, &ev.upstream, &ev.model);
+                table.record_error(&key, alpha, now_ms);
+            }
+        }
+
+        // Record final attempt outcome and latency (prefer true TTFT -> TTFB -> total_duration).
+        if let Some(target) = meta.active_target() {
+            let key =
+                TargetLatencyTable::target_key(&target.provider, &target.upstream, &target.model);
+            let status_code = summary.status.map(|s| s.as_u16());
+            let is_error = summary.error.is_some()
+                || summary.aborted_mid_stream
+                || matches!(status_code, None | Some(429 | 500..=599));
+
+            if is_error {
+                table.record_error(&key, alpha, now_ms);
+            } else {
+                let ttft = ctx
+                    .get_ext::<AiUsage>()
+                    .and_then(|u| u.first_token_at)
+                    .map(|t| t.saturating_duration_since(ctx.started_at))
+                    .or(summary.ttfb)
+                    .unwrap_or(summary.total_duration);
+                let latency_ms = ttft.as_secs_f64() * 1_000.0;
+                table.record_success(&key, latency_ms, alpha, now_ms);
+            }
+        }
+
+        HookResult::Ready(())
+    }
 }
 
 #[cfg(test)]
@@ -647,39 +989,46 @@ mod tests {
         let mut models = HashMap::new();
         models.insert(
             "smart".to_owned(),
-            vec![TargetSpec {
+            ModelEntryConfig::Targets(vec![TargetSpec {
                 provider: "openai".to_owned(),
                 upstream: "openai".to_owned(),
                 model: Some("gpt-4o".to_owned()),
                 endpoint_override: None,
                 capabilities: Vec::new(),
-            }],
+                weight: 1,
+            }]),
         );
         models.insert(
             "fast".to_owned(),
-            vec![TargetSpec {
-                provider: "groq".to_owned(),
-                upstream: "groq".to_owned(),
-                model: Some("llama-3.3-70b".to_owned()),
-                endpoint_override: None,
-                capabilities: Vec::new(),
-            }],
+            ModelEntryConfig::Detailed {
+                strategy: Some(RoutingStrategy::Weighted),
+                targets: vec![TargetSpec {
+                    provider: "groq".to_owned(),
+                    upstream: "groq".to_owned(),
+                    model: Some("llama-3.3-70b".to_owned()),
+                    endpoint_override: None,
+                    capabilities: Vec::new(),
+                    weight: 5,
+                }],
+            },
         );
         let rules = vec![ModelRule {
             pattern: "claude-*".to_owned(),
+            strategy: None,
             targets: vec![TargetSpec {
                 provider: "anthropic".to_owned(),
                 upstream: "anthropic".to_owned(),
                 model: None,
                 endpoint_override: None,
                 capabilities: Vec::new(),
+                weight: 1,
             }],
         }];
         let exposed = vec!["claude-3-5-sonnet-20241022".to_owned(), "smart".to_owned()];
 
         let (list_bytes, by_id, entries) = compile_models_catalog(&models, &rules, &[], &exposed);
         assert_eq!(entries.len(), 3);
-        let list: serde_json::Value = serde_json::from_slice(&list_bytes).unwrap();
+        let list: Value = serde_json::from_slice(&list_bytes).unwrap();
         let data = list["data"].as_array().unwrap();
         let ids: Vec<&str> = data.iter().map(|d| d["id"].as_str().unwrap()).collect();
         assert_eq!(ids, vec!["claude-3-5-sonnet-20241022", "fast", "smart"]);
@@ -689,5 +1038,34 @@ mod tests {
         assert!(by_id.contains_key("claude-3-5-sonnet-20241022"));
         assert!(by_id.contains_key("fast"));
         assert!(by_id.contains_key("smart"));
+    }
+
+    #[test]
+    fn hook_mask_stays_minimal_when_priority_only() {
+        let state = Arc::new(shunt_plugin_sdk::StateStore::new());
+        let touched = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+        let ctx = BuildContext::new("route:ai:router", state, touched);
+
+        let priority_cfg = PluginConfig::new(json!({
+            "models": {
+                "m": [{ "provider": "openai", "upstream": "openai", "model": "gpt-4o" }]
+            }
+        }));
+        let p1 = AiModelRouterFactory.build(&priority_cfg, &ctx).unwrap();
+        assert!(!p1.hook_mask().contains(HookMask::ON_COMPLETE));
+        assert!(!p1.hook_mask().contains(HookMask::ON_RESPONSE_HEADERS));
+
+        let latency_cfg = PluginConfig::new(json!({
+            "include_routing_headers": true,
+            "models": {
+                "m": {
+                    "strategy": "latency",
+                    "targets": [{ "provider": "openai", "upstream": "openai", "model": "gpt-4o" }]
+                }
+            }
+        }));
+        let p2 = AiModelRouterFactory.build(&latency_cfg, &ctx).unwrap();
+        assert!(p2.hook_mask().contains(HookMask::ON_COMPLETE));
+        assert!(p2.hook_mask().contains(HookMask::ON_RESPONSE_HEADERS));
     }
 }

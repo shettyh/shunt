@@ -218,6 +218,12 @@ async fn build_mock_response(spec: &MockResponseSpec) -> Response<ReceiverStream
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
 
+    if let Some(delay_ms) = spec.delay_ms
+        && delay_ms > 0
+    {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
+
     let status = StatusCode::from_u16(spec.status.unwrap_or(200)).unwrap_or(StatusCode::OK);
     let mut builder = Response::builder().status(status);
 

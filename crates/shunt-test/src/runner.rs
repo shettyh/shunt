@@ -16,7 +16,7 @@ use shunt_ai::{AiMetrics, register_ai_plugins};
 use shunt_config::provider::sha256_hex;
 use shunt_config::{
     AdminServer, ConfigError, ConfigProvider, FileConfigProvider, GatewayConfig, LoadedConfig,
-    MetricsRenderer, ReloadController, SnapshotCompiler,
+    MetricsRenderer, ReloadController, SnapshotCompiler, UpstreamEndpointIr,
 };
 use shunt_core::{GatewayServer, RuntimeRegistry};
 use shunt_plugin_sdk::{ManualClock, PluginRegistry};
@@ -180,7 +180,22 @@ fn rebind_config_to_mocks(
 
     for up in &mut config.upstreams {
         if let Some(endpoints) = mock_endpoints.get(&up.name) {
-            up.endpoints = endpoints.clone();
+            let prev = std::mem::take(&mut up.endpoints);
+            up.endpoints = endpoints
+                .iter()
+                .enumerate()
+                .map(|(idx, url)| {
+                    let weight = prev.get(idx).map(UpstreamEndpointIr::weight).unwrap_or(1);
+                    if weight == 1 {
+                        UpstreamEndpointIr::Url(url.clone())
+                    } else {
+                        UpstreamEndpointIr::Weighted {
+                            url: url.clone(),
+                            weight,
+                        }
+                    }
+                })
+                .collect();
         }
     }
 }
@@ -420,8 +435,18 @@ async fn run_case(
 
     let m_clone = Arc::clone(&metrics);
     let ai_m_clone = Arc::clone(&ai_metrics);
+    let ctrl_metrics = Arc::clone(&controller);
     let render_all_metrics: MetricsRenderer = Arc::new(move || {
         let mut out = m_clone.render_prometheus();
+        let up_out = ctrl_metrics
+            .current_snapshot()
+            .render_upstream_health_prometheus();
+        if !up_out.is_empty() {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&up_out);
+        }
         let ai_out = ai_m_clone.render_prometheus();
         if !ai_out.is_empty() {
             if !out.is_empty() && !out.ends_with('\n') {
@@ -484,6 +509,12 @@ async fn run_case(
 
         if let Some(ms) = step.advance_clock_ms {
             clock.advance_ms(ms);
+        }
+
+        if let Some(ms) = step.wait_ms
+            && ms > 0
+        {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
         }
 
         if let Some(new_toml) = &step.reload_config_inline {

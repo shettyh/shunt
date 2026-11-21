@@ -1120,4 +1120,102 @@ proptest! {
         let usd = shunt_ai::nano_usd_to_usd(cost_with_cache);
         prop_assert!(usd.is_finite() && usd >= 0.0);
     }
+
+    #[test]
+    fn weighted_target_ordering_preserves_set_and_ratios(
+        weights in prop::collection::vec(1u32..30, 2..6),
+    ) {
+        let targets: Vec<shunt_ai::AiTarget> = weights
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| shunt_ai::AiTarget {
+                provider: format!("p{i}"),
+                upstream: format!("u{i}"),
+                model: format!("m{i}"),
+                endpoint_override: None,
+                capabilities: Vec::new(),
+                weight: w,
+            })
+            .collect();
+        let total_w: usize = weights.iter().map(|&w| w as usize).sum();
+        let mut primary_counts = vec![0usize; weights.len()];
+
+        for c in 0..total_w {
+            let ordered = shunt_ai::order_weighted_targets(targets.clone(), c);
+            prop_assert_eq!(ordered.len(), targets.len());
+            // Every target appears exactly once in the failover chain.
+            let mut seen = std::collections::HashSet::new();
+            for t in &ordered {
+                prop_assert!(seen.insert(t.provider.clone()));
+            }
+            let first_idx: usize = ordered[0].provider[1..].parse().unwrap();
+            primary_counts[first_idx] += 1;
+        }
+
+        for (i, &w) in weights.iter().enumerate() {
+            prop_assert_eq!(primary_counts[i], w as usize);
+        }
+    }
+
+    #[test]
+    fn cost_ordering_is_monotonic_non_decreasing(
+        prices in prop::collection::vec(0.0f64..50.0, 2..6),
+    ) {
+        let mut overrides = HashMap::new();
+        let mut targets = Vec::new();
+        for (i, &p) in prices.iter().enumerate() {
+            let model = format!("cost-m-{i}");
+            overrides.insert(
+                model.clone(),
+                shunt_ai::ModelPricing::new(p, p * 2.0, None),
+            );
+            targets.push(shunt_ai::AiTarget {
+                provider: format!("p{i}"),
+                upstream: format!("u{i}"),
+                model,
+                endpoint_override: None,
+                capabilities: Vec::new(),
+                weight: 1,
+            });
+        }
+        let cat = shunt_ai::PricingCatalog::new(overrides, false, None).unwrap();
+        let body = br#"{"model":"alias","messages":[{"role":"user","content":"hello world"}]}"#;
+        let ordered = shunt_ai::order_cost_targets(
+            targets,
+            &cat,
+            shunt_ai::AiEndpointKind::ChatCompletions,
+            "alias",
+            body,
+            256,
+            shunt_ai::UnknownCostPolicy::Last,
+        );
+        let est = shunt_ai::estimate_request_tokens(shunt_ai::AiEndpointKind::ChatCompletions, body);
+        let costs: Vec<u64> = ordered
+            .iter()
+            .map(|t| {
+                cat.lookup(&t.model, "alias")
+                    .unwrap()
+                    .cost_nano_usd(est.input_tokens, 0, 256)
+            })
+            .collect();
+        for pair in costs.windows(2) {
+            prop_assert!(pair[0] <= pair[1]);
+        }
+    }
+
+    #[test]
+    fn capability_detector_never_panics_on_arbitrary_json_bytes(
+        raw in prop::collection::vec(any::<u8>(), 0..256),
+    ) {
+        if let Ok(val) = serde_json::from_slice::<Value>(&raw) {
+            for ep in [
+                shunt_ai::AiEndpointKind::ChatCompletions,
+                shunt_ai::AiEndpointKind::AnthropicMessages,
+                shunt_ai::AiEndpointKind::OpenAiResponses,
+                shunt_ai::AiEndpointKind::Embeddings,
+            ] {
+                let _ = shunt_ai::detect_required_capabilities(ep, &val);
+            }
+        }
+    }
 }

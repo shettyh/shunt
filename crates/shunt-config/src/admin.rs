@@ -131,6 +131,33 @@ struct HealthBody<'a> {
 }
 
 #[derive(Serialize)]
+struct EndpointHealthBody {
+    url: String,
+    weight: u32,
+    healthy: bool,
+    active_healthy: bool,
+    passive_healthy: bool,
+    passive_failures: usize,
+    active_probes_ok: u64,
+    active_probes_err: u64,
+    last_probe_latency_us: u64,
+}
+
+#[derive(Serialize)]
+struct UpstreamHealthBody {
+    name: String,
+    pool_id: u64,
+    active_health_check: bool,
+    endpoints: Vec<EndpointHealthBody>,
+}
+
+#[derive(Serialize)]
+struct UpstreamsResponseBody {
+    version: u64,
+    upstreams: Vec<UpstreamHealthBody>,
+}
+
+#[derive(Serialize)]
 struct ReloadOkBody {
     reloaded: bool,
     snapshot: SnapshotInspect,
@@ -163,6 +190,37 @@ fn handle_admin_request(
             let snap = controller.current_inspect();
             json_response(StatusCode::OK, &*snap)
         }
+        (&Method::GET, "/upstreams") => {
+            let snapshot = controller.current_snapshot();
+            let reports = snapshot.upstream_health_reports();
+            let body = UpstreamsResponseBody {
+                version: snapshot.version,
+                upstreams: reports
+                    .into_iter()
+                    .map(|r| UpstreamHealthBody {
+                        name: r.name,
+                        pool_id: r.pool_id,
+                        active_health_check: r.active_health_check,
+                        endpoints: r
+                            .endpoints
+                            .into_iter()
+                            .map(|ep| EndpointHealthBody {
+                                url: ep.url,
+                                weight: ep.weight,
+                                healthy: ep.healthy,
+                                active_healthy: ep.active_healthy,
+                                passive_healthy: ep.passive_healthy,
+                                passive_failures: ep.passive_failures,
+                                active_probes_ok: ep.active_probes_ok,
+                                active_probes_err: ep.active_probes_err,
+                                last_probe_latency_us: ep.last_probe_latency_us,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            };
+            json_response(StatusCode::OK, &body)
+        }
         (&Method::GET, "/metrics") => {
             let rendered = metrics_renderer();
             Response::builder()
@@ -190,7 +248,7 @@ fn handle_admin_request(
                 },
             ),
         },
-        (_, "/health" | "/snapshot" | "/metrics" | "/reload") => {
+        (_, "/health" | "/snapshot" | "/upstreams" | "/metrics" | "/reload") => {
             text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
         }
         _ => text_response(StatusCode::NOT_FOUND, "not found"),

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,7 +8,7 @@ use shunt_plugin_sdk::{HookMask, HttpPlugin};
 
 use crate::error::CoreError;
 use crate::registry::RuntimeRegistry;
-use crate::upstream::{UpstreamConfig, UpstreamPool, UpstreamPoolKey};
+use crate::upstream::{EndpointHealthSnapshot, UpstreamConfig, UpstreamPool, UpstreamPoolKey};
 
 /// Default request body buffer limit (1 MiB) when `REQUEST_BODY_BUFFERED` is active
 /// and no explicit cap was configured.
@@ -252,6 +253,15 @@ pub struct GatewaySnapshot {
     pub upstreams: HashMap<String, Arc<UpstreamPool>>,
 }
 
+/// Live health report for a single compiled upstream pool.
+#[derive(Debug, Clone)]
+pub struct UpstreamHealthReport {
+    pub name: String,
+    pub pool_id: u64,
+    pub active_health_check: bool,
+    pub endpoints: Vec<EndpointHealthSnapshot>,
+}
+
 impl GatewaySnapshot {
     /// Finds the first matching compiled route for the incoming request.
     pub fn match_route<B>(&self, req: &Request<B>) -> Option<&Arc<CompiledRoute>> {
@@ -262,6 +272,91 @@ impl GatewaySnapshot {
     pub fn upstream(&self, name: &str) -> Option<&Arc<UpstreamPool>> {
         self.upstreams.get(name)
     }
+
+    /// Collects live health & weight snapshots across all upstreams, sorted deterministically by name.
+    pub fn upstream_health_reports(&self) -> Vec<UpstreamHealthReport> {
+        let mut reports: Vec<UpstreamHealthReport> = self
+            .upstreams
+            .iter()
+            .map(|(name, pool)| UpstreamHealthReport {
+                name: name.clone(),
+                pool_id: pool.pool_id(),
+                active_health_check: pool.active_health_check().is_some(),
+                endpoints: pool.endpoint_health_snapshots(),
+            })
+            .collect();
+        reports.sort_by(|a, b| a.name.cmp(&b.name));
+        reports
+    }
+
+    /// Renders live upstream endpoint health gauges and active probe counters in Prometheus
+    /// exposition text format (v0.0.4).
+    pub fn render_upstream_health_prometheus(&self) -> String {
+        let reports = self.upstream_health_reports();
+        if reports.is_empty() {
+            return String::new();
+        }
+
+        let mut out = String::with_capacity(512);
+        out.push_str(
+            "# HELP shunt_upstream_endpoint_healthy Current effective endpoint health (1=healthy, 0=unhealthy).\n",
+        );
+        out.push_str("# TYPE shunt_upstream_endpoint_healthy gauge\n");
+
+        let mut has_probes = false;
+        for r in &reports {
+            for ep in &r.endpoints {
+                let val = if ep.healthy { 1 } else { 0 };
+                let _ = writeln!(
+                    out,
+                    "shunt_upstream_endpoint_healthy{{upstream=\"{}\",endpoint=\"{}\"}} {}",
+                    escape_prom_label(&r.name),
+                    escape_prom_label(&ep.url),
+                    val
+                );
+                if ep.active_probes_ok > 0 || ep.active_probes_err > 0 {
+                    has_probes = true;
+                }
+            }
+        }
+
+        if has_probes {
+            out.push_str(
+                "# HELP shunt_upstream_active_probes_total Total active upstream health probes executed.\n",
+            );
+            out.push_str("# TYPE shunt_upstream_active_probes_total counter\n");
+            for r in &reports {
+                for ep in &r.endpoints {
+                    if ep.active_probes_ok > 0 {
+                        let _ = writeln!(
+                            out,
+                            "shunt_upstream_active_probes_total{{upstream=\"{}\",endpoint=\"{}\",result=\"success\"}} {}",
+                            escape_prom_label(&r.name),
+                            escape_prom_label(&ep.url),
+                            ep.active_probes_ok
+                        );
+                    }
+                    if ep.active_probes_err > 0 {
+                        let _ = writeln!(
+                            out,
+                            "shunt_upstream_active_probes_total{{upstream=\"{}\",endpoint=\"{}\",result=\"failure\"}} {}",
+                            escape_prom_label(&r.name),
+                            escape_prom_label(&ep.url),
+                            ep.active_probes_err
+                        );
+                    }
+                }
+            }
+        }
+
+        out
+    }
+}
+
+fn escape_prom_label(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 /// Compiles routes, global plugins, and upstreams into an immutable [`GatewaySnapshot`],

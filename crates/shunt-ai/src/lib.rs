@@ -26,6 +26,7 @@ pub mod ingress;
 pub mod model_router;
 pub mod pricing;
 pub mod provider_adapter;
+pub mod routing;
 pub mod sse;
 pub mod token_rate_limit;
 pub mod tokens;
@@ -62,12 +63,19 @@ pub use ingress::responses::{
     ChatToResponsesSseTranslator, chat_to_responses_response, responses_to_chat_request,
     rewrite_openai_responses_request,
 };
-pub use model_router::{AiModelRouterFactory, AiModelRouterPlugin, ModelRule, TargetSpec};
+pub use model_router::{
+    AiModelRouterFactory, AiModelRouterPlugin, ModelEntryConfig, ModelRule, TargetSpec,
+};
 pub use pricing::{
     ModelPricing, NANO_USD_PER_USD, PricingCatalog, nano_usd_to_usd, usd_to_nano_usd,
 };
 pub use provider_adapter::{
     AiProviderAdapterFactory, AiProviderAdapterPlugin, ProviderAuthConfig, ProviderInstanceConfig,
+};
+pub use routing::{
+    LatencyRoutingConfig, RoutingCursorTable, TargetLatencyStats, TargetLatencyTable,
+    UnknownCostPolicy, detect_required_capabilities, order_cost_targets, order_weighted_targets,
+    pick_weighted_primary,
 };
 pub use sse::{SseEvent, SseParser};
 pub use token_rate_limit::{
@@ -80,7 +88,7 @@ pub use translate::{
 };
 pub use types::{
     AiCapability, AiEndpointKind, AiFailoverHistory, AiKeyPolicy, AiRequestMeta, AiTarget, AiUsage,
-    AiUsageReport, BudgetWindow, DetectedEndpoint, FailoverEvent, ProviderDialect,
+    AiUsageReport, BudgetWindow, DetectedEndpoint, FailoverEvent, ProviderDialect, RoutingStrategy,
     anthropic_error_response, endpoint_error_response, openai_error_response, wildcard_match,
 };
 pub use usage_tracker::{

@@ -355,4 +355,57 @@ proptest! {
     ) {
         let _ = shunt_core::decode_resp_frame(&raw);
     }
+
+    #[test]
+    fn swrr_schedule_preserves_exact_weight_ratios(
+        weights in prop::collection::vec(1u32..50, 2..6),
+    ) {
+        let schedule = shunt_core::build_swrr_schedule(&weights);
+        if weights.iter().all(|&w| w == weights[0]) {
+            prop_assert!(schedule.is_empty());
+        } else {
+            prop_assert!(!schedule.is_empty());
+            let total_w: u64 = weights.iter().map(|&w| w as u64).sum();
+            let slen = schedule.len() as u64;
+            for (idx, &w) in weights.iter().enumerate() {
+                let count = schedule.iter().filter(|&&i| i == idx).count() as u64;
+                // Exact proportion: count / slen == w / total_w
+                prop_assert_eq!(count * total_w, (w as u64) * slen);
+            }
+        }
+    }
+
+    #[test]
+    fn select_weighted_endpoint_index_respects_3_pass_health_priority(
+        weights in prop::collection::vec(1u32..40, 1..8),
+        healthy_raw in prop::collection::vec(any::<bool>(), 1..8),
+        cursor in 0usize..500,
+        tried in prop::collection::vec(0usize..8, 0..8),
+    ) {
+        let len = weights.len().min(healthy_raw.len());
+        let weights = &weights[..len];
+        let healthy = &healthy_raw[..len];
+        let schedule = shunt_core::build_swrr_schedule(weights);
+
+        let chosen = shunt_core::select_weighted_endpoint_index(
+            cursor,
+            weights,
+            &schedule,
+            &tried,
+            healthy,
+        );
+        prop_assert!(chosen < len);
+
+        let has_healthy_untried = (0..len).any(|i| !tried.contains(&i) && healthy[i]);
+        let has_untried = (0..len).any(|i| !tried.contains(&i));
+        let has_healthy = healthy.iter().any(|&h| h);
+
+        if has_healthy_untried {
+            prop_assert!(!tried.contains(&chosen) && healthy[chosen]);
+        } else if has_untried {
+            prop_assert!(!tried.contains(&chosen));
+        } else if has_healthy {
+            prop_assert!(healthy[chosen]);
+        }
+    }
 }
