@@ -1,0 +1,33 @@
+# Shunt RFCs
+
+This directory contains Request for Comments (RFC) design documents for **Shunt**. Each RFC captures the motivation, concrete design, invariants, and **rejected alternatives** for a major architectural seam so users and contributors can understand *why* Shunt is built the way it is—not just *how* it works.
+
+## Index
+
+| RFC | Title | Status | Crates |
+| --- | --- | --- | --- |
+| [0001](./0001-plugin-sdk-and-lifecycle.md) | Plugin SDK & Request Lifecycle | Implemented | `shunt-plugin-sdk`, `shunt-core` |
+| [0002](./0002-atomic-snapshots-and-state-lifecycle.md) | Atomic Snapshots, Pool Reuse & State Lifecycle | Implemented | `shunt-core`, `shunt-plugin-sdk` |
+| [0003](./0003-config-ir-and-admin-plane.md) | Config IR, Hot Reload, Admin API & Dev Ergonomics | Implemented | `shunt-config`, `shunt-plugins`, `shunt-cli` |
+| [0004](./0004-shunt-ai-plugin-pack.md) | `shunt-ai`: Multi-Provider AI Gateway as a Pure Plugin Pack | Implemented | `shunt-ai` |
+| [0005](./0005-benchmarks-and-hardening.md) | Benchmark Harness vs. Envoy & Caddy & Hardening | Draft | `benches/` |
+
+## Status Definitions
+
+- **Draft**: Under active design or pending implementation.
+- **Accepted**: Design agreed upon; ready for implementation.
+- **Implemented**: Shipped in the codebase and verified by tests.
+- **Superseded**: Replaced by a newer RFC (linked in the header).
+- **Rejected**: Explored and intentionally not pursued (kept for historical context).
+
+## Writing a New RFC
+
+Keep RFCs concise, concrete, and focused on a single architectural seam. Use the following sections:
+
+1. **Header**: Title, Status, Crates
+2. **Summary**: 2–4 sentences describing what this RFC introduces.
+3. **Motivation**: The problem or tension that drove the design.
+4. **Goals & Non-Goals**: Clear scope boundaries.
+5. **Design**: Core types, lifecycle/diagrams, and invariants.
+6. **Alternatives Considered & Rejected**: Other viable designs and why they were not chosen.
+7. **Future Work**: Known v2+ extensions enabled by the design.
