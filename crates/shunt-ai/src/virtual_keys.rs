@@ -216,6 +216,7 @@ impl PluginFactory for AiVirtualKeysFactory {
                         model: s.model.unwrap_or_else(|| model_pat.clone()),
                         endpoint_override: s.endpoint_override,
                         capabilities: s.capabilities,
+                        weight: s.weight.max(1),
                     })
                     .collect();
                 overrides.insert(model_pat, targets);

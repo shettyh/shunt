@@ -245,8 +245,40 @@ impl fmt::Display for AiEndpointKind {
     }
 }
 
+/// Smart routing strategy selecting and ordering candidate targets for an AI request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingStrategy {
+    /// Static configured failover order (default, zero extra state/hooks).
+    #[default]
+    Priority,
+    /// Smooth weighted round-robin canary/A-B split across eligible targets.
+    Weighted,
+    /// Dynamic EWMA TTFT/latency & error-rate-aware ranking with cold-start exploration.
+    Latency,
+    /// Cheapest-first estimated nano-USD ranking via [`crate::PricingCatalog`].
+    Cost,
+}
+
+impl RoutingStrategy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RoutingStrategy::Priority => "priority",
+            RoutingStrategy::Weighted => "weighted",
+            RoutingStrategy::Latency => "latency",
+            RoutingStrategy::Cost => "cost",
+        }
+    }
+}
+
+impl fmt::Display for RoutingStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Optional capability flags declared per target so incompatible targets are filtered out
-/// cleanly (e.g., skipping chat-only backends on `/v1/embeddings`).
+/// cleanly (e.g., skipping text-only backends on vision requests or chat-only on embeddings).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AiCapability {
@@ -254,7 +286,29 @@ pub enum AiCapability {
     Streaming,
     Tools,
     Vision,
+    JsonSchema,
+    Reasoning,
     Embeddings,
+}
+
+impl AiCapability {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            AiCapability::Chat => "chat",
+            AiCapability::Streaming => "streaming",
+            AiCapability::Tools => "tools",
+            AiCapability::Vision => "vision",
+            AiCapability::JsonSchema => "json_schema",
+            AiCapability::Reasoning => "reasoning",
+            AiCapability::Embeddings => "embeddings",
+        }
+    }
+}
+
+impl fmt::Display for AiCapability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Endpoint classification stored in `RequestCtx::extensions` during `on_request_headers`.
@@ -269,14 +323,21 @@ pub struct AiTarget {
     pub upstream: String,
     pub model: String,
     pub endpoint_override: Option<String>,
-    /// Optional capability override; when empty, defaults apply per endpoint/dialect.
+    /// Optional capability override; when empty, target is treated as unrestricted.
     pub capabilities: Vec<AiCapability>,
+    /// Relative traffic weight used by [`RoutingStrategy::Weighted`] (`>= 1`).
+    pub weight: u32,
 }
 
 impl AiTarget {
     /// Returns `true` if this target supports `capability` (or declares no capability filter).
     pub fn supports(&self, capability: AiCapability) -> bool {
         self.capabilities.is_empty() || self.capabilities.contains(&capability)
+    }
+
+    /// Returns `true` if this target supports every required capability.
+    pub fn supports_all(&self, required: &[AiCapability]) -> bool {
+        self.capabilities.is_empty() || required.iter().all(|c| self.capabilities.contains(c))
     }
 }
 
@@ -287,6 +348,7 @@ pub struct AiRequestMeta {
     pub endpoint: AiEndpointKind,
     pub requested_model: String,
     pub stream: bool,
+    pub routing_strategy: RoutingStrategy,
     pub targets: Vec<AiTarget>,
     pub active_target_index: usize,
     pub max_attempts: usize,
@@ -299,11 +361,28 @@ impl AiRequestMeta {
         stream: bool,
         targets: Vec<AiTarget>,
     ) -> Self {
+        Self::with_strategy(
+            endpoint,
+            requested_model,
+            stream,
+            RoutingStrategy::Priority,
+            targets,
+        )
+    }
+
+    pub fn with_strategy(
+        endpoint: AiEndpointKind,
+        requested_model: String,
+        stream: bool,
+        routing_strategy: RoutingStrategy,
+        targets: Vec<AiTarget>,
+    ) -> Self {
         let max_attempts = targets.len().max(1);
         Self {
             endpoint,
             requested_model,
             stream,
+            routing_strategy,
             targets,
             active_target_index: 0,
             max_attempts,

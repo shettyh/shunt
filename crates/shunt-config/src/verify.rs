@@ -194,6 +194,23 @@ pub fn verify_bundle(
         .collect();
     let upstream_names: HashSet<&str> = upstreams_by_name.keys().copied().collect();
 
+    // 1b. Per-upstream static checks (active health check timeout vs interval)
+    for up_ir in &bundle.config.upstreams {
+        if let Some(hc) = &up_ir.health_check
+            && hc.timeout_ms >= hc.interval_ms
+        {
+            diags.push(VerifyDiagnostic {
+                rule: "upstream.health_check_timeout".to_owned(),
+                severity: Severity::Warning,
+                subject: Some(up_ir.name.clone()),
+                message: format!(
+                    "upstream `{}` health_check.timeout_ms ({}) >= interval_ms ({})",
+                    up_ir.name, hc.timeout_ms, hc.interval_ms
+                ),
+            });
+        }
+    }
+
     // 2. Per-route static checks (timeouts, body cap, AI plugin ordering & targets)
     for (route_ir, compiled) in route_irs.iter().zip(compiled_routes.iter()) {
         // route.timeout_order
@@ -525,7 +542,11 @@ fn extract_ai_target_chains(cfg: &Value) -> Vec<(String, Vec<AiTargetRef>)> {
         let mut keys: Vec<&String> = models.keys().collect();
         keys.sort();
         for model_name in keys {
-            if let Some(arr) = models[model_name].as_array() {
+            let val = &models[model_name];
+            let arr_opt = val
+                .as_array()
+                .or_else(|| val.get("targets").and_then(Value::as_array));
+            if let Some(arr) = arr_opt {
                 let targets = extract_targets_info(arr);
                 chains.push((format!("models.{model_name}"), targets));
             }

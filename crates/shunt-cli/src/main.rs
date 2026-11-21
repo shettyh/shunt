@@ -369,10 +369,20 @@ async fn run_server(config_path: PathBuf, dev_mode: bool, watch_files: bool) -> 
         };
         let metrics_clone = Arc::clone(&metrics);
         let ai_metrics_clone = Arc::clone(&ai_metrics);
+        let controller_metrics = Arc::clone(&controller);
         let admin = AdminServer::new(
             Arc::clone(&controller),
             Arc::new(move || {
                 let mut out = metrics_clone.render_prometheus();
+                let up_out = controller_metrics
+                    .current_snapshot()
+                    .render_upstream_health_prometheus();
+                if !up_out.is_empty() {
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push_str(&up_out);
+                }
                 let ai_out = ai_metrics_clone.render_prometheus();
                 if !ai_out.is_empty() {
                     if !out.is_empty() && !out.ends_with('\n') {

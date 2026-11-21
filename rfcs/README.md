@@ -15,6 +15,7 @@ This directory contains Request for Comments (RFC) design documents for **Shunt*
 | [0007](./0007-generalized-ai-providers-and-endpoints.md) | Generalized AI Providers & Expanded OpenAI Endpoints | Implemented | `shunt-ai`, `shunt-plugin-sdk`, `shunt-core`, `shunt-test`, `fuzz` |
 | [0008](./0008-multi-protocol-ai-ingress.md) | Multi-Protocol AI Ingress (`/v1/messages` & `/v1/responses`) | Implemented | `shunt-ai`, `shunt-test`, `fuzz` |
 | [0009](./0009-virtual-keys-budgets-and-distributed-state.md) | Virtual Keys, Token Rate Limits, Cost Budgets & Distributed `StateStore` | Implemented | `shunt-plugin-sdk`, `shunt-core`, `shunt-config`, `shunt-plugins`, `shunt-ai`, `shunt-cli`, `shunt-test`, `fuzz` |
+| [0010](./0010-smart-routing-and-active-health-checks.md) | Smart Routing & Active Upstream Health Checks | Implemented | `shunt-core`, `shunt-config`, `shunt-ai`, `shunt-cli`, `shunt-test` |
 
 ## Status Definitions
 

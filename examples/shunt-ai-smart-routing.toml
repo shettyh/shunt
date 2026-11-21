@@ -1,0 +1,140 @@
+# Shunt AI Smart Routing & Active Health Checks Example (RFC 0010)
+#
+# Demonstrates:
+# - Weighted upstream pools & active HTTP health checks for local vLLM GPU clusters
+# - Weighted canary splits (90% frontier / 10% local vLLM)
+# - Latency / TTFT-aware dynamic routing with error penalties
+# - Cost-aware routing using Shunt's built-in PricingCatalog
+# - Multi-protocol capability guards (vision, tools, json_schema, reasoning, streaming)
+#
+# Verify statically:
+#   shunt verify -c examples/shunt-ai-smart-routing.toml
+
+[server]
+listen = "0.0.0.0:8080"
+drain_timeout_ms = 30000
+
+[admin]
+enabled = true
+listen = "127.0.0.1:9090"
+
+[[upstreams]]
+name = "openai"
+endpoints = ["https://api.openai.com"]
+connect_timeout_ms = 3000
+
+[[upstreams]]
+name = "anthropic"
+endpoints = ["https://api.anthropic.com"]
+connect_timeout_ms = 3000
+
+[[upstreams]]
+name = "gemini"
+endpoints = ["https://generativelanguage.googleapis.com"]
+connect_timeout_ms = 3000
+
+# Local vLLM / SGLang inference pool with weighted nodes and active HTTP health probes.
+[[upstreams]]
+name = "local_vllm"
+endpoints = [
+  { url = "http://127.0.0.1:8001", weight = 70 },
+  { url = "http://127.0.0.1:8002", weight = 30 },
+]
+connect_timeout_ms = 1000
+[upstreams.health_check]
+kind = "http"
+path = "/health"
+method = "GET"
+expected_statuses = [200]
+interval_ms = 5000
+timeout_ms = 1000
+unhealthy_threshold = 2
+healthy_threshold = 1
+
+[[routes]]
+id = "ai_smart_gateway"
+path_prefix = "/v1"
+upstream = "openai"
+max_body_bytes = 2097152
+max_attempts = 3
+response_headers_timeout_ms = 30000
+idle_chunk_timeout_ms = 60000
+
+[[routes.plugins]]
+name = "ai-model-router"
+id = "smart-router"
+[routes.plugins.config]
+include_routing_headers = true
+use_builtin_pricing = true
+unknown_cost_policy = "last"
+
+[routes.plugins.config.latency]
+ewma_alpha = 0.3
+error_penalty_weight = 5.0
+min_samples = 1
+stale_after_ms = 60000
+
+# Override local self-hosted model price to $0.00 so `cost` routing can rank it cleanly.
+[routes.plugins.config.pricing."qwen-2.5-72b"]
+input_per_million_usd = 0.0
+output_per_million_usd = 0.0
+
+# 1. Weighted canary split (90% Claude Sonnet / 10% local vLLM) with capability guards:
+#    vision requests automatically skip local_vllm (which lacks `vision`).
+[routes.plugins.config.models.canary]
+strategy = "weighted"
+targets = [
+  { provider = "anthropic", upstream = "anthropic", model = "claude-sonnet-4-20250514", weight = 90, capabilities = ["chat", "streaming", "tools", "vision", "reasoning"] },
+  { provider = "vllm", upstream = "local_vllm", model = "qwen-2.5-72b", weight = 10, capabilities = ["chat", "streaming", "tools"] },
+]
+
+# 2. Latency / TTFT-aware routing across fast frontier models.
+[routes.plugins.config.models.fastest]
+strategy = "latency"
+targets = [
+  { provider = "openai", upstream = "openai", model = "gpt-4o-mini", capabilities = ["chat", "streaming", "tools", "vision", "json_schema"] },
+  { provider = "gemini", upstream = "gemini", model = "gemini-2.5-flash", capabilities = ["chat", "streaming", "tools", "vision", "json_schema"] },
+]
+
+# 3. Cost-aware routing: picks cheapest capable tier first, fails over upward on 429/5xx.
+[routes.plugins.config.models.cheapest]
+strategy = "cost"
+targets = [
+  { provider = "openai", upstream = "openai", model = "gpt-4o", capabilities = ["chat", "streaming", "tools", "vision", "json_schema"] },
+  { provider = "openai", upstream = "openai", model = "gpt-4o-mini", capabilities = ["chat", "streaming", "tools", "vision", "json_schema"] },
+  { provider = "gemini", upstream = "gemini", model = "gemini-2.0-flash", capabilities = ["chat", "streaming", "tools", "vision"] },
+]
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+id = "adapter"
+[routes.plugins.config.providers.openai]
+dialect = "openai_compatible"
+auth = { type = "bearer", api_key = "env:OPENAI_API_KEY" }
+
+[routes.plugins.config.providers.anthropic]
+dialect = "anthropic"
+auth = { type = "header", header = "x-api-key", api_key = "env:ANTHROPIC_API_KEY" }
+
+[routes.plugins.config.providers.gemini]
+dialect = "gemini"
+auth = { type = "header", header = "x-goog-api-key", api_key = "env:GEMINI_API_KEY" }
+
+[routes.plugins.config.providers.vllm]
+dialect = "openai_compatible"
+auth = { type = "none" }
+
+[[routes.plugins]]
+name = "ai-failover"
+id = "failover"
+[routes.plugins.config]
+retry_statuses = [429, 500, 502, 503, 504, 529]
+cooldown_ms = 15000
+failure_threshold = 2
+respect_retry_after = true
+
+[[routes.plugins]]
+name = "ai-usage-tracker"
+id = "usage"
+[routes.plugins.config]
+log_usage = true

@@ -1,11 +1,13 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use http::Uri;
+use http::header::{HeaderName, HeaderValue};
+use http::{Method, Uri};
+use http_body_util::BodyExt;
 use hyper::rt::{Read, ReadBufCursor, Write};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::{Connected, Connection};
@@ -21,12 +23,112 @@ use crate::body::ShuntBody;
 use crate::error::CoreError;
 use crate::tls::UpstreamTlsConfig;
 
+/// Maximum precomputed smooth weighted round-robin schedule length.
+/// Larger co-prime weight sums fall back to deterministic cumulative-weight selection.
+pub const MAX_SWRR_SCHEDULE_LEN: usize = 4096;
+
+/// Single upstream endpoint with a relative selection weight (`>= 1`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UpstreamEndpoint {
+    pub url: String,
+    pub weight: u32,
+}
+
+impl UpstreamEndpoint {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            weight: 1,
+        }
+    }
+
+    pub fn with_weight(url: impl Into<String>, weight: u32) -> Self {
+        Self {
+            url: url.into(),
+            weight: weight.max(1),
+        }
+    }
+}
+
+impl From<String> for UpstreamEndpoint {
+    fn from(url: String) -> Self {
+        Self::new(url)
+    }
+}
+
+impl From<&str> for UpstreamEndpoint {
+    fn from(url: &str) -> Self {
+        Self::new(url)
+    }
+}
+
+/// Active health probe protocol configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ActiveProbeKind {
+    Http {
+        method: String,
+        path: String,
+        expected_statuses: Vec<u16>,
+        headers: Vec<(String, String)>,
+    },
+    Tcp,
+}
+
+impl Default for ActiveProbeKind {
+    fn default() -> Self {
+        Self::Http {
+            method: "GET".to_owned(),
+            path: "/health".to_owned(),
+            expected_statuses: vec![200],
+            headers: Vec::new(),
+        }
+    }
+}
+
+/// Active background health probe configuration for an upstream cluster.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ActiveHealthCheckConfig {
+    pub kind: ActiveProbeKind,
+    pub interval: Duration,
+    pub timeout: Duration,
+    pub unhealthy_threshold: usize,
+    pub healthy_threshold: usize,
+    pub initial_healthy: bool,
+}
+
+impl Default for ActiveHealthCheckConfig {
+    fn default() -> Self {
+        Self {
+            kind: ActiveProbeKind::default(),
+            interval: Duration::from_secs(10),
+            timeout: Duration::from_secs(2),
+            unhealthy_threshold: 2,
+            healthy_threshold: 1,
+            initial_healthy: true,
+        }
+    }
+}
+
+/// Point-in-time health snapshot of an endpoint (for `GET /upstreams` and Prometheus metrics).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointHealthSnapshot {
+    pub url: String,
+    pub weight: u32,
+    pub healthy: bool,
+    pub active_healthy: bool,
+    pub passive_healthy: bool,
+    pub passive_failures: usize,
+    pub active_probes_ok: u64,
+    pub active_probes_err: u64,
+    pub last_probe_latency_us: u64,
+}
+
 /// Configuration for a logical upstream cluster.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UpstreamConfig {
     pub name: String,
-    /// Endpoint base URLs, e.g. `http://127.0.0.1:8080` or `https://api.openai.com`.
-    pub endpoints: Vec<String>,
+    /// Endpoint definitions (URL + relative weight >= 1).
+    pub endpoints: Vec<UpstreamEndpoint>,
     /// Use HTTP/2 prior knowledge (h2c) for cleartext endpoints.
     pub http2_only: bool,
     /// Upstream TLS settings.
@@ -41,10 +143,19 @@ pub struct UpstreamConfig {
     pub unhealthy_threshold: usize,
     /// Cooldown duration before retrying a passively marked unhealthy endpoint.
     pub unhealthy_cooldown: Duration,
+    /// Optional active background health check settings.
+    pub active_health_check: Option<ActiveHealthCheckConfig>,
 }
 
 impl UpstreamConfig {
     pub fn new(name: impl Into<String>, endpoints: Vec<String>) -> Self {
+        Self::with_endpoints(
+            name,
+            endpoints.into_iter().map(UpstreamEndpoint::new).collect(),
+        )
+    }
+
+    pub fn with_endpoints(name: impl Into<String>, endpoints: Vec<UpstreamEndpoint>) -> Self {
         Self {
             name: name.into(),
             endpoints,
@@ -55,11 +166,17 @@ impl UpstreamConfig {
             pool_max_idle_per_host: 64,
             unhealthy_threshold: 3,
             unhealthy_cooldown: Duration::from_secs(10),
+            active_health_check: None,
         }
     }
 
+    pub fn with_active_health_check(mut self, hc: ActiveHealthCheckConfig) -> Self {
+        self.active_health_check = Some(hc);
+        self
+    }
+
     /// Computes the pool identity key used by [`crate::RuntimeRegistry`] to reuse warm
-    /// connection pools and passive health state across snapshot reloads.
+    /// connection pools and health state across snapshot reloads.
     pub fn pool_key(&self) -> UpstreamPoolKey {
         UpstreamPoolKey {
             endpoints: self.endpoints.clone(),
@@ -70,6 +187,7 @@ impl UpstreamConfig {
             pool_max_idle_per_host: self.pool_max_idle_per_host,
             unhealthy_threshold: self.unhealthy_threshold,
             unhealthy_cooldown: self.unhealthy_cooldown,
+            active_health_check: self.active_health_check.clone(),
         }
     }
 }
@@ -77,7 +195,7 @@ impl UpstreamConfig {
 /// Stable pool key determining when an existing warm pool can be reused across reloads.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UpstreamPoolKey {
-    pub endpoints: Vec<String>,
+    pub endpoints: Vec<UpstreamEndpoint>,
     pub http2_only: bool,
     pub tls: UpstreamTlsConfig,
     pub connect_timeout: Duration,
@@ -85,6 +203,7 @@ pub struct UpstreamPoolKey {
     pub pool_max_idle_per_host: usize,
     pub unhealthy_threshold: usize,
     pub unhealthy_cooldown: Duration,
+    pub active_health_check: Option<ActiveHealthCheckConfig>,
 }
 
 const UNHEALTHY_UNTIL_MASK: u64 = (1u64 << 48) - 1;
@@ -107,19 +226,35 @@ const fn unpack_health(packed: u64) -> (u16, u64) {
     (failures, until)
 }
 
-/// Parsed endpoint with single-word atomic passive health tracking.
+/// Parsed endpoint with single-word atomic passive health tracking and atomic active probe health.
 ///
-/// Packs `(consecutive_failures: u16, unhealthy_until_ms: u48)` into a single `AtomicU64`
-/// updated via CAS (`AcqRel`/`Acquire`) so readers never observe split failure/cooldown state.
+/// Passive health packs `(consecutive_failures: u16, unhealthy_until_ms: u48)` into a single
+/// `AtomicU64` updated via CAS (`AcqRel`/`Acquire`) so readers never observe split state.
+/// Active health composes via `is_active_healthy() && is_passively_healthy(now_ms)`.
 #[derive(Debug)]
 pub struct EndpointState {
     pub raw_url: String,
     pub base_uri: Uri,
+    pub weight: u32,
     health: AtomicU64,
+    active_healthy: AtomicBool,
+    active_consecutive_failures: AtomicU32,
+    active_consecutive_successes: AtomicU32,
+    active_probes_ok: AtomicU64,
+    active_probes_err: AtomicU64,
+    last_probe_latency_us: AtomicU64,
 }
 
 impl EndpointState {
     pub fn new(raw_url: String) -> Result<Self, CoreError> {
+        Self::new_with_options(raw_url, 1, true)
+    }
+
+    pub fn new_with_options(
+        raw_url: String,
+        weight: u32,
+        initial_active_healthy: bool,
+    ) -> Result<Self, CoreError> {
         let base_uri: Uri = raw_url.parse().map_err(|e| CoreError::InvalidUri {
             uri: raw_url.clone(),
             message: format!("{e}"),
@@ -142,21 +277,41 @@ impl EndpointState {
         Ok(Self {
             raw_url,
             base_uri,
+            weight: weight.max(1),
             health: AtomicU64::new(0),
+            active_healthy: AtomicBool::new(initial_active_healthy),
+            active_consecutive_failures: AtomicU32::new(0),
+            active_consecutive_successes: AtomicU32::new(0),
+            active_probes_ok: AtomicU64::new(0),
+            active_probes_err: AtomicU64::new(0),
+            last_probe_latency_us: AtomicU64::new(0),
         })
     }
 
-    /// Atomically returns `(consecutive_failures, unhealthy_until_ms)`.
+    /// Atomically returns passive `(consecutive_failures, unhealthy_until_ms)`.
     #[inline]
     pub fn health_snapshot(&self) -> (usize, u64) {
         let (failures, until) = unpack_health(self.health.load(Ordering::Acquire));
         (failures as usize, until)
     }
 
+    /// Returns whether this endpoint is currently healthy according to active probes.
     #[inline]
-    pub fn is_healthy(&self, now_ms: u64) -> bool {
+    pub fn is_active_healthy(&self) -> bool {
+        self.active_healthy.load(Ordering::Acquire)
+    }
+
+    /// Returns whether this endpoint is currently healthy according to passive cooldown state.
+    #[inline]
+    pub fn is_passively_healthy(&self, now_ms: u64) -> bool {
         let (_, until) = unpack_health(self.health.load(Ordering::Acquire));
         until == 0 || now_ms >= until
+    }
+
+    /// Returns effective health combining active probe state and passive cooldown state.
+    #[inline]
+    pub fn is_healthy(&self, now_ms: u64) -> bool {
+        self.is_active_healthy() && self.is_passively_healthy(now_ms)
     }
 
     #[inline]
@@ -169,12 +324,12 @@ impl EndpointState {
         self.health_snapshot().1
     }
 
-    /// Atomically clears both failure counter and cooldown timestamp.
+    /// Atomically clears both passive failure counter and cooldown timestamp.
     pub fn record_success(&self) {
         self.health.store(0, Ordering::Release);
     }
 
-    /// Atomically increments consecutive failures and activates cooldown once `threshold` is met.
+    /// Atomically increments consecutive passive failures and activates cooldown once `threshold` is met.
     pub fn record_failure(&self, now_ms: u64, threshold: usize, cooldown: Duration) {
         let threshold_u16 = threshold.clamp(1, u16::MAX as usize) as u16;
         let cooldown_ms = cooldown.as_millis().min(UNHEALTHY_UNTIL_MASK as u128) as u64;
@@ -199,6 +354,120 @@ impl EndpointState {
             }
         }
     }
+
+    /// Applies an active probe observation, updating active health thresholds and counters.
+    ///
+    /// When consecutive successes reach `healthy_threshold`, the endpoint is marked actively
+    /// healthy and any passive failure cooldown is cleared immediately so traffic resumes.
+    pub fn record_active_probe(
+        &self,
+        ok: bool,
+        latency_us: u64,
+        unhealthy_threshold: usize,
+        healthy_threshold: usize,
+    ) {
+        let unhealthy_t = unhealthy_threshold.clamp(1, u32::MAX as usize) as u32;
+        let healthy_t = healthy_threshold.clamp(1, u32::MAX as usize) as u32;
+        self.last_probe_latency_us
+            .store(latency_us, Ordering::Relaxed);
+
+        if ok {
+            self.active_probes_ok.fetch_add(1, Ordering::Relaxed);
+            self.active_consecutive_failures.store(0, Ordering::Release);
+            let succ = self
+                .active_consecutive_successes
+                .fetch_add(1, Ordering::AcqRel)
+                .saturating_add(1);
+            if succ >= healthy_t {
+                self.active_healthy.store(true, Ordering::Release);
+                // Clear passive cooldown immediately upon active recovery.
+                self.record_success();
+            }
+        } else {
+            self.active_probes_err.fetch_add(1, Ordering::Relaxed);
+            self.active_consecutive_successes
+                .store(0, Ordering::Release);
+            let fail = self
+                .active_consecutive_failures
+                .fetch_add(1, Ordering::AcqRel)
+                .saturating_add(1);
+            if fail >= unhealthy_t {
+                self.active_healthy.store(false, Ordering::Release);
+            }
+        }
+    }
+
+    /// Returns a point-in-time diagnostic snapshot of this endpoint's health and probe stats.
+    pub fn diagnostic_snapshot(&self, now_ms: u64) -> EndpointHealthSnapshot {
+        let (passive_failures, until) = self.health_snapshot();
+        let active_healthy = self.is_active_healthy();
+        let passive_healthy = until == 0 || now_ms >= until;
+        EndpointHealthSnapshot {
+            url: self.raw_url.clone(),
+            weight: self.weight,
+            healthy: active_healthy && passive_healthy,
+            active_healthy,
+            passive_healthy,
+            passive_failures,
+            active_probes_ok: self.active_probes_ok.load(Ordering::Relaxed),
+            active_probes_err: self.active_probes_err.load(Ordering::Relaxed),
+            last_probe_latency_us: self.last_probe_latency_us.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Computes the greatest common divisor of two positive integers.
+const fn gcd_u32(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
+/// Precomputes a Nginx-style Smooth Weighted Round-Robin (SWRR) index schedule for `weights`.
+///
+/// Returns an empty `Vec` if:
+/// - `weights.len() <= 1`
+/// - all weights are identical (uniform fast path uses `cursor % len`)
+/// - the GCD-reduced total weight exceeds [`MAX_SWRR_SCHEDULE_LEN`] (fallback uses cumulative weights)
+pub fn build_swrr_schedule(weights: &[u32]) -> Vec<usize> {
+    if weights.len() <= 1 {
+        return Vec::new();
+    }
+    let norm: Vec<u32> = weights.iter().map(|&w| w.max(1)).collect();
+    if norm.iter().all(|&w| w == norm[0]) {
+        return Vec::new();
+    }
+
+    let g = norm.iter().copied().reduce(gcd_u32).unwrap_or(1).max(1);
+    let reduced: Vec<u32> = norm.iter().map(|&w| w / g).collect();
+
+    let total: usize = reduced.iter().map(|&w| w as usize).sum();
+    if total == 0 || total > MAX_SWRR_SCHEDULE_LEN {
+        return Vec::new();
+    }
+
+    let mut current = vec![0i64; reduced.len()];
+    let total_i64 = total as i64;
+    let mut schedule = Vec::with_capacity(total);
+
+    for _ in 0..total {
+        let mut best_idx = 0usize;
+        let mut best_val = i64::MIN;
+        for (i, &w) in reduced.iter().enumerate() {
+            current[i] += w as i64;
+            if current[i] > best_val {
+                best_val = current[i];
+                best_idx = i;
+            }
+        }
+        current[best_idx] -= total_i64;
+        schedule.push(best_idx);
+    }
+
+    schedule
 }
 
 /// Pure endpoint index selector implementing Shunt's 3-pass selection policy:
@@ -239,11 +508,107 @@ pub fn select_endpoint_index(start: usize, tried_indices: &[usize], healthy: &[b
     start
 }
 
-/// Warm HTTP/1.1 + HTTP/2 connection pool and passive health manager for an upstream.
+/// Pure weighted endpoint selector combining smooth weighted distribution with Shunt's
+/// 3-pass health & untried priority policy.
+///
+/// Assumes `healthy.len() == weights.len()` and `healthy.len() >= 1`.
+pub fn select_weighted_endpoint_index(
+    cursor: usize,
+    weights: &[u32],
+    schedule: &[usize],
+    tried_indices: &[usize],
+    healthy: &[bool],
+) -> usize {
+    let len = healthy.len();
+    debug_assert!(len > 0 && len == weights.len());
+
+    if !schedule.is_empty() {
+        let slen = schedule.len();
+        let pos = cursor % slen;
+        let first = schedule[pos];
+
+        // Fast path: scheduled slot is healthy and untried.
+        if !tried_indices.contains(&first) && healthy[first] {
+            return first;
+        }
+
+        // Pass 1: healthy & untried (scanning forward preserves smooth proportional ratios)
+        for offset in 1..slen {
+            let idx = schedule[(pos + offset) % slen];
+            if !tried_indices.contains(&idx) && healthy[idx] {
+                return idx;
+            }
+        }
+
+        // Pass 2: any untried
+        for offset in 0..slen {
+            let idx = schedule[(pos + offset) % slen];
+            if !tried_indices.contains(&idx) {
+                return idx;
+            }
+        }
+
+        // Pass 3: any healthy
+        for offset in 0..slen {
+            let idx = schedule[(pos + offset) % slen];
+            if healthy[idx] {
+                return idx;
+            }
+        }
+
+        return first;
+    }
+
+    // Uniform-weight fast path (or single endpoint).
+    if len == 1 || weights.iter().all(|&w| w.max(1) == weights[0].max(1)) {
+        return select_endpoint_index(cursor, tried_indices, healthy);
+    }
+
+    // Cumulative-weight fallback for huge co-prime weight sums (> MAX_SWRR_SCHEDULE_LEN).
+    let pick_from = |predicate: &dyn Fn(usize) -> bool| -> Option<usize> {
+        let mut total_w = 0u64;
+        for (i, &w) in weights.iter().enumerate() {
+            if predicate(i) {
+                total_w = total_w.saturating_add(w.max(1) as u64);
+            }
+        }
+        if total_w == 0 {
+            return None;
+        }
+        // Golden-ratio stride spreads consecutive cursor values smoothly across total_w.
+        let mut target = (cursor as u64).wrapping_mul(2_654_435_761) % total_w;
+        for (i, &w) in weights.iter().enumerate() {
+            if !predicate(i) {
+                continue;
+            }
+            let w64 = w.max(1) as u64;
+            if target < w64 {
+                return Some(i);
+            }
+            target -= w64;
+        }
+        None
+    };
+
+    if let Some(i) = pick_from(&|i| !tried_indices.contains(&i) && healthy[i]) {
+        return i;
+    }
+    if let Some(i) = pick_from(&|i| !tried_indices.contains(&i)) {
+        return i;
+    }
+    if let Some(i) = pick_from(&|i| healthy[i]) {
+        return i;
+    }
+    pick_from(&|_| true).unwrap_or(0)
+}
+
+/// Warm HTTP/1.1 + HTTP/2 connection pool and active/passive health manager for an upstream.
 pub struct UpstreamPool {
     pool_id: u64,
     key: UpstreamPoolKey,
     endpoints: Vec<EndpointState>,
+    weights: Vec<u32>,
+    swrr_schedule: Vec<usize>,
     rr_cursor: AtomicUsize,
     clock: Arc<dyn Clock>,
     client: Client<ShuntConnector, ShuntBody>,
@@ -256,6 +621,10 @@ impl std::fmt::Debug for UpstreamPool {
             .field("pool_id", &self.pool_id)
             .field("endpoints", &self.key.endpoints)
             .field("http2_only", &self.key.http2_only)
+            .field(
+                "active_health_check",
+                &self.key.active_health_check.is_some(),
+            )
             .finish()
     }
 }
@@ -274,10 +643,25 @@ impl UpstreamPool {
             return Err(CoreError::EmptyUpstream(config.name.clone()));
         }
 
+        let initial_active_healthy = config
+            .active_health_check
+            .as_ref()
+            .map(|hc| hc.initial_healthy)
+            .unwrap_or(true);
+
         let mut endpoints = Vec::with_capacity(config.endpoints.len());
+        let mut weights = Vec::with_capacity(config.endpoints.len());
         for ep in &config.endpoints {
-            endpoints.push(EndpointState::new(ep.clone())?);
+            let w = ep.weight.max(1);
+            endpoints.push(EndpointState::new_with_options(
+                ep.url.clone(),
+                w,
+                initial_active_healthy,
+            )?);
+            weights.push(w);
         }
+
+        let swrr_schedule = build_swrr_schedule(&weights);
 
         let tls_cfg = config.tls.build_client_config(None)?;
         let tls_connector = TlsConnector::from(tls_cfg);
@@ -307,6 +691,8 @@ impl UpstreamPool {
             pool_id,
             key: config.pool_key(),
             endpoints,
+            weights,
+            swrr_schedule,
             rr_cursor: AtomicUsize::new(0),
             clock,
             client,
@@ -327,41 +713,94 @@ impl UpstreamPool {
         &self.endpoints
     }
 
+    pub fn active_health_check(&self) -> Option<&ActiveHealthCheckConfig> {
+        self.key.active_health_check.as_ref()
+    }
+
+    /// Returns point-in-time health snapshots for every endpoint in this pool.
+    pub fn endpoint_health_snapshots(&self) -> Vec<EndpointHealthSnapshot> {
+        let now = self.now_ms();
+        self.endpoints
+            .iter()
+            .map(|ep| ep.diagnostic_snapshot(now))
+            .collect()
+    }
+
     fn now_ms(&self) -> u64 {
         self.clock.now_ms()
     }
 
-    /// Selects the next healthy endpoint (round-robin), preferring endpoints not in `tried_indices`.
+    /// Selects the next healthy endpoint (uniform round-robin or smooth weighted round-robin),
+    /// preferring endpoints not in `tried_indices`.
     pub fn select_endpoint(&self, tried_indices: &[usize]) -> (usize, &EndpointState) {
         let len = self.endpoints.len();
-        let start = self.rr_cursor.fetch_add(1, Ordering::Relaxed) % len;
+        let cursor = self.rr_cursor.fetch_add(1, Ordering::Relaxed);
         let now = self.now_ms();
 
-        // Pass 1: healthy & not yet tried in this request
-        for offset in 0..len {
-            let idx = (start + offset) % len;
-            if !tried_indices.contains(&idx) && self.endpoints[idx].is_healthy(now) {
-                return (idx, &self.endpoints[idx]);
+        // Zero-allocation fast path when SWRR schedule is active and slot is healthy & untried.
+        if !self.swrr_schedule.is_empty() {
+            let slen = self.swrr_schedule.len();
+            let pos = cursor % slen;
+            let first = self.swrr_schedule[pos];
+            if !tried_indices.contains(&first) && self.endpoints[first].is_healthy(now) {
+                return (first, &self.endpoints[first]);
             }
+            for offset in 1..slen {
+                let idx = self.swrr_schedule[(pos + offset) % slen];
+                if !tried_indices.contains(&idx) && self.endpoints[idx].is_healthy(now) {
+                    return (idx, &self.endpoints[idx]);
+                }
+            }
+            for offset in 0..slen {
+                let idx = self.swrr_schedule[(pos + offset) % slen];
+                if !tried_indices.contains(&idx) {
+                    return (idx, &self.endpoints[idx]);
+                }
+            }
+            for offset in 0..slen {
+                let idx = self.swrr_schedule[(pos + offset) % slen];
+                if self.endpoints[idx].is_healthy(now) {
+                    return (idx, &self.endpoints[idx]);
+                }
+            }
+            return (first, &self.endpoints[first]);
         }
 
-        // Pass 2: any endpoint not yet tried in this request (even if marked unhealthy)
-        for offset in 0..len {
-            let idx = (start + offset) % len;
-            if !tried_indices.contains(&idx) {
-                return (idx, &self.endpoints[idx]);
+        // Uniform fast path (no heap allocations).
+        if len == 1 || self.weights.iter().all(|&w| w == self.weights[0]) {
+            let start = cursor % len;
+
+            for offset in 0..len {
+                let idx = (start + offset) % len;
+                if !tried_indices.contains(&idx) && self.endpoints[idx].is_healthy(now) {
+                    return (idx, &self.endpoints[idx]);
+                }
             }
+            for offset in 0..len {
+                let idx = (start + offset) % len;
+                if !tried_indices.contains(&idx) {
+                    return (idx, &self.endpoints[idx]);
+                }
+            }
+            for offset in 0..len {
+                let idx = (start + offset) % len;
+                if self.endpoints[idx].is_healthy(now) {
+                    return (idx, &self.endpoints[idx]);
+                }
+            }
+            return (start, &self.endpoints[start]);
         }
 
-        // Pass 3: wrap around to any healthy endpoint, else start
-        for offset in 0..len {
-            let idx = (start + offset) % len;
-            if self.endpoints[idx].is_healthy(now) {
-                return (idx, &self.endpoints[idx]);
-            }
-        }
-
-        (start, &self.endpoints[start])
+        // Fallback for huge co-prime weights (> MAX_SWRR_SCHEDULE_LEN).
+        let healthy: Vec<bool> = self.endpoints.iter().map(|e| e.is_healthy(now)).collect();
+        let idx = select_weighted_endpoint_index(
+            cursor,
+            &self.weights,
+            &self.swrr_schedule,
+            tried_indices,
+            &healthy,
+        );
+        (idx, &self.endpoints[idx])
     }
 
     pub fn record_success(&self, endpoint_idx: usize) {
@@ -378,6 +817,121 @@ impl UpstreamPool {
                 self.key.unhealthy_cooldown,
             );
         }
+    }
+
+    /// Executes a single active health probe against endpoint `endpoint_idx` using this pool's
+    /// configured [`ActiveHealthCheckConfig`], updating its active health state.
+    ///
+    /// Returns `true` if the probe succeeded, `false` otherwise (or if no active health check
+    /// is configured or `endpoint_idx` is out of bounds).
+    pub async fn probe_endpoint_once(&self, endpoint_idx: usize) -> bool {
+        let Some(hc) = self.key.active_health_check.as_ref() else {
+            return false;
+        };
+        let Some(ep) = self.endpoints.get(endpoint_idx) else {
+            return false;
+        };
+
+        let started = Instant::now();
+        let ok = match &hc.kind {
+            ActiveProbeKind::Tcp => probe_tcp(&ep.base_uri, hc.timeout).await,
+            ActiveProbeKind::Http {
+                method,
+                path,
+                expected_statuses,
+                headers,
+            } => {
+                self.probe_http(
+                    &ep.base_uri,
+                    method,
+                    path,
+                    expected_statuses,
+                    headers,
+                    hc.timeout,
+                )
+                .await
+            }
+        };
+        let latency_us = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        ep.record_active_probe(ok, latency_us, hc.unhealthy_threshold, hc.healthy_threshold);
+        ok
+    }
+
+    /// Runs one active health probe cycle across every endpoint in this pool.
+    pub async fn probe_all_once(&self) {
+        if self.key.active_health_check.is_none() {
+            return;
+        }
+        for idx in 0..self.endpoints.len() {
+            let _ = self.probe_endpoint_once(idx).await;
+        }
+    }
+
+    async fn probe_http(
+        &self,
+        base_uri: &Uri,
+        method: &str,
+        path: &str,
+        expected_statuses: &[u16],
+        headers: &[(String, String)],
+        timeout: Duration,
+    ) -> bool {
+        let Ok(probe_method) = Method::from_bytes(method.as_bytes()) else {
+            return false;
+        };
+        let Ok(probe_rel_uri) = path.parse::<Uri>() else {
+            return false;
+        };
+        let Ok(target_uri) = build_target_uri(base_uri, &probe_rel_uri) else {
+            return false;
+        };
+
+        let mut builder = http::Request::builder()
+            .method(probe_method)
+            .uri(target_uri)
+            .header(http::header::USER_AGENT, "shunt-health-probe");
+
+        for (k, v) in headers {
+            if let (Ok(name), Ok(val)) = (
+                HeaderName::from_bytes(k.as_bytes()),
+                HeaderValue::from_str(v),
+            ) {
+                builder = builder.header(name, val);
+            }
+        }
+
+        let Ok(req) = builder.body(ShuntBody::empty()) else {
+            return false;
+        };
+
+        let deadline = Instant::now() + timeout;
+        let Ok(resp) = self.send_request(req, Some(timeout)).await else {
+            return false;
+        };
+
+        let status = resp.status().as_u16();
+        let matched = expected_statuses.contains(&status);
+
+        // Best-effort drain of small probe responses within remaining timeout so keep-alive
+        // connections return cleanly to the pool.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() {
+            let mut body = resp.into_body();
+            let _ = tokio::time::timeout(remaining, async {
+                let mut drained = 0usize;
+                while let Some(Ok(frame)) = body.frame().await {
+                    if let Some(data) = frame.data_ref() {
+                        drained += data.len();
+                        if drained >= 64 * 1024 {
+                            break;
+                        }
+                    }
+                }
+            })
+            .await;
+        }
+
+        matched
     }
 
     /// Sends an HTTP request through the warm connection pool, enforcing `response_headers_timeout`.
@@ -414,6 +968,33 @@ impl UpstreamPool {
             .expect("h1 tls connector initialized");
         connect_uri(uri, self.key.connect_timeout, tls).await
     }
+}
+
+async fn probe_tcp(base_uri: &Uri, timeout: Duration) -> bool {
+    let scheme = base_uri.scheme_str().unwrap_or("http");
+    let Some(host) = base_uri
+        .host()
+        .map(|h| h.trim_matches(|c| c == '[' || c == ']').to_owned())
+    else {
+        return false;
+    };
+    let port = base_uri
+        .port_u16()
+        .unwrap_or(if scheme == "https" { 443 } else { 80 });
+
+    let connect_fut = async {
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            TcpStream::connect(std::net::SocketAddr::new(ip, port)).await
+        } else {
+            TcpStream::connect((host.as_str(), port)).await
+        }
+    };
+
+    tokio::time::timeout(timeout, connect_fut)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .is_some()
 }
 
 /// Resolves an endpoint base URI + relative request path/query into a full target URI.
@@ -632,6 +1213,168 @@ async fn connect_uri(
         ))))
     } else {
         Ok(ShuntStream::new(MaybeTlsStream::Http(tcp)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::convert::Infallible;
+    use std::sync::atomic::AtomicU16;
+
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn swrr_schedule_is_smooth_and_exact() {
+        // Uniform -> empty (fast path)
+        assert!(build_swrr_schedule(&[1, 1, 1]).is_empty());
+        assert!(build_swrr_schedule(&[5, 5]).is_empty());
+
+        // 80/20 -> GCD 20 -> [4, 1] -> [0, 0, 1, 0, 0]
+        let s = build_swrr_schedule(&[80, 20]);
+        assert_eq!(s, vec![0, 0, 1, 0, 0]);
+
+        // 5/1/1 -> [0, 0, 1, 0, 2, 0, 0]
+        let s2 = build_swrr_schedule(&[5, 1, 1]);
+        assert_eq!(s2.len(), 7);
+        assert_eq!(s2.iter().filter(|&&i| i == 0).count(), 5);
+        assert_eq!(s2.iter().filter(|&&i| i == 1).count(), 1);
+        assert_eq!(s2.iter().filter(|&&i| i == 2).count(), 1);
+    }
+
+    #[test]
+    fn active_and_passive_health_compose_cleanly() {
+        let ep = EndpointState::new_with_options("http://127.0.0.1:8080".into(), 5, true).unwrap();
+        assert!(ep.is_healthy(0));
+
+        // 1 active failure below threshold=2 keeps endpoint healthy
+        ep.record_active_probe(false, 100, 2, 2);
+        assert!(ep.is_healthy(0));
+
+        // 2nd active failure ejects endpoint
+        ep.record_active_probe(false, 200, 2, 2);
+        assert!(!ep.is_active_healthy());
+        assert!(!ep.is_healthy(0));
+
+        // Passive failure on top while inactive
+        ep.record_failure(0, 1, Duration::from_secs(30));
+        assert!(!ep.is_passively_healthy(1000));
+
+        // 1 active success below healthy_threshold=2 still unhealthy
+        ep.record_active_probe(true, 150, 2, 2);
+        assert!(!ep.is_active_healthy());
+
+        // 2nd active success restores active health AND clears passive cooldown
+        ep.record_active_probe(true, 120, 2, 2);
+        assert!(ep.is_active_healthy());
+        assert!(ep.is_passively_healthy(1000));
+        assert!(ep.is_healthy(1000));
+    }
+
+    #[tokio::test]
+    async fn active_http_probe_ejects_and_recovers_endpoint() {
+        let status_code = Arc::new(AtomicU16::new(200));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let status_bg = Arc::clone(&status_code);
+
+        let srv = tokio::spawn(async move {
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    break;
+                };
+                let sc = Arc::clone(&status_bg);
+                tokio::spawn(async move {
+                    let svc = service_fn(move |_req: http::Request<hyper::body::Incoming>| {
+                        let code = sc.load(Ordering::Relaxed);
+                        async move {
+                            Ok::<_, Infallible>(
+                                http::Response::builder()
+                                    .status(code)
+                                    .body(http_body_util::Full::new(bytes::Bytes::from_static(
+                                        b"ok",
+                                    )))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(tcp), svc)
+                        .await;
+                });
+            }
+        });
+
+        let cfg = UpstreamConfig::new("hc_http", vec![format!("http://{addr}")])
+            .with_active_health_check(ActiveHealthCheckConfig {
+                kind: ActiveProbeKind::Http {
+                    method: "GET".to_owned(),
+                    path: "/healthz".to_owned(),
+                    expected_statuses: vec![200],
+                    headers: vec![("x-probe".to_owned(), "1".to_owned())],
+                },
+                interval: Duration::from_secs(5),
+                timeout: Duration::from_secs(1),
+                unhealthy_threshold: 2,
+                healthy_threshold: 2,
+                initial_healthy: true,
+            });
+        let pool = UpstreamPool::new(1, &cfg).unwrap();
+
+        assert!(pool.probe_endpoint_once(0).await);
+        assert!(pool.endpoints()[0].is_active_healthy());
+
+        // Flip backend to 503 -> 2 probes eject it
+        status_code.store(503, Ordering::Relaxed);
+        assert!(!pool.probe_endpoint_once(0).await);
+        assert!(pool.endpoints()[0].is_active_healthy());
+        assert!(!pool.probe_endpoint_once(0).await);
+        assert!(!pool.endpoints()[0].is_active_healthy());
+
+        // Flip back to 200 -> 2 probes recover it
+        status_code.store(200, Ordering::Relaxed);
+        assert!(pool.probe_endpoint_once(0).await);
+        assert!(!pool.endpoints()[0].is_active_healthy());
+        assert!(pool.probe_endpoint_once(0).await);
+        assert!(pool.endpoints()[0].is_active_healthy());
+
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn active_tcp_probe_detects_open_and_refused_ports() {
+        let open_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let open_addr = open_listener.local_addr().unwrap();
+
+        let closed_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_addr = closed_listener.local_addr().unwrap();
+        drop(closed_listener);
+
+        let cfg = UpstreamConfig::new(
+            "hc_tcp",
+            vec![
+                format!("http://{open_addr}"),
+                format!("http://{closed_addr}"),
+            ],
+        )
+        .with_active_health_check(ActiveHealthCheckConfig {
+            kind: ActiveProbeKind::Tcp,
+            interval: Duration::from_secs(5),
+            timeout: Duration::from_millis(250),
+            unhealthy_threshold: 1,
+            healthy_threshold: 1,
+            initial_healthy: true,
+        });
+        let pool = UpstreamPool::new(1, &cfg).unwrap();
+
+        assert!(pool.probe_endpoint_once(0).await);
+        assert!(!pool.probe_endpoint_once(1).await);
+        assert!(pool.endpoints()[0].is_active_healthy());
+        assert!(!pool.endpoints()[1].is_active_healthy());
+
+        drop(open_listener);
     }
 }
 

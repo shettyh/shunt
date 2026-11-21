@@ -1,0 +1,395 @@
+[spec]
+name = "smart-routing-and-active-health"
+config_inline = """
+[server]
+listen = "127.0.0.1:0"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+# Path B: Weighted HTTP upstream pool (3:1)
+[[upstreams]]
+name = "weighted_http"
+endpoints = [
+  { url = "http://127.0.0.1:19101", weight = 3 },
+  { url = "http://127.0.0.1:19102", weight = 1 },
+]
+
+# Path B: Active HTTP health-checked upstream pool
+[[upstreams]]
+name = "active_http_pool"
+endpoints = ["http://127.0.0.1:19103", "http://127.0.0.1:19104"]
+[upstreams.health_check]
+kind = "http"
+path = "/healthz"
+method = "GET"
+expected_statuses = [200]
+interval_ms = 50
+timeout_ms = 200
+unhealthy_threshold = 2
+healthy_threshold = 1
+
+# Path B: Active TCP health-checked upstream pool
+[[upstreams]]
+name = "active_tcp_pool"
+endpoints = ["http://127.0.0.1:19105", "http://127.0.0.1:19106"]
+[upstreams.health_check]
+kind = "tcp"
+interval_ms = 50
+timeout_ms = 150
+unhealthy_threshold = 1
+healthy_threshold = 1
+
+# Path A: AI provider upstreams
+[[upstreams]]
+name = "provider_a"
+endpoints = ["http://127.0.0.1:19111"]
+
+[[upstreams]]
+name = "provider_b"
+endpoints = ["http://127.0.0.1:19112"]
+
+[[upstreams]]
+name = "provider_c"
+endpoints = ["http://127.0.0.1:19113"]
+
+[[routes]]
+id = "weighted_api"
+path_prefix = "/weighted"
+upstream = "weighted_http"
+max_attempts = 2
+
+[[routes]]
+id = "active_http_api"
+path_prefix = "/active-http"
+upstream = "active_http_pool"
+max_attempts = 1
+
+[[routes]]
+id = "active_tcp_api"
+path_prefix = "/active-tcp"
+upstream = "active_tcp_pool"
+max_attempts = 1
+
+[[routes]]
+id = "ai_smart"
+path_prefix = "/v1"
+upstream = "provider_a"
+max_body_bytes = 1048576
+max_attempts = 3
+
+[[routes.plugins]]
+name = "ai-model-router"
+id = "smart-router"
+[routes.plugins.config]
+include_routing_headers = true
+use_builtin_pricing = true
+unknown_cost_policy = "last"
+
+[routes.plugins.config.latency]
+ewma_alpha = 0.5
+error_penalty_weight = 5.0
+min_samples = 1
+stale_after_ms = 60000
+
+[routes.plugins.config.models.canary]
+strategy = "weighted"
+targets = [
+  { provider = "prov_a", upstream = "provider_a", model = "gpt-4o", weight = 3 },
+  { provider = "prov_b", upstream = "provider_b", model = "gpt-4o-mini", weight = 1 },
+]
+
+[routes.plugins.config.models.guarded]
+strategy = "priority"
+targets = [
+  { provider = "prov_a", upstream = "provider_a", model = "text-only", capabilities = ["chat", "streaming"] },
+  { provider = "prov_b", upstream = "provider_b", model = "vision-tools", capabilities = ["chat", "streaming", "vision", "tools", "json_schema"] },
+  { provider = "prov_c", upstream = "provider_c", model = "tools-backup", capabilities = ["chat", "tools"] },
+]
+
+[routes.plugins.config.models.cheapest]
+strategy = "cost"
+targets = [
+  { provider = "prov_a", upstream = "provider_a", model = "gpt-4o" },
+  { provider = "prov_b", upstream = "provider_b", model = "gpt-4o-mini" },
+]
+
+[routes.plugins.config.models.fastest]
+strategy = "latency"
+targets = [
+  { provider = "prov_a", upstream = "provider_a", model = "slow-model" },
+  { provider = "prov_b", upstream = "provider_b", model = "fast-model" },
+]
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+id = "adapter"
+[routes.plugins.config.providers.prov_a]
+dialect = "openai_compatible"
+[routes.plugins.config.providers.prov_a.auth]
+type = "none"
+
+[routes.plugins.config.providers.prov_b]
+dialect = "openai_compatible"
+[routes.plugins.config.providers.prov_b.auth]
+type = "none"
+
+[routes.plugins.config.providers.prov_c]
+dialect = "openai_compatible"
+[routes.plugins.config.providers.prov_c.auth]
+type = "none"
+
+[[routes.plugins]]
+name = "ai-failover"
+id = "failover"
+[routes.plugins.config]
+retry_statuses = [429, 500, 502, 503, 529]
+"""
+
+# ---------------------------------------------------------------------------
+# Reusable mocks
+# ---------------------------------------------------------------------------
+
+[[mocks]]
+name = "http_heavy"
+upstream = "weighted_http"
+status = 200
+body = "heavy"
+
+[[mocks]]
+name = "http_light"
+upstream = "weighted_http"
+status = 200
+body = "light"
+
+[[mocks]]
+name = "hc_http_healthy"
+upstream = "active_http_pool"
+status = 200
+body = "healthy-node"
+
+[[mocks]]
+name = "hc_http_unhealthy"
+upstream = "active_http_pool"
+status = 503
+body = "unhealthy-node"
+
+[[mocks]]
+name = "hc_tcp_healthy"
+upstream = "active_tcp_pool"
+status = 200
+body = "tcp-ok"
+
+[[mocks]]
+name = "hc_tcp_dead"
+upstream = "active_tcp_pool"
+fault = "connect_refused"
+
+[[mocks]]
+name = "ai_a_ok"
+upstream = "provider_a"
+status = 200
+json = { id = "chatcmpl-a", object = "chat.completion", model = "gpt-4o", choices = [{ index = 0, message = { role = "assistant", content = "from-a" }, finish_reason = "stop" }], usage = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 } }
+
+[[mocks]]
+name = "ai_b_ok"
+upstream = "provider_b"
+status = 200
+json = { id = "chatcmpl-b", object = "chat.completion", model = "gpt-4o-mini", choices = [{ index = 0, message = { role = "assistant", content = "from-b" }, finish_reason = "stop" }], usage = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 } }
+
+[[mocks]]
+name = "ai_b_429_then_ok"
+upstream = "provider_b"
+[[mocks.sequence]]
+status = 429
+json = { error = { message = "rate limited", type = "rate_limit_error" } }
+[[mocks.sequence]]
+status = 200
+json = { id = "chatcmpl-b2", object = "chat.completion", model = "gpt-4o-mini", choices = [{ index = 0, message = { role = "assistant", content = "from-b" }, finish_reason = "stop" }] }
+
+[[mocks]]
+name = "ai_b_503"
+upstream = "provider_b"
+status = 503
+json = { error = { message = "overloaded", type = "server_error" } }
+
+[[mocks]]
+name = "ai_c_ok"
+upstream = "provider_c"
+status = 200
+json = { id = "chatcmpl-c", object = "chat.completion", model = "tools-backup", choices = [{ index = 0, message = { role = "assistant", content = "from-c" }, finish_reason = "stop" }] }
+
+[[mocks]]
+name = "ai_a_slow"
+upstream = "provider_a"
+status = 200
+delay_ms = 120
+json = { id = "chatcmpl-slow", object = "chat.completion", model = "slow-model", choices = [{ index = 0, message = { role = "assistant", content = "slow" }, finish_reason = "stop" }] }
+
+[[mocks]]
+name = "ai_b_fast"
+upstream = "provider_b"
+status = 200
+delay_ms = 0
+json = { id = "chatcmpl-fast", object = "chat.completion", model = "fast-model", choices = [{ index = 0, message = { role = "assistant", content = "fast" }, finish_reason = "stop" }] }
+
+# ---------------------------------------------------------------------------
+# Cases
+# ---------------------------------------------------------------------------
+
+[[cases]]
+name = "path-b weighted upstream distributes 3:1 smoothly"
+use_mocks = ["http_heavy", "http_light"]
+
+[[cases.steps]]
+name = "req 1 -> heavy"
+request = { method = "GET", path = "/weighted/1" }
+expect = { status = 200, body_eq = "heavy" }
+
+[[cases.steps]]
+name = "req 2 -> heavy"
+request = { method = "GET", path = "/weighted/2" }
+expect = { status = 200, body_eq = "heavy" }
+
+[[cases.steps]]
+name = "req 3 -> light (smoothly interleaved)"
+request = { method = "GET", path = "/weighted/3" }
+expect = { status = 200, body_eq = "light" }
+
+[[cases.steps]]
+name = "req 4 -> heavy"
+request = { method = "GET", path = "/weighted/4" }
+expect = { status = 200, body_eq = "heavy" }
+
+[[cases]]
+name = "active HTTP health check ejects 503 endpoint before traffic"
+use_mocks = ["hc_http_healthy", "hc_http_unhealthy"]
+
+[[cases.steps]]
+name = "wait for >=2 active HTTP probes then send req 1"
+wait_ms = 180
+request = { method = "GET", path = "/active-http/1" }
+expect = { status = 200, body_eq = "healthy-node" }
+
+[[cases.steps]]
+name = "req 2 also routes exclusively to healthy node"
+request = { method = "GET", path = "/active-http/2" }
+expect = { status = 200, body_eq = "healthy-node" }
+
+[[cases.steps]]
+name = "req 3 also routes exclusively to healthy node"
+request = { method = "GET", path = "/active-http/3" }
+expect = { status = 200, body_eq = "healthy-node" }
+
+[[cases]]
+name = "active TCP health check ejects refused endpoint before traffic"
+use_mocks = ["hc_tcp_dead", "hc_tcp_healthy"]
+
+[[cases.steps]]
+name = "wait for active TCP probe then send req 1"
+wait_ms = 140
+request = { method = "GET", path = "/active-tcp/1" }
+expect = { status = 200, body_eq = "tcp-ok" }
+
+[[cases.steps]]
+name = "req 2 routes cleanly to open TCP node"
+request = { method = "GET", path = "/active-tcp/2" }
+expect = { status = 200, body_eq = "tcp-ok" }
+
+[[cases]]
+name = "ai weighted canary splits 3:1 smoothly with routing headers"
+use_mocks = ["ai_a_ok", "ai_b_ok"]
+
+[[cases.steps]]
+name = "canary req 1 -> prov_a"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "canary", messages = [{ role = "user", content = "hi" }] } }
+expect = { status = 200, headers = { "x-shunt-routing-strategy" = "weighted", "x-shunt-selected-provider" = "prov_a" }, json_path = { "/choices/0/message/content" = "from-a" } }
+
+[[cases.steps]]
+name = "canary req 2 -> prov_a"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "canary", messages = [{ role = "user", content = "hi" }] } }
+expect = { status = 200, headers = { "x-shunt-selected-provider" = "prov_a" } }
+
+[[cases.steps]]
+name = "canary req 3 -> prov_b (smoothly interleaved)"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "canary", messages = [{ role = "user", content = "hi" }] } }
+expect = { status = 200, headers = { "x-shunt-routing-strategy" = "weighted", "x-shunt-selected-provider" = "prov_b" }, json_path = { "/choices/0/message/content" = "from-b" } }
+
+[[cases.steps]]
+name = "canary req 4 -> prov_a"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "canary", messages = [{ role = "user", content = "hi" }] } }
+expect = { status = 200, headers = { "x-shunt-selected-provider" = "prov_a" } }
+
+[[cases]]
+name = "ai capability guards filter vision/tools/json_schema and reject unsupported reasoning"
+use_mocks = ["ai_a_ok", "ai_b_ok", "ai_c_ok"]
+
+[[cases.steps]]
+name = "vision request skips text-only prov_a and routes to prov_b"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "guarded", messages = [{ role = "user", content = [{ type = "text", text = "what is this?" }, { type = "image_url", image_url = { url = "https://example.com/pic.png" } }] }] } }
+expect = { status = 200, headers = { "x-shunt-selected-provider" = "prov_b" }, json_path = { "/choices/0/message/content" = "from-b" }, upstream_calls = [{ upstream = "provider_a", count = 0 }, { upstream = "provider_b", count = 1 }] }
+
+[[cases.steps]]
+name = "json_schema request routes to prov_b"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "guarded", response_format = { type = "json_object" }, messages = [{ role = "user", content = "return json" }] } }
+expect = { status = 200, headers = { "x-shunt-selected-provider" = "prov_b" } }
+
+[[cases.steps]]
+name = "reasoning request rejected with 400 unsupported_capability (OpenAI format)"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "guarded", reasoning_effort = "high", messages = [{ role = "user", content = "solve" }] } }
+expect = { status = 400, json_path = { "/error/code" = "unsupported_capability" } }
+
+[[cases.steps]]
+name = "anthropic thinking request rejected with 400 in Anthropic error format"
+request = { method = "POST", path = "/v1/messages", json = { model = "guarded", max_tokens = 128, thinking = { type = "enabled", budget_tokens = 1024 }, messages = [{ role = "user", content = "think" }] } }
+expect = { status = 400, json_path = { "/type" = "error", "/error/type" = "invalid_request_error" } }
+
+[[cases]]
+name = "ai capability guard prevents failover to incapable targets"
+use_mocks = ["ai_a_ok", "ai_b_503", "ai_c_ok"]
+
+[[cases.steps]]
+name = "tools request fails over from prov_b (503) to prov_c (tools) and never hits text-only prov_a"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "guarded", tools = [{ type = "function", function = { name = "weather", parameters = { type = "object" } } }], messages = [{ role = "user", content = "weather?" }] } }
+expect = { status = 200, headers = { "x-shunt-selected-provider" = "prov_c" }, json_path = { "/choices/0/message/content" = "from-c" }, upstream_calls = [{ upstream = "provider_a", count = 0 }, { upstream = "provider_b", count = 1 }, { upstream = "provider_c", count = 1 }] }
+
+[[cases]]
+name = "ai cost-aware routing picks cheapest model first and fails over to pricier tier on 429"
+use_mocks = ["ai_a_ok", "ai_b_429_then_ok"]
+
+[[cases.steps]]
+name = "first request tries cheapest (prov_b gpt-4o-mini), gets 429, fails over to prov_a (gpt-4o)"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "cheapest", messages = [{ role = "user", content = "budget me" }] } }
+expect = { status = 200, headers = { "x-shunt-routing-strategy" = "cost", "x-shunt-selected-provider" = "prov_a" }, upstream_calls = [{ upstream = "provider_b", count = 1 }, { upstream = "provider_a", count = 1 }] }
+
+[[cases.steps]]
+name = "second request succeeds directly on cheapest (prov_b gpt-4o-mini)"
+reset_captures = true
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "cheapest", messages = [{ role = "user", content = "budget me again" }] } }
+expect = { status = 200, headers = { "x-shunt-routing-strategy" = "cost", "x-shunt-selected-provider" = "prov_b", "x-shunt-selected-model" = "gpt-4o-mini" }, upstream_calls = [{ upstream = "provider_b", count = 1 }, { upstream = "provider_a", count = 0 }] }
+
+[[cases]]
+name = "ai latency-aware routing explores cold targets then prefers faster provider"
+use_mocks = ["ai_a_slow", "ai_b_fast"]
+
+[[cases.steps]]
+name = "cold probe 1 -> slow prov_a"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "fastest", messages = [{ role = "user", content = "ping 1" }] } }
+expect = { status = 200, headers = { "x-shunt-routing-strategy" = "latency", "x-shunt-selected-provider" = "prov_a" } }
+
+[[cases.steps]]
+name = "cold probe 2 -> fast prov_b"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "fastest", messages = [{ role = "user", content = "ping 2" }] } }
+expect = { status = 200, headers = { "x-shunt-routing-strategy" = "latency", "x-shunt-selected-provider" = "prov_b" } }
+
+[[cases.steps]]
+name = "req 3 -> dynamically selects faster prov_b"
+reset_captures = true
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "fastest", messages = [{ role = "user", content = "ping 3" }] } }
+expect = { status = 200, headers = { "x-shunt-selected-provider" = "prov_b" }, json_path = { "/choices/0/message/content" = "fast" }, upstream_calls = [{ upstream = "provider_a", count = 0 }, { upstream = "provider_b", count = 1 }] }
+
+[[cases.steps]]
+name = "req 4 -> continues selecting faster prov_b"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "fastest", messages = [{ role = "user", content = "ping 4" }] } }
+expect = { status = 200, headers = { "x-shunt-selected-provider" = "prov_b" } }

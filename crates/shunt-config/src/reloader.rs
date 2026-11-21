@@ -46,6 +46,11 @@ impl ReloadController {
         self.inspect.load_full()
     }
 
+    /// Returns the currently active compiled [`shunt_core::GatewaySnapshot`].
+    pub fn current_snapshot(&self) -> Arc<shunt_core::GatewaySnapshot> {
+        self.reloader.current_snapshot()
+    }
+
     /// Synchronously loads, validates, compiles, and atomically swaps in the latest snapshot.
     ///
     /// On error, the last-known-good snapshot and TLS certs remain active untouched.

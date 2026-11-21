@@ -5,16 +5,16 @@ use std::time::Duration;
 use http::Method;
 use serde::Serialize;
 use shunt_core::{
-    CertStore, GatewaySnapshot, PathMatch, RedisStoreConfig, RouteMatch, RouteSpec,
-    RuntimeRegistry, SnapshotBuilder, TimeoutConfig, UpstreamConfig, UpstreamTlsConfig,
-    load_certified_key_pem,
+    ActiveHealthCheckConfig, ActiveProbeKind, CertStore, GatewaySnapshot, PathMatch,
+    RedisStoreConfig, RouteMatch, RouteSpec, RuntimeRegistry, SnapshotBuilder, TimeoutConfig,
+    UpstreamConfig, UpstreamEndpoint, UpstreamTlsConfig, load_certified_key_pem,
 };
 use shunt_plugin_sdk::{DistributedStore, HookMask, HttpPlugin, PluginConfig, PluginRegistry};
 
 use crate::error::ConfigError;
 use crate::ir::{
-    GatewayConfig, PluginAttachment, RouteIr, ServerTlsConfig, StateBackendKind, StateConfig,
-    UpstreamIr, redact_secrets,
+    ActiveHealthCheckIr, ActiveProbeKindIr, GatewayConfig, PluginAttachment, RouteIr,
+    ServerTlsConfig, StateBackendKind, StateConfig, UpstreamIr, redact_secrets,
 };
 use crate::provider::LoadedConfig;
 
@@ -44,7 +44,9 @@ pub struct UpstreamInspect {
     pub name: String,
     pub pool_id: u64,
     pub endpoints: Vec<String>,
+    pub weights: Vec<u32>,
     pub http2_only: bool,
+    pub active_health_check: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -197,8 +199,10 @@ impl SnapshotCompiler {
                 snapshot.upstream(&u.name).map(|pool| UpstreamInspect {
                     name: u.name.clone(),
                     pool_id: pool.pool_id(),
-                    endpoints: u.endpoints.clone(),
+                    endpoints: u.endpoints.iter().map(|e| e.url().to_owned()).collect(),
+                    weights: u.endpoints.iter().map(|e| e.weight()).collect(),
                     http2_only: u.http2_only,
+                    active_health_check: u.health_check.is_some(),
                 })
             })
             .collect();
@@ -318,7 +322,13 @@ fn compile_upstream_ir(ir: &UpstreamIr) -> Result<UpstreamConfig, ConfigError> {
         None => vec![b"h2".to_vec(), b"http/1.1".to_vec()],
     };
 
-    let mut cfg = UpstreamConfig::new(ir.name.clone(), ir.endpoints.clone());
+    let endpoints: Vec<UpstreamEndpoint> = ir
+        .endpoints
+        .iter()
+        .map(|ep| UpstreamEndpoint::with_weight(ep.url().to_owned(), ep.weight()))
+        .collect();
+
+    let mut cfg = UpstreamConfig::with_endpoints(ir.name.clone(), endpoints);
     cfg.http2_only = ir.http2_only;
     cfg.connect_timeout = Duration::from_millis(ir.connect_timeout_ms);
     cfg.pool_idle_timeout = Duration::from_millis(ir.pool_idle_timeout_ms);
@@ -330,7 +340,32 @@ fn compile_upstream_ir(ir: &UpstreamIr) -> Result<UpstreamConfig, ConfigError> {
         insecure_skip_verify: ir.tls.insecure_skip_verify,
         alpn_protocols,
     };
+    cfg.active_health_check = ir.health_check.as_ref().map(compile_active_health_check_ir);
     Ok(cfg)
+}
+
+fn compile_active_health_check_ir(ir: &ActiveHealthCheckIr) -> ActiveHealthCheckConfig {
+    let kind = match ir.kind {
+        ActiveProbeKindIr::Http => ActiveProbeKind::Http {
+            method: ir.method.to_ascii_uppercase(),
+            path: ir.path.clone(),
+            expected_statuses: ir.expected_statuses.clone(),
+            headers: ir
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        },
+        ActiveProbeKindIr::Tcp => ActiveProbeKind::Tcp,
+    };
+    ActiveHealthCheckConfig {
+        kind,
+        interval: Duration::from_millis(ir.interval_ms),
+        timeout: Duration::from_millis(ir.timeout_ms),
+        unhealthy_threshold: ir.unhealthy_threshold,
+        healthy_threshold: ir.healthy_threshold,
+        initial_healthy: ir.initial_healthy,
+    }
 }
 
 fn compile_route_ir(ir: &RouteIr) -> Result<RouteSpec, ConfigError> {

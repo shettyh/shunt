@@ -6,6 +6,7 @@ pub mod body;
 pub mod catch;
 pub mod error;
 pub mod pipeline;
+pub mod probe;
 pub mod redis;
 pub mod registry;
 pub mod server;
@@ -16,6 +17,7 @@ pub mod ws;
 
 pub use body::ShuntBody;
 pub use error::CoreError;
+pub use probe::ProbeSupervisor;
 pub use redis::{
     RedisStateStore, RedisStoreConfig, RespError, RespValue, decode_resp_frame,
     encode_resp_command, encode_resp_value,
@@ -24,12 +26,14 @@ pub use registry::{BuildSession, RuntimeRegistry};
 pub use server::{GatewayServer, ServerHandle, ServerReloader};
 pub use snapshot::{
     CompiledRoute, DEFAULT_MAX_BODY_BYTES, GatewaySnapshot, PathMatch, RouteMatch, RouteSpec,
-    SnapshotBuilder, TimeoutConfig, host_matches,
+    SnapshotBuilder, TimeoutConfig, UpstreamHealthReport, host_matches,
 };
 pub use tls::{
     CertStore, DynamicCertResolver, TlsListenerConfig, UpstreamTlsConfig, ensure_crypto_provider,
     load_certified_key_pem,
 };
 pub use upstream::{
-    EndpointState, UpstreamConfig, UpstreamPool, UpstreamPoolKey, select_endpoint_index,
+    ActiveHealthCheckConfig, ActiveProbeKind, EndpointHealthSnapshot, EndpointState,
+    MAX_SWRR_SCHEDULE_LEN, UpstreamConfig, UpstreamEndpoint, UpstreamPool, UpstreamPoolKey,
+    build_swrr_schedule, select_endpoint_index, select_weighted_endpoint_index,
 };
