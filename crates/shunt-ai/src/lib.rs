@@ -20,6 +20,7 @@
 pub mod aws_eventstream;
 pub mod aws_sigv4;
 pub mod budget;
+pub mod cache;
 pub mod dialects;
 pub mod failover;
 pub mod ingress;
@@ -45,6 +46,11 @@ pub use aws_eventstream::{
 };
 pub use aws_sigv4::{AwsSigV4Credentials, SigV4Output, sign_canonical, sign_upstream_request};
 pub use budget::{AiBudgetFactory, AiBudgetPlugin, AiBudgetState, SpendLedgerTable};
+pub use cache::{
+    AiCacheFactory, AiCachePending, AiCachePlugin, AiCacheStatus, AiCacheTable,
+    AiTranslatedResponseBody, CacheScope, CachedAiResponse, canonical_json_bytes,
+    compute_cache_key, is_deterministic_request,
+};
 pub use dialects::bedrock::{
     BedrockStreamTranslator, bedrock_converse_path, bedrock_converse_to_openai_response,
     map_bedrock_stop_reason, openai_to_bedrock_converse_request,
@@ -96,13 +102,14 @@ pub use usage_tracker::{
 };
 pub use virtual_keys::{AiVirtualKeysFactory, AiVirtualKeysPlugin};
 
-/// Registers all `shunt-ai` plugins (`ai-virtual-keys`, `ai-model-router`,
+/// Registers all `shunt-ai` plugins (`ai-virtual-keys`, `ai-model-router`, `ai-cache`,
 /// `ai-token-rate-limit`, `ai-budget`, `ai-provider-adapter`, `ai-failover`,
 /// `ai-usage-tracker`) into `registry`.
 pub fn register_ai_plugins(registry: &mut PluginRegistry, ai_metrics: Arc<AiMetrics>) {
     registry
         .register(AiVirtualKeysFactory)
         .register(AiModelRouterFactory)
+        .register(AiCacheFactory::new(Arc::clone(&ai_metrics)))
         .register(AiTokenRateLimitFactory)
         .register(AiBudgetFactory::new(Arc::clone(&ai_metrics)))
         .register(AiProviderAdapterFactory)

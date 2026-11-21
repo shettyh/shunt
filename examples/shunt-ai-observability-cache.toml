@@ -1,0 +1,133 @@
+# Shunt AI Gateway — OTLP/HTTP Tracing & Exact-Match AI Cache (RFC 0011)
+#
+# Demonstrates:
+# - Zero-dependency OTLP/HTTP JSON trace export (`[telemetry]`) compatible with
+#   Jaeger, Grafana Tempo, Langfuse, Arize Phoenix, Datadog, and Honeycomb
+# - W3C `traceparent` / `tracestate` propagation (`otel-trace`) + GenAI semantic attributes
+# - Exact-match AI response caching (`ai-cache`) for `/v1/embeddings` and deterministic
+#   (`temperature = 0`) conversational calls, placed before `ai-token-rate-limit` and
+#   `ai-budget` so cache hits incur zero upstream latency, quota, or spend.
+#
+# Run locally:
+#   OPENAI_API_KEY=sk-... OTLP_AUTH_HEADER="Bearer ..." \
+#     shunt dev -c examples/shunt-ai-observability-cache.toml
+
+[server]
+listen = "127.0.0.1:8080"
+drain_timeout_ms = 10000
+
+[admin]
+enabled = true
+listen = "127.0.0.1:9090"
+
+[telemetry]
+enabled = true
+backend = "otlp_http"
+endpoint = "http://127.0.0.1:4318/v1/traces"
+service_name = "shunt-ai-gateway"
+queue_capacity = 4096
+batch_size = 128
+flush_interval_ms = 1000
+export_timeout_ms = 5000
+resource_attributes = { "deployment.environment" = "dev" }
+# Optional auth header for hosted collectors (e.g. Langfuse / Honeycomb / Grafana Cloud):
+# headers = { Authorization = "env:OTLP_AUTH_HEADER" }
+
+[[plugins]]
+name = "otel-trace"
+[plugins.config]
+sample_rate = 1.0
+respect_parent_sampling = true
+propagate_headers = true
+emit_response_header = true
+
+[[plugins]]
+name = "metrics"
+
+[[upstreams]]
+name = "openai"
+endpoints = ["https://api.openai.com"]
+connect_timeout_ms = 5000
+
+[[upstreams]]
+name = "anthropic"
+endpoints = ["https://api.anthropic.com"]
+connect_timeout_ms = 5000
+
+[[routes]]
+id = "ai_gateway"
+path_prefix = "/v1"
+methods = ["GET", "POST"]
+upstream = "openai"
+max_body_bytes = 2097152
+max_attempts = 2
+response_headers_timeout_ms = 30000
+idle_chunk_timeout_ms = 60000
+
+[[routes.plugins]]
+name = "ai-virtual-keys"
+[routes.plugins.config]
+keys = [
+  { id = "dev-key", api_key = "sk-shunt-dev", team = "engineering", rpm = 60, tpm = 100000, budget_usd = 5.0 }
+]
+
+[[routes.plugins]]
+name = "ai-model-router"
+[routes.plugins.config]
+[routes.plugins.config.models]
+"gpt-4o-mini" = [
+  { provider = "openai", upstream = "openai", model = "gpt-4o-mini" }
+]
+"claude-sonnet" = [
+  { provider = "anthropic", upstream = "anthropic", model = "claude-3-5-sonnet-20241022" }
+]
+"text-embedding-3-small" = [
+  { provider = "openai", upstream = "openai", model = "text-embedding-3-small" }
+]
+
+# Place `ai-cache` directly after `ai-model-router` and before `ai-token-rate-limit` / `ai-budget`
+# so cache hits short-circuit with zero upstream tokens, quota, or spend.
+[[routes.plugins]]
+name = "ai-cache"
+[routes.plugins.config]
+ttl_secs = 300
+max_entries = 1024
+max_total_bytes = 33554432
+max_entry_bytes = 524288
+scope = "virtual_key"
+require_deterministic = true
+respect_cache_control = true
+emit_headers = true
+
+[[routes.plugins]]
+name = "ai-token-rate-limit"
+[routes.plugins.config]
+default_rpm = 60
+default_tpm = 100000
+
+[[routes.plugins]]
+name = "ai-budget"
+[routes.plugins.config]
+default_limit_usd = 10.0
+window = "daily"
+mode = "hard"
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+[routes.plugins.config.providers.openai]
+dialect = "openai_compatible"
+auth = { type = "bearer", api_key = "env:OPENAI_API_KEY" }
+
+[routes.plugins.config.providers.anthropic]
+dialect = "anthropic"
+auth = { type = "header", header = "x-api-key", api_key = "env:ANTHROPIC_API_KEY" }
+
+[[routes.plugins]]
+name = "ai-failover"
+[routes.plugins.config]
+cooldown_secs = 15
+
+[[routes.plugins]]
+name = "ai-usage-tracker"
+[routes.plugins.config]
+log_usage = true

@@ -8,6 +8,7 @@ use thiserror::Error;
 use crate::clock::{Clock, SystemClock};
 use crate::distributed::DistributedStore;
 use crate::plugin::HttpPlugin;
+use crate::telemetry::TelemetrySink;
 
 /// Type-erased map used to stage newly created plugin state during transactional builds.
 pub type StagedStateMap = HashMap<String, Arc<dyn Any + Send + Sync>>;
@@ -239,6 +240,7 @@ pub struct BuildContext {
     staged: Option<Arc<RwLock<StagedStateMap>>>,
     clock: Arc<dyn Clock>,
     distributed_store: Option<Arc<dyn DistributedStore>>,
+    telemetry_sink: Option<Arc<dyn TelemetrySink>>,
 }
 
 impl BuildContext {
@@ -254,6 +256,7 @@ impl BuildContext {
             staged: None,
             clock: SystemClock::shared(),
             distributed_store: None,
+            telemetry_sink: None,
         }
     }
 
@@ -272,6 +275,7 @@ impl BuildContext {
             staged: Some(staged),
             clock,
             distributed_store: None,
+            telemetry_sink: None,
         }
     }
 
@@ -287,6 +291,12 @@ impl BuildContext {
         distributed_store: Option<Arc<dyn DistributedStore>>,
     ) -> Self {
         self.distributed_store = distributed_store;
+        self
+    }
+
+    /// Attaches an optional gateway-level [`TelemetrySink`] (e.g., OTLP/HTTP exporter).
+    pub fn with_telemetry_sink(mut self, telemetry_sink: Option<Arc<dyn TelemetrySink>>) -> Self {
+        self.telemetry_sink = telemetry_sink;
         self
     }
 
@@ -306,6 +316,11 @@ impl BuildContext {
     /// synchronous zero-allocation fast path.
     pub fn distributed_store(&self) -> Option<Arc<dyn DistributedStore>> {
         self.distributed_store.as_ref().map(Arc::clone)
+    }
+
+    /// Optional shared [`TelemetrySink`] configured at the gateway level (`[telemetry]`).
+    pub fn telemetry_sink(&self) -> Option<Arc<dyn TelemetrySink>> {
+        self.telemetry_sink.as_ref().map(Arc::clone)
     }
 
     /// Requests a scoped [`StateHandle`] whose entries will survive snapshot reloads

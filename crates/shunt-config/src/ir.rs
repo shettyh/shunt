@@ -20,6 +20,8 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub state: StateConfig,
     #[serde(default)]
+    pub telemetry: TelemetryConfig,
+    #[serde(default)]
     pub plugins: Vec<PluginAttachment>,
     #[serde(default)]
     pub upstreams: Vec<UpstreamIr>,
@@ -27,6 +29,61 @@ pub struct GatewayConfig {
     pub routes: Vec<RouteIr>,
     #[serde(default)]
     pub verify: VerifyPolicy,
+}
+
+/// Telemetry exporter backend mode (`[telemetry]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelemetryBackendKind {
+    /// Zero-dependency OTLP/HTTP JSON trace exporter (`POST /v1/traces`).
+    #[default]
+    OtlpHttp,
+}
+
+/// Optional gateway-level `[telemetry]` configuration (opt-in; disabled by default).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TelemetryConfig {
+    /// Enable asynchronous span export (default: `false` for zero-dependency startup).
+    pub enabled: bool,
+    /// Telemetry backend (`"otlp_http"` default).
+    pub backend: TelemetryBackendKind,
+    /// OTLP/HTTP traces endpoint URL (`http://...`, `https://...`, or `env:VAR_NAME`).
+    pub endpoint: Option<String>,
+    /// OpenTelemetry `service.name` resource attribute (default: `"shunt"`).
+    pub service_name: String,
+    /// Additional static string resource attributes attached to exported batches.
+    pub resource_attributes: BTreeMap<String, String>,
+    /// Additional HTTP headers sent to the OTLP collector (values support `env:VAR_NAME`).
+    pub headers: BTreeMap<String, String>,
+    /// Bounded async queue capacity; excess spans are dropped without blocking (default: `4096`).
+    pub queue_capacity: usize,
+    /// Maximum spans per OTLP/HTTP JSON export batch (default: `128`).
+    pub batch_size: usize,
+    /// Periodic batch flush interval in milliseconds (default: `1000`).
+    pub flush_interval_ms: u64,
+    /// Per-batch HTTP export timeout in milliseconds (default: `5000`).
+    pub export_timeout_ms: u64,
+    /// Skip TLS certificate verification for `https://` OTLP endpoints (dev/testing only).
+    pub insecure_skip_verify: bool,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: TelemetryBackendKind::OtlpHttp,
+            endpoint: None,
+            service_name: "shunt".to_owned(),
+            resource_attributes: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            queue_capacity: 4096,
+            batch_size: 128,
+            flush_interval_ms: 1_000,
+            export_timeout_ms: 5_000,
+            insecure_skip_verify: false,
+        }
+    }
 }
 
 /// Backing store mode for stateful plugins across Shunt replicas.
@@ -439,6 +496,58 @@ impl GatewayConfig {
             }
             if self.state.command_timeout_ms == 0 {
                 errors.push("state.command_timeout_ms: must be >= 1".into());
+            }
+        }
+
+        if self.telemetry.enabled {
+            match self.telemetry.endpoint.as_deref().map(str::trim) {
+                None | Some("") => {
+                    errors.push(
+                        "telemetry.endpoint: required when `telemetry.enabled = true`".into(),
+                    );
+                }
+                Some(raw_ep) if !raw_ep.starts_with("env:") => match raw_ep.parse::<http::Uri>() {
+                    Ok(uri) => {
+                        let scheme = uri.scheme_str().unwrap_or("");
+                        if scheme != "http" && scheme != "https" {
+                            errors.push(format!(
+                                "telemetry.endpoint: `{raw_ep}` must use http:// or https://"
+                            ));
+                        }
+                        if uri.authority().is_none() {
+                            errors.push(format!(
+                                "telemetry.endpoint: `{raw_ep}` is missing host/authority"
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(format!("telemetry.endpoint: invalid URI `{raw_ep}`: {e}"));
+                    }
+                },
+                Some(_) => {}
+            }
+            if self.telemetry.service_name.trim().is_empty() {
+                errors.push("telemetry.service_name: cannot be empty".into());
+            }
+            if self.telemetry.queue_capacity == 0 {
+                errors.push("telemetry.queue_capacity: must be >= 1".into());
+            }
+            if self.telemetry.batch_size == 0 {
+                errors.push("telemetry.batch_size: must be >= 1".into());
+            }
+            if self.telemetry.flush_interval_ms == 0 {
+                errors.push("telemetry.flush_interval_ms: must be >= 1".into());
+            }
+            if self.telemetry.export_timeout_ms == 0 {
+                errors.push("telemetry.export_timeout_ms: must be >= 1".into());
+            }
+            for (k, v) in &self.telemetry.headers {
+                if HeaderName::from_bytes(k.as_bytes()).is_err() {
+                    errors.push(format!("telemetry.headers: invalid header name `{k}`"));
+                }
+                if !v.starts_with("env:") && HeaderValue::from_str(v).is_err() {
+                    errors.push(format!("telemetry.headers.{k}: invalid header value"));
+                }
             }
         }
 

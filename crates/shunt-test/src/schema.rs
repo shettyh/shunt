@@ -136,6 +136,8 @@ pub struct StepSpec {
     pub advance_clock_ms: Option<u64>,
     /// Sleep wall-clock time (ms) before this step (useful for waiting on background health probes).
     pub wait_ms: Option<u64>,
+    /// Explicitly flush active telemetry exporters before evaluating expectations (useful for OTLP mocks).
+    pub flush_telemetry: bool,
     /// Trigger an atomic hot reload with new inline TOML config (upstreams are auto-rebound).
     pub reload_config_inline: Option<String>,
     /// Expected outcome of `reload_config_inline` (defaults to `true` = expect reload success).

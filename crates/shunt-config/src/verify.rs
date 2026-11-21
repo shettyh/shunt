@@ -258,11 +258,16 @@ pub fn verify_bundle(
             .iter()
             .position(|p| p.name == "ai-model-router");
         if let Some(r_idx) = router_pos {
+            let cache_pos = route_ir.plugins.iter().position(|p| p.name == "ai-cache");
             for (idx, att) in route_ir.plugins.iter().enumerate() {
                 if idx < r_idx
                     && matches!(
                         att.name.as_str(),
-                        "ai-provider-adapter" | "ai-failover" | "ai-token-rate-limit" | "ai-budget"
+                        "ai-cache"
+                            | "ai-provider-adapter"
+                            | "ai-failover"
+                            | "ai-token-rate-limit"
+                            | "ai-budget"
                     )
                 {
                     diags.push(VerifyDiagnostic {
@@ -283,6 +288,20 @@ pub fn verify_bundle(
                         message: format!(
                             "plugin `ai-virtual-keys` (index {idx}) appears after `ai-model-router` (index {r_idx}) on route `{}`; place `ai-virtual-keys` first so authentication and model ACLs run before routing",
                             route_ir.id
+                        ),
+                    });
+                }
+                if let Some(c_idx) = cache_pos
+                    && c_idx > idx
+                    && matches!(att.name.as_str(), "ai-token-rate-limit" | "ai-budget")
+                {
+                    diags.push(VerifyDiagnostic {
+                        rule: "ai.cache_order".to_owned(),
+                        severity: Severity::Warning,
+                        subject: Some(route_ir.id.clone()),
+                        message: format!(
+                            "plugin `ai-cache` (index {c_idx}) appears after `{}` (index {idx}) on route `{}`; place `ai-cache` directly after `ai-model-router` so cache hits skip quota and budget checks",
+                            att.name, route_ir.id
                         ),
                     });
                 }
@@ -371,6 +390,24 @@ pub fn verify_bundle(
                 bundle.config.admin.listen
             ),
         });
+    }
+
+    // 3b. telemetry.no_trace_plugin
+    if bundle.config.telemetry.enabled {
+        let has_trace_plugin = bundle.config.plugins.iter().any(|p| p.name == "otel-trace")
+            || bundle
+                .config
+                .routes
+                .iter()
+                .any(|r| r.plugins.iter().any(|p| p.name == "otel-trace"));
+        if !has_trace_plugin {
+            diags.push(VerifyDiagnostic {
+                rule: "telemetry.no_trace_plugin".to_owned(),
+                severity: Severity::Warning,
+                subject: Some("telemetry".to_owned()),
+                message: "`[telemetry]` is enabled, but no `otel-trace` plugin is attached globally or on any route".to_owned(),
+            });
+        }
     }
 
     // 4. Policy rules (policy.require_plugin, policy.assert_hook_mask)
@@ -775,5 +812,39 @@ name = "request-id"
         assert!(route_subsumes(&wild, &sub_wild));
         assert!(route_subsumes(&wild, &exact));
         assert!(!route_subsumes(&wild, &bare));
+    }
+
+    #[test]
+    fn detects_ai_cache_ordering_and_missing_otel_trace_plugin() {
+        let bundle = compile_inline(
+            r#"
+[server]
+listen = "127.0.0.1:0"
+[admin]
+enabled = false
+
+[telemetry]
+enabled = true
+endpoint = "http://127.0.0.1:4318/v1/traces"
+
+[[upstreams]]
+name = "be"
+endpoints = ["http://127.0.0.1:8081"]
+
+[[routes]]
+id = "api"
+path_prefix = "/api"
+upstream = "be"
+"#,
+        );
+
+        let report = verify_bundle(&bundle, None, false);
+        assert!(report.passed);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.rule == "telemetry.no_trace_plugin" && d.severity == Severity::Warning)
+        );
     }
 }

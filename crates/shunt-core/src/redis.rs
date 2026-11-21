@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use bytes::Bytes;
 use rustls::pki_types::ServerName;
 use shunt_plugin_sdk::{
     BoxFuture, DistributedStore, DistributedStoreError, FailurePolicy, QuotaOutcome,
@@ -854,6 +855,52 @@ impl DistributedStore for RedisStateStore {
                 RespValue::Error(e) => Err(DistributedStoreError::Command(e)),
                 other => Err(DistributedStoreError::Protocol(format!(
                     "unexpected EXISTS reply: {other:?}"
+                ))),
+            }
+        })
+    }
+
+    fn get_bytes<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> BoxFuture<'a, Result<Option<Bytes>, DistributedStoreError>> {
+        let full_key = self.prefixed_key(key);
+        Box::pin(async move {
+            match self.command(&[b"GET", full_key.as_bytes()]).await? {
+                RespValue::BulkString(None) => Ok(None),
+                RespValue::BulkString(Some(bytes)) => Ok(Some(Bytes::from(bytes))),
+                RespValue::Error(e) => Err(DistributedStoreError::Command(e)),
+                other => Err(DistributedStoreError::Protocol(format!(
+                    "unexpected GET reply: {other:?}"
+                ))),
+            }
+        })
+    }
+
+    fn set_bytes<'a>(
+        &'a self,
+        key: &'a str,
+        value: Bytes,
+        ttl: Duration,
+    ) -> BoxFuture<'a, Result<(), DistributedStoreError>> {
+        let full_key = self.prefixed_key(key);
+        let ttl_ms = ttl.as_millis().max(1).min(i64::MAX as u128) as i64;
+        Box::pin(async move {
+            let ttl_s = ttl_ms.to_string();
+            match self
+                .command(&[
+                    b"SET",
+                    full_key.as_bytes(),
+                    value.as_ref(),
+                    b"PX",
+                    ttl_s.as_bytes(),
+                ])
+                .await?
+            {
+                RespValue::SimpleString(_) | RespValue::BulkString(Some(_)) => Ok(()),
+                RespValue::Error(e) => Err(DistributedStoreError::Command(e)),
+                other => Err(DistributedStoreError::Protocol(format!(
+                    "unexpected SET reply: {other:?}"
                 ))),
             }
         })

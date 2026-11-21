@@ -16,6 +16,7 @@ This directory contains Request for Comments (RFC) design documents for **Shunt*
 | [0008](./0008-multi-protocol-ai-ingress.md) | Multi-Protocol AI Ingress (`/v1/messages` & `/v1/responses`) | Implemented | `shunt-ai`, `shunt-test`, `fuzz` |
 | [0009](./0009-virtual-keys-budgets-and-distributed-state.md) | Virtual Keys, Token Rate Limits, Cost Budgets & Distributed `StateStore` | Implemented | `shunt-plugin-sdk`, `shunt-core`, `shunt-config`, `shunt-plugins`, `shunt-ai`, `shunt-cli`, `shunt-test`, `fuzz` |
 | [0010](./0010-smart-routing-and-active-health-checks.md) | Smart Routing & Active Upstream Health Checks | Implemented | `shunt-core`, `shunt-config`, `shunt-ai`, `shunt-cli`, `shunt-test` |
+| [0011](./0011-otlp-observability-and-ai-cache.md) | OTLP/HTTP Observability & Exact-Match AI Response Cache | Implemented | `shunt-plugin-sdk`, `shunt-core`, `shunt-plugins`, `shunt-ai`, `shunt-config`, `shunt-cli`, `shunt-test`, `fuzz` |
 
 ## Status Definitions
 

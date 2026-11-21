@@ -3,6 +3,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -98,14 +99,43 @@ pub trait DistributedStore: fmt::Debug + Send + Sync + 'static {
     /// Returns `true` if `key` currently exists and has not expired.
     fn has_flag<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<bool, DistributedStoreError>>;
 
+    /// Reads an opaque binary value stored under `key` (`None` if absent or expired).
+    fn get_bytes<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> BoxFuture<'a, Result<Option<Bytes>, DistributedStoreError>>;
+
+    /// Stores an opaque binary `value` under `key` with expiration `ttl`.
+    fn set_bytes<'a>(
+        &'a self,
+        key: &'a str,
+        value: Bytes,
+        ttl: Duration,
+    ) -> BoxFuture<'a, Result<(), DistributedStoreError>>;
+
     /// Deletes `key` if present.
     fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<(), DistributedStoreError>>;
 }
 
 #[derive(Debug, Clone)]
+enum MemoryValue {
+    Counter(i64),
+    Blob(Bytes),
+}
+
+#[derive(Debug, Clone)]
 struct MemoryEntry {
-    value: i64,
+    value: MemoryValue,
     expires_at: Option<Duration>,
+}
+
+impl MemoryEntry {
+    fn as_counter(&self) -> i64 {
+        match self.value {
+            MemoryValue::Counter(v) => v,
+            MemoryValue::Blob(_) => 0,
+        }
+    }
 }
 
 /// Deterministic in-memory [`DistributedStore`] implementation useful for unit/multi-replica
@@ -160,7 +190,10 @@ impl DistributedStore for InMemoryDistributedStore {
             .expect("InMemoryDistributedStore lock poisoned");
         Self::prune_expired(&mut map, now);
 
-        let cur = map.get(key).map(|e| e.value.max(0) as u64).unwrap_or(0);
+        let cur = map
+            .get(key)
+            .map(|e| e.as_counter().max(0) as u64)
+            .unwrap_or(0);
 
         let outcome = if cur.saturating_add(amount) <= limit {
             let next = cur.saturating_add(amount);
@@ -172,7 +205,7 @@ impl DistributedStore for InMemoryDistributedStore {
             map.insert(
                 key.to_owned(),
                 MemoryEntry {
-                    value: next_i64,
+                    value: MemoryValue::Counter(next_i64),
                     expires_at: Some(expires_at),
                 },
             );
@@ -217,14 +250,14 @@ impl DistributedStore for InMemoryDistributedStore {
 
         let (cur, existing_exp) = map
             .get(key)
-            .map(|e| (e.value, e.expires_at))
+            .map(|e| (e.as_counter(), e.expires_at))
             .unwrap_or((0, None));
         let next = cur.saturating_add(delta).max(0);
         let expires_at = existing_exp.or_else(|| Some(now.saturating_add(ttl)));
         map.insert(
             key.to_owned(),
             MemoryEntry {
-                value: next,
+                value: MemoryValue::Counter(next),
                 expires_at,
             },
         );
@@ -241,7 +274,7 @@ impl DistributedStore for InMemoryDistributedStore {
             .lock()
             .expect("InMemoryDistributedStore lock poisoned");
         Self::prune_expired(&mut map, now);
-        let val = map.get(key).map(|e| e.value).unwrap_or(0);
+        let val = map.get(key).map(MemoryEntry::as_counter).unwrap_or(0);
         Box::pin(async move { Ok(val) })
     }
 
@@ -259,7 +292,7 @@ impl DistributedStore for InMemoryDistributedStore {
         map.insert(
             key.to_owned(),
             MemoryEntry {
-                value: 1,
+                value: MemoryValue::Counter(1),
                 expires_at: Some(now.saturating_add(ttl)),
             },
         );
@@ -275,6 +308,45 @@ impl DistributedStore for InMemoryDistributedStore {
         Self::prune_expired(&mut map, now);
         let present = map.contains_key(key);
         Box::pin(async move { Ok(present) })
+    }
+
+    fn get_bytes<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> BoxFuture<'a, Result<Option<Bytes>, DistributedStoreError>> {
+        let now = self.clock.now();
+        let mut map = self
+            .entries
+            .lock()
+            .expect("InMemoryDistributedStore lock poisoned");
+        Self::prune_expired(&mut map, now);
+        let val = map.get(key).and_then(|e| match &e.value {
+            MemoryValue::Blob(b) => Some(b.clone()),
+            MemoryValue::Counter(_) => None,
+        });
+        Box::pin(async move { Ok(val) })
+    }
+
+    fn set_bytes<'a>(
+        &'a self,
+        key: &'a str,
+        value: Bytes,
+        ttl: Duration,
+    ) -> BoxFuture<'a, Result<(), DistributedStoreError>> {
+        let now = self.clock.now();
+        let mut map = self
+            .entries
+            .lock()
+            .expect("InMemoryDistributedStore lock poisoned");
+        Self::prune_expired(&mut map, now);
+        map.insert(
+            key.to_owned(),
+            MemoryEntry {
+                value: MemoryValue::Blob(value),
+                expires_at: Some(now.saturating_add(ttl)),
+            },
+        );
+        Box::pin(async move { Ok(()) })
     }
 
     fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<(), DistributedStoreError>> {
