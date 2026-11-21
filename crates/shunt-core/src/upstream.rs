@@ -526,7 +526,9 @@ async fn connect_uri(
             .await
             .map_err(|_| CoreError::ConnectTimeout(connect_timeout))?
             .map_err(|e| CoreError::Tls(format!("upstream TLS handshake failed: {e}")))?;
-        Ok(ShuntStream::new(MaybeTlsStream::Https(Box::new(tls_stream))))
+        Ok(ShuntStream::new(MaybeTlsStream::Https(Box::new(
+            tls_stream,
+        ))))
     } else {
         Ok(ShuntStream::new(MaybeTlsStream::Http(tcp)))
     }

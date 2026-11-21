@@ -139,7 +139,8 @@ pub async fn handle_websocket_upgrade(
         return build_error_response(StatusCode::BAD_GATEWAY, "unknown upstream");
     };
 
-    let (ep_idx, base_uri, endpoint_label) = if let Some(override_url) = &selection.endpoint_override
+    let (ep_idx, base_uri, endpoint_label) = if let Some(override_url) =
+        &selection.endpoint_override
     {
         match override_url.parse::<http::Uri>() {
             Ok(uri) => (None, uri, override_url.clone()),

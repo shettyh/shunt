@@ -2,7 +2,9 @@
 name = "shunt-ai"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Multi-provider AI router & gateway plugin pack for Shunt (OpenAI + Anthropic), built 100% on shunt-plugin-sdk"
 
 [dependencies]

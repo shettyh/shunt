@@ -1,0 +1,333 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build all release artifacts without publishing to GitHub Releases, GHCR, or crates.io"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  validate:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+      publish: ${{ steps.meta.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate version and release metadata
+        id: meta
+        run: |
+          python3 - <<'PY'
+          import os, tomllib
+          from pathlib import Path
+
+          with open("Cargo.toml", "rb") as f:
+              cargo = tomllib.load(f)
+
+          workspace_ver = cargo["workspace"]["package"]["version"]
+          event_name = os.environ["GITHUB_EVENT_NAME"]
+          ref_name = os.environ["GITHUB_REF_NAME"]
+          dry_run = os.environ.get("INPUT_DRY_RUN", "false").lower() == "true"
+
+          if event_name == "push":
+              tag = ref_name
+              expected_tag = f"v{workspace_ver}"
+              if tag != expected_tag:
+                  raise SystemExit(
+                      f"Tag '{tag}' does not match Cargo.toml workspace.package.version '{workspace_ver}' (expected '{expected_tag}')"
+                  )
+              publish = "true"
+          else:
+              tag = f"v{workspace_ver}"
+              publish = "false" if dry_run else "true"
+
+          is_prerelease = "true" if "-" in workspace_ver else "false"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"version={workspace_ver}\n")
+              out.write(f"tag={tag}\n")
+              out.write(f"is_prerelease={is_prerelease}\n")
+              out.write(f"publish={publish}\n")
+
+          print(f"Release validated: version={workspace_ver}, tag={tag}, prerelease={is_prerelease}, publish={publish}")
+          PY
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+
+  build-binaries:
+    name: Build (${{ matrix.target }})
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+            archive: tar.gz
+            ext: ""
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+            archive: tar.gz
+            ext: ""
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+            archive: tar.gz
+            ext: ""
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+            archive: tar.gz
+            ext: ""
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+            archive: tar.gz
+            ext: ""
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+            archive: tar.gz
+            ext: ""
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+            archive: zip
+            ext: ".exe"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup cross-compilation toolchain
+        if: matrix.cross
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} -p shunt-cli --bin shunt
+
+      - name: Package archive (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          pkg="shunt-${{ needs.validate.outputs.tag }}-${{ matrix.target }}"
+          mkdir -p "dist/${pkg}/examples"
+          cp "target/${{ matrix.target }}/release/shunt" "dist/${pkg}/shunt"
+          cp LICENSE "dist/${pkg}/LICENSE"
+          cp examples/shunt.toml examples/shunt-ai.toml "dist/${pkg}/examples/"
+          tar -czf "dist/${pkg}.tar.gz" -C dist "${pkg}"
+          rm -rf "dist/${pkg}"
+
+      - name: Package archive (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $pkg = "shunt-${{ needs.validate.outputs.tag }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$pkg/examples" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/shunt.exe" "dist/$pkg/shunt.exe"
+          Copy-Item "LICENSE" "dist/$pkg/LICENSE"
+          Copy-Item "examples/shunt.toml", "examples/shunt-ai.toml" "dist/$pkg/examples/"
+          Compress-Archive -Path "dist/$pkg" -DestinationPath "dist/$pkg.zip" -Force
+          Remove-Item -Recurse -Force "dist/$pkg"
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/shunt-*
+          if-no-files-found: error
+
+  github-release:
+    name: Publish GitHub Release
+    needs: [validate, build-binaries]
+    if: needs.validate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download all release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+
+      - name: Generate SHA-256 checksums
+        working-directory: dist
+        run: |
+          sha256sum shunt-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate.outputs.tag }}
+          name: Shunt ${{ needs.validate.outputs.tag }}
+          generate_release_notes: true
+          prerelease: ${{ needs.validate.outputs.is_prerelease == 'true' }}
+          files: dist/*
+
+  docker-publish:
+    name: Publish Docker Image (GHCR)
+    needs: validate
+    if: needs.validate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set lowercased image name
+        id: img
+        run: |
+          repo="$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          echo "name=ghcr.io/${repo}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.name }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.validate.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.validate.outputs.tag }}
+            type=semver,pattern={{major}},value=${{ needs.validate.outputs.tag }}
+            type=raw,value=latest,enable=${{ needs.validate.outputs.is_prerelease != 'true' }}
+            type=sha
+
+      - name: Build and push multi-arch image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Attest container image provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.img.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  crates-publish:
+    name: Publish to crates.io
+    needs: [validate, github-release]
+    if: needs.validate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Publish workspace crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          if [[ -z "${CARGO_REGISTRY_TOKEN}" ]]; then
+            echo "error: CARGO_REGISTRY_TOKEN secret is not configured in the 'crates-io' environment." >&2
+            exit 1
+          fi
+
+          # Topological order respecting both normal and dev dependencies:
+          CRATES=(
+            shunt-plugin-sdk
+            shunt-core
+            shunt-plugins
+            shunt-config
+            shunt-ai
+            shunt-cli
+          )
+
+          index_url() {
+            local name="$1"
+            local lower="${name,,}"
+            local p1="${lower:0:2}"
+            local p2="${lower:2:2}"
+            echo "https://index.crates.io/${p1}/${p2}/${lower}"
+          }
+
+          is_published() {
+            local name="$1"
+            local ver="$2"
+            local url
+            url="$(index_url "$name")"
+            curl -fsSL "$url" 2>/dev/null | grep -q "\"vers\":\"${ver}\""
+          }
+
+          wait_for_index() {
+            local name="$1"
+            local ver="$2"
+            echo "==> Waiting for ${name} ${ver} to appear in crates.io index..."
+            for _ in $(seq 1 36); do
+              if is_published "$name" "$ver"; then
+                echo "    ${name} ${ver} is visible on crates.io."
+                return 0
+              fi
+              sleep 5
+            done
+            echo "warning: timed out waiting for ${name} ${ver} on sparse index; continuing..." >&2
+          }
+
+          for crate in "${CRATES[@]}"; do
+            if is_published "$crate" "$RELEASE_VERSION"; then
+              echo "==> Skipping ${crate} ${RELEASE_VERSION} (already published)"
+              continue
+            fi
+            echo "==> Publishing ${crate} ${RELEASE_VERSION}..."
+            cargo publish --locked -p "$crate"
+            wait_for_index "$crate" "$RELEASE_VERSION"
+          done

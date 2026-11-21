@@ -16,9 +16,7 @@ use crate::types::{AiFailoverHistory, AiRequestMeta, AiUsage, AiUsageReport};
 
 const DEFAULT_MAX_JSON_INSPECT_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
 
-const AI_LATENCY_BUCKETS: &[f64] = &[
-    0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0,
-];
+const AI_LATENCY_BUCKETS: &[f64] = &[0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0];
 
 /// Optional callback invoked with every completed [`AiUsageReport`] (useful for tests
 /// or custom telemetry pipelines).
@@ -106,7 +104,11 @@ impl AiMetrics {
         if let Some(prompt) = report.prompt_tokens {
             *data
                 .tokens_total
-                .entry((report.provider.clone(), report.served_model.clone(), "prompt"))
+                .entry((
+                    report.provider.clone(),
+                    report.served_model.clone(),
+                    "prompt",
+                ))
                 .or_insert(0) += prompt;
         }
         if let Some(completion) = report.completion_tokens {
@@ -605,11 +607,7 @@ fn contains_first_token(val: &Value) -> bool {
     }
 
     // Anthropic streaming chunk (in case ai-usage-tracker runs before ai-provider-adapter)
-    if val.get("type").and_then(Value::as_str) == Some("content_block_delta") {
-        return true;
-    }
-
-    false
+    val.get("type").and_then(Value::as_str) == Some("content_block_delta")
 }
 
 fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {

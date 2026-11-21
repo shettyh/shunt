@@ -66,12 +66,11 @@ impl PluginFactory for BearerAuthFactory {
                 TokenSpec::Plain(t) => (t, format!("token-{idx}")),
                 TokenSpec::Named { token, subject } => (token, subject),
             };
-            let resolved = resolve_env_secret(&raw_token).map_err(|msg| {
-                PluginBuildError::BuildFailed {
+            let resolved =
+                resolve_env_secret(&raw_token).map_err(|msg| PluginBuildError::BuildFailed {
                     plugin: self.name().to_owned(),
                     message: msg,
-                }
-            })?;
+                })?;
             if resolved.is_empty() {
                 return Err(PluginBuildError::BuildFailed {
                     plugin: self.name().to_owned(),
@@ -97,8 +96,7 @@ impl PluginFactory for BearerAuthFactory {
 
 fn resolve_env_secret(raw: &str) -> Result<String, String> {
     if let Some(var_name) = raw.strip_prefix("env:") {
-        std::env::var(var_name)
-            .map_err(|_| format!("environment variable `{var_name}` not set"))
+        std::env::var(var_name).map_err(|_| format!("environment variable `{var_name}` not set"))
     } else {
         Ok(raw.to_owned())
     }
@@ -140,7 +138,10 @@ impl HttpPlugin for BearerAuthPlugin {
             .headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")))
+            .and_then(|s| {
+                s.strip_prefix("Bearer ")
+                    .or_else(|| s.strip_prefix("bearer "))
+            })
             .map(str::trim);
 
         if let Some(token) = presented {
@@ -160,11 +161,8 @@ impl HttpPlugin for BearerAuthPlugin {
             }
         }
 
-        let resp = BufferedResponse::json(
-            StatusCode::UNAUTHORIZED,
-            r#"{"error":"unauthorized"}"#,
-        )
-        .with_header(header::WWW_AUTHENTICATE, self.www_authenticate.clone());
+        let resp = BufferedResponse::json(StatusCode::UNAUTHORIZED, r#"{"error":"unauthorized"}"#)
+            .with_header(header::WWW_AUTHENTICATE, self.www_authenticate.clone());
 
         HookResult::Ready(Flow::Respond(resp))
     }

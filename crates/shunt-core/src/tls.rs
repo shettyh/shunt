@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::io::Cursor;
 use std::sync::{Arc, Once};
 
 use arc_swap::ArcSwap;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
@@ -27,8 +27,7 @@ pub fn load_certified_key_pem(
 ) -> Result<Arc<CertifiedKey>, CoreError> {
     ensure_crypto_provider();
 
-    let mut cert_reader = Cursor::new(cert_pem);
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| CoreError::Tls(format!("failed to parse certificate PEM: {e}")))?;
 
@@ -38,10 +37,8 @@ pub fn load_certified_key_pem(
         ));
     }
 
-    let mut key_reader = Cursor::new(key_pem);
-    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_reader)
-        .map_err(|e| CoreError::Tls(format!("failed to parse private key PEM: {e}")))?
-        .ok_or_else(|| CoreError::Tls("private key PEM contained no private key".to_owned()))?;
+    let key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_slice(key_pem)
+        .map_err(|e| CoreError::Tls(format!("failed to parse private key PEM: {e}")))?;
 
     let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
         .map_err(|e| CoreError::Tls(format!("unsupported private key type: {e}")))?;
@@ -176,7 +173,10 @@ impl Default for UpstreamTlsConfig {
 }
 
 impl UpstreamTlsConfig {
-    pub fn build_client_config(&self, alpn_override: Option<Vec<Vec<u8>>>) -> Result<Arc<ClientConfig>, CoreError> {
+    pub fn build_client_config(
+        &self,
+        alpn_override: Option<Vec<Vec<u8>>>,
+    ) -> Result<Arc<ClientConfig>, CoreError> {
         ensure_crypto_provider();
 
         let mut cfg = if self.insecure_skip_verify {
@@ -189,8 +189,7 @@ impl UpstreamTlsConfig {
             roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
             if let Some(pem) = &self.extra_ca_pem {
-                let mut reader = Cursor::new(pem);
-                let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+                let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(pem)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| CoreError::Tls(format!("failed to parse upstream CA PEM: {e}")))?;
                 for cert in certs {

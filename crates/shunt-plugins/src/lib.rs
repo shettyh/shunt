@@ -27,10 +27,7 @@ pub use rate_limit::{RateLimitFactory, RateLimitPlugin};
 pub use request_id::{RequestId, RequestIdFactory, RequestIdPlugin};
 
 /// Registers all first-party Shunt plugins into `registry`.
-pub fn register_builtin_plugins(
-    registry: &mut PluginRegistry,
-    metrics: Arc<PrometheusMetrics>,
-) {
+pub fn register_builtin_plugins(registry: &mut PluginRegistry, metrics: Arc<PrometheusMetrics>) {
     registry
         .register(RequestIdFactory)
         .register(AccessLogFactory)

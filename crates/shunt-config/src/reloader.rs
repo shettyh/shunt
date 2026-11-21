@@ -50,7 +50,10 @@ impl ReloadController {
     ///
     /// On error, the last-known-good snapshot and TLS certs remain active untouched.
     pub fn reload(&self) -> Result<SnapshotInspect, ConfigError> {
-        let _guard = self.reload_lock.lock().expect("ReloadController lock poisoned");
+        let _guard = self
+            .reload_lock
+            .lock()
+            .expect("ReloadController lock poisoned");
 
         let loaded = self.provider.load()?;
         let bundle = self.compiler.compile(&loaded)?;

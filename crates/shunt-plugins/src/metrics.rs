@@ -135,7 +135,13 @@ impl PrometheusMetrics {
         );
         out.push_str("# TYPE shunt_request_duration_seconds histogram\n");
         for ((route, upstream), hist) in &data.request_duration {
-            render_histogram(&mut out, "shunt_request_duration_seconds", route, upstream, hist);
+            render_histogram(
+                &mut out,
+                "shunt_request_duration_seconds",
+                route,
+                upstream,
+                hist,
+            );
         }
 
         out.push_str(
@@ -143,7 +149,13 @@ impl PrometheusMetrics {
         );
         out.push_str("# TYPE shunt_upstream_ttfb_seconds histogram\n");
         for ((route, upstream), hist) in &data.upstream_ttfb {
-            render_histogram(&mut out, "shunt_upstream_ttfb_seconds", route, upstream, hist);
+            render_histogram(
+                &mut out,
+                "shunt_upstream_ttfb_seconds",
+                route,
+                upstream,
+                hist,
+            );
         }
 
         out.push_str("# HELP shunt_request_bytes_total Total incoming request body bytes.\n");

@@ -14,8 +14,8 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use serde_json::{Value, json};
 use shunt_ai::{
-    AiFailoverFactory, AiMetrics, AiModelRouterFactory, AiProviderAdapterFactory,
-    AiUsageReport, AiUsageTrackerFactory, SseParser, register_ai_plugins,
+    AiFailoverFactory, AiMetrics, AiModelRouterFactory, AiProviderAdapterFactory, AiUsageReport,
+    AiUsageTrackerFactory, SseParser, register_ai_plugins,
 };
 use shunt_config::{ConfigProvider, InlineConfigProvider, SnapshotCompiler};
 use shunt_core::{GatewayServer, RuntimeRegistry};
@@ -123,8 +123,7 @@ where
                             .and_then(|v| v.to_str().ok())
                             .map(str::to_owned);
                         let bytes = req.into_body().collect().await.unwrap().to_bytes();
-                        let body: Value =
-                            serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
 
                         let captured = CapturedReq {
                             path,
@@ -152,8 +151,7 @@ async fn post_chat(
     body: Value,
     extra_headers: &[(&str, &str)],
 ) -> (StatusCode, http::HeaderMap, Bytes) {
-    let client: Client<_, Full<Bytes>> =
-        Client::builder(TokioExecutor::new()).build_http();
+    let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
     let payload = Bytes::from(serde_json::to_vec(&body).unwrap());
     let mut builder = Request::builder()
         .method("POST")
@@ -358,7 +356,10 @@ log_usage = false
     let reqs = captured_reqs.lock().await;
     assert_eq!(reqs.len(), 2);
     assert_eq!(reqs[0].path, "/v1/chat/completions");
-    assert_eq!(reqs[0].auth.as_deref(), Some("Bearer sk-test-openai-secret"));
+    assert_eq!(
+        reqs[0].auth.as_deref(),
+        Some("Bearer sk-test-openai-secret")
+    );
     assert_eq!(reqs[0].accept_encoding.as_deref(), Some("identity"));
     assert_eq!(reqs[0].body["model"], "gpt-4o-2024-08-06");
     assert_eq!(reqs[1].body["stream_options"]["include_usage"], true);
@@ -601,7 +602,10 @@ log_usage = false
     let reqs = captured_reqs.lock().await;
     assert_eq!(reqs.len(), 2);
     assert_eq!(reqs[0].path, "/v1/messages");
-    assert_eq!(reqs[0].auth, None, "downstream Authorization must be stripped");
+    assert_eq!(
+        reqs[0].auth, None,
+        "downstream Authorization must be stripped"
+    );
     assert_eq!(reqs[0].x_api_key.as_deref(), Some("sk-ant-test-key"));
     assert_eq!(reqs[0].anthropic_version.as_deref(), Some("2023-06-01"));
     assert_eq!(reqs[0].body["system"], "Be brief.");
@@ -1088,9 +1092,12 @@ fn example_shunt_ai_toml_compiles_cleanly() {
         std::env::set_var("ANTHROPIC_API_KEY", "sk-example-anthropic");
     }
 
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/shunt-ai.toml");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/shunt-ai.toml");
     let provider = shunt_config::FileConfigProvider::new(&path);
-    let loaded = provider.load().expect("examples/shunt-ai.toml should parse");
+    let loaded = provider
+        .load()
+        .expect("examples/shunt-ai.toml should parse");
 
     let mut reg = PluginRegistry::new();
     let prom = Arc::new(PrometheusMetrics::new());

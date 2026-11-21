@@ -2,7 +2,9 @@
 name = "shunt-plugin-sdk"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Public plugin SDK for the Shunt HTTP gateway"
 
 [dependencies]

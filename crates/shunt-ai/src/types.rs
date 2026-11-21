@@ -166,8 +166,7 @@ pub fn openai_error_response(
 /// Resolves a secret string, supporting `env:VAR_NAME` indirection.
 pub fn resolve_env_secret(raw: &str) -> Result<String, String> {
     if let Some(var_name) = raw.strip_prefix("env:") {
-        std::env::var(var_name)
-            .map_err(|_| format!("environment variable `{var_name}` is not set"))
+        std::env::var(var_name).map_err(|_| format!("environment variable `{var_name}` is not set"))
     } else {
         Ok(raw.to_owned())
     }

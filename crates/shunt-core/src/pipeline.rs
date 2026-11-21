@@ -80,7 +80,10 @@ pub async fn execute_request(
                     return finish_short_circuit(&plugins, mask, ctx, &route.id, resp, 0, None);
                 }
                 Ok(Flow::RetryUpstream) => {
-                    warn!(plugin = plugin.name(), "RetryUpstream ignored in on_request_headers");
+                    warn!(
+                        plugin = plugin.name(),
+                        "RetryUpstream ignored in on_request_headers"
+                    );
                 }
                 Err(panic_msg) => {
                     warn!(plugin = plugin.name(), panic = %panic_msg, "plugin panicked in on_request_headers");
@@ -173,17 +176,13 @@ pub async fn execute_request(
         request_bytes = body_bytes.len() as u64;
 
         for plugin in plugins.iter() {
-            if !plugin
-                .hook_mask()
-                .contains(HookMask::REQUEST_BODY_BUFFERED)
-            {
+            if !plugin.hook_mask().contains(HookMask::REQUEST_BODY_BUFFERED) {
                 continue;
             }
             let start = ctx.trace_enabled.then(Instant::now);
-            let res = run_hook_isolated(|| {
-                plugin.on_request_body_buffered(&mut ctx, &mut body_bytes)
-            })
-            .await;
+            let res =
+                run_hook_isolated(|| plugin.on_request_body_buffered(&mut ctx, &mut body_bytes))
+                    .await;
             if let Some(s) = start {
                 ctx.record_timing(plugin.name(), "on_request_body_buffered", s.elapsed());
             }
@@ -1035,11 +1034,7 @@ fn spawn_response_body_stream_pump(
                         })
                         .await;
                         if let Some(s) = start {
-                            ctx.record_timing(
-                                plugin.name(),
-                                "on_response_body_chunk",
-                                s.elapsed(),
-                            );
+                            ctx.record_timing(plugin.name(), "on_response_body_chunk", s.elapsed());
                         }
                         match res {
                             Ok(StreamFlow::Continue) => {}
@@ -1073,8 +1068,9 @@ fn spawn_response_body_stream_pump(
                         response_bytes += flush.len() as u64;
                         if tx.send(Ok(Frame::data(flush))).await.is_err() {
                             aborted_mid_stream = true;
-                            error_msg =
-                                Some("downstream client disconnected during final flush".to_owned());
+                            error_msg = Some(
+                                "downstream client disconnected during final flush".to_owned(),
+                            );
                         }
                     }
                     break;
@@ -1132,9 +1128,7 @@ async fn run_on_complete_inner(
         if !plugin.hook_mask().contains(HookMask::ON_COMPLETE) {
             continue;
         }
-        if let Err(panic_msg) =
-            run_hook_isolated(|| plugin.on_complete(ctx, summary)).await
-        {
+        if let Err(panic_msg) = run_hook_isolated(|| plugin.on_complete(ctx, summary)).await {
             warn!(plugin = plugin.name(), panic = %panic_msg, "plugin panicked in on_complete");
         }
     }

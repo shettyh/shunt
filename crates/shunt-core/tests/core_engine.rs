@@ -13,8 +13,8 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::ServerName;
 use shunt_core::{
-    CertStore, DynamicCertResolver, GatewayServer, RouteMatch, RouteSpec,
-    RuntimeRegistry, ShuntBody, SnapshotBuilder, TimeoutConfig, TlsListenerConfig, UpstreamConfig,
+    CertStore, DynamicCertResolver, GatewayServer, RouteMatch, RouteSpec, RuntimeRegistry,
+    ShuntBody, SnapshotBuilder, TimeoutConfig, TlsListenerConfig, UpstreamConfig,
     load_certified_key_pem,
 };
 use shunt_plugin_sdk::{
@@ -118,7 +118,12 @@ fn self_signed_cert_pem(domains: Vec<String>) -> (Vec<u8>, Vec<u8>) {
 #[tokio::test]
 async fn h1_zero_plugin_passthrough() {
     let upstream = spawn_http1_upstream(|req| async move {
-        let path = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("").to_owned();
+        let path = req
+            .uri()
+            .path_and_query()
+            .map(|p| p.as_str())
+            .unwrap_or("")
+            .to_owned();
         let xff = req
             .headers()
             .get("x-forwarded-for")
@@ -128,7 +133,10 @@ async fn h1_zero_plugin_passthrough() {
         let has_hop = req.headers().contains_key("x-custom-hop");
         let body = req.into_body().collect().await.unwrap().to_bytes();
 
-        let payload = format!("path={path}|xff={xff}|hop={has_hop}|body={}", String::from_utf8_lossy(&body));
+        let payload = format!(
+            "path={path}|xff={xff}|hop={has_hop}|body={}",
+            String::from_utf8_lossy(&body)
+        );
         Response::builder()
             .status(StatusCode::OK)
             .header("x-upstream", "echo")
@@ -139,11 +147,11 @@ async fn h1_zero_plugin_passthrough() {
 
     let registry = RuntimeRegistry::new();
     let snapshot = SnapshotBuilder::new(1)
-        .upstream(UpstreamConfig::new("echo", vec![format!("http://{upstream}")]))
-        .route(
-            RouteSpec::new("r1", RouteMatch::prefix("/api"), "echo")
-                .with_strip_prefix("/api"),
-        )
+        .upstream(UpstreamConfig::new(
+            "echo",
+            vec![format!("http://{upstream}")],
+        ))
+        .route(RouteSpec::new("r1", RouteMatch::prefix("/api"), "echo").with_strip_prefix("/api"))
         .build(&registry, true)
         .unwrap();
 
@@ -304,7 +312,10 @@ async fn tls_sni_and_hot_cert_reload() {
 
     let registry = RuntimeRegistry::new();
     let snapshot = SnapshotBuilder::new(1)
-        .upstream(UpstreamConfig::new("up", vec![format!("http://{upstream}")]))
+        .upstream(UpstreamConfig::new(
+            "up",
+            vec![format!("http://{upstream}")],
+        ))
         .route(
             RouteSpec::new("tls-route", RouteMatch::any(), "up")
                 .with_plugin(Arc::new(SniEchoPlugin)),
@@ -496,7 +507,10 @@ async fn sync_and_async_plugins_short_circuit_and_timings() {
 
     let registry = RuntimeRegistry::new();
     let snapshot = SnapshotBuilder::new(1)
-        .upstream(UpstreamConfig::new("up", vec![format!("http://{upstream}")]))
+        .upstream(UpstreamConfig::new(
+            "up",
+            vec![format!("http://{upstream}")],
+        ))
         .route(RouteSpec::new("auth-route", RouteMatch::any(), "up").with_plugin(plugin))
         .build(&registry, true)
         .unwrap();
@@ -632,8 +646,14 @@ async fn request_body_buffering_dynamic_route_and_413_cap() {
 
     let registry = RuntimeRegistry::new();
     let snapshot = SnapshotBuilder::new(1)
-        .upstream(UpstreamConfig::new("openai", vec![format!("http://{openai_up}")]))
-        .upstream(UpstreamConfig::new("anthropic", vec![format!("http://{anthropic_up}")]))
+        .upstream(UpstreamConfig::new(
+            "openai",
+            vec![format!("http://{openai_up}")],
+        ))
+        .upstream(UpstreamConfig::new(
+            "anthropic",
+            vec![format!("http://{anthropic_up}")],
+        ))
         .route(
             RouteSpec::new("chat", RouteMatch::exact("/v1/chat"), "openai")
                 .with_plugin(Arc::new(JsonModelRouterPlugin { cap: 64 })),
@@ -654,7 +674,10 @@ async fn request_body_buffering_dynamic_route_and_413_cap() {
         .unwrap();
     let (status, _, body) = send_h1(handle.local_addr(), req).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, Bytes::from_static(br#"anthropic:{"model":"claude-3"}"#));
+    assert_eq!(
+        body,
+        Bytes::from_static(br#"anthropic:{"model":"claude-3"}"#)
+    );
 
     // Oversized payload (> 64 bytes) rejected with 413 Payload Too Large.
     let big = vec![b'a'; 128];
@@ -766,8 +789,14 @@ async fn per_attempt_failover_replays_canonical_buffered_body() {
 
     let registry = RuntimeRegistry::new();
     let snapshot = SnapshotBuilder::new(1)
-        .upstream(UpstreamConfig::new("primary", vec![format!("http://{primary_up}")]))
-        .upstream(UpstreamConfig::new("backup", vec![format!("http://{backup_up}")]))
+        .upstream(UpstreamConfig::new(
+            "primary",
+            vec![format!("http://{primary_up}")],
+        ))
+        .upstream(UpstreamConfig::new(
+            "backup",
+            vec![format!("http://{backup_up}")],
+        ))
         .route(
             RouteSpec::new("ai", RouteMatch::any(), "primary")
                 .with_max_attempts(2)
@@ -861,9 +890,13 @@ async fn streaming_sse_chunk_rewrite_and_eof_flush() {
     let upstream = spawn_http1_upstream(|_req| async move {
         let (tx, rx) = mpsc::channel(8);
         tokio::spawn(async move {
-            let _ = tx.send(Ok(Frame::data(Bytes::from_static(b"data: hel")))).await;
+            let _ = tx
+                .send(Ok(Frame::data(Bytes::from_static(b"data: hel"))))
+                .await;
             tokio::time::sleep(Duration::from_millis(10)).await;
-            let _ = tx.send(Ok(Frame::data(Bytes::from_static(b"lo\ndata: wor")))).await;
+            let _ = tx
+                .send(Ok(Frame::data(Bytes::from_static(b"lo\ndata: wor"))))
+                .await;
             tokio::time::sleep(Duration::from_millis(10)).await;
             let _ = tx.send(Ok(Frame::data(Bytes::from_static(b"ld")))).await;
         });
@@ -880,7 +913,10 @@ async fn streaming_sse_chunk_rewrite_and_eof_flush() {
     let done = Arc::new(Notify::new());
     let registry = RuntimeRegistry::new();
     let snapshot = SnapshotBuilder::new(1)
-        .upstream(UpstreamConfig::new("sse", vec![format!("http://{upstream}")]))
+        .upstream(UpstreamConfig::new(
+            "sse",
+            vec![format!("http://{upstream}")],
+        ))
         .route(
             RouteSpec::new("sse", RouteMatch::any(), "sse").with_plugin(Arc::new(SseUpperPlugin {
                 summaries: Arc::clone(&summaries),
@@ -895,7 +931,10 @@ async fn streaming_sse_chunk_rewrite_and_eof_flush() {
         .await
         .unwrap();
 
-    let req = Request::builder().uri("/events").body(Full::new(Bytes::new())).unwrap();
+    let req = Request::builder()
+        .uri("/events")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
     let (status, _, body) = send_h1(handle.local_addr(), req).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, Bytes::from_static(b"DATA: HELLO\nDATA: WORLD[EOF]"));
@@ -985,7 +1024,10 @@ async fn split_timeouts_ttfb_and_idle_chunk() {
     // 1. TTFB timeout -> 504 Gateway Timeout
     let (status, _, _) = send_h1(
         handle.local_addr(),
-        Request::builder().uri("/slow-headers").body(Full::new(Bytes::new())).unwrap(),
+        Request::builder()
+            .uri("/slow-headers")
+            .body(Full::new(Bytes::new()))
+            .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
@@ -993,7 +1035,10 @@ async fn split_timeouts_ttfb_and_idle_chunk() {
     // 2. Steady stream longer than idle timeout -> succeeds completely!
     let (status, _, body) = send_h1(
         handle.local_addr(),
-        Request::builder().uri("/steady-stream").body(Full::new(Bytes::new())).unwrap(),
+        Request::builder()
+            .uri("/steady-stream")
+            .body(Full::new(Bytes::new()))
+            .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1018,7 +1063,10 @@ async fn split_timeouts_ttfb_and_idle_chunk() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body_res = res.into_body().collect().await;
-    assert!(body_res.is_err(), "expected mid-stream abort on idle chunk timeout");
+    assert!(
+        body_res.is_err(),
+        "expected mid-stream abort on idle chunk timeout"
+    );
 
     assert!(handle.shutdown().await);
 }
@@ -1098,7 +1146,10 @@ async fn panic_isolation_pre_flush_and_mid_stream() {
 
     let registry = RuntimeRegistry::new();
     let snapshot = SnapshotBuilder::new(1)
-        .upstream(UpstreamConfig::new("up", vec![format!("http://{upstream}")]))
+        .upstream(UpstreamConfig::new(
+            "up",
+            vec![format!("http://{upstream}")],
+        ))
         .route(
             RouteSpec::new("p", RouteMatch::any(), "up").with_plugin(Arc::new(PanickingPlugin {
                 summaries: Arc::clone(&summaries),
@@ -1116,7 +1167,10 @@ async fn panic_isolation_pre_flush_and_mid_stream() {
     // Sync pre-flush panic -> 500
     let (st, _, _) = send_h1(
         handle.local_addr(),
-        Request::builder().uri("/panic-sync").body(Full::new(Bytes::new())).unwrap(),
+        Request::builder()
+            .uri("/panic-sync")
+            .body(Full::new(Bytes::new()))
+            .unwrap(),
     )
     .await;
     assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR);
@@ -1125,7 +1179,10 @@ async fn panic_isolation_pre_flush_and_mid_stream() {
     // Async pre-flush panic -> 500
     let (st, _, _) = send_h1(
         handle.local_addr(),
-        Request::builder().uri("/panic-async").body(Full::new(Bytes::new())).unwrap(),
+        Request::builder()
+            .uri("/panic-async")
+            .body(Full::new(Bytes::new()))
+            .unwrap(),
     )
     .await;
     assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR);
@@ -1155,7 +1212,10 @@ async fn panic_isolation_pre_flush_and_mid_stream() {
     // Gateway is completely healthy for normal traffic after panics!
     let (st, _, body) = send_h1(
         handle.local_addr(),
-        Request::builder().uri("/ok").body(Full::new(Bytes::new())).unwrap(),
+        Request::builder()
+            .uri("/ok")
+            .body(Full::new(Bytes::new()))
+            .unwrap(),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -1239,10 +1299,24 @@ async fn hot_reload_preserves_warm_pools_and_plugin_state_and_drains_inflight() 
     assert_eq!(registry.state_store().len(), 2);
 
     let snap1 = SnapshotBuilder::new(1)
-        .upstream(UpstreamConfig::new("stable", vec![format!("http://{stable_up}")]))
-        .upstream(UpstreamConfig::new("ephemeral", vec![format!("http://{v1_up}")]))
-        .route(RouteSpec::new("r-main", RouteMatch::prefix("/main"), "ephemeral"))
-        .route(RouteSpec::new("r-stable", RouteMatch::prefix("/stable"), "stable"))
+        .upstream(UpstreamConfig::new(
+            "stable",
+            vec![format!("http://{stable_up}")],
+        ))
+        .upstream(UpstreamConfig::new(
+            "ephemeral",
+            vec![format!("http://{v1_up}")],
+        ))
+        .route(RouteSpec::new(
+            "r-main",
+            RouteMatch::prefix("/main"),
+            "ephemeral",
+        ))
+        .route(RouteSpec::new(
+            "r-stable",
+            RouteMatch::prefix("/stable"),
+            "stable",
+        ))
         .build(&registry, true)
         .unwrap();
 
@@ -1259,7 +1333,10 @@ async fn hot_reload_preserves_warm_pools_and_plugin_state_and_drains_inflight() 
     let inflight = tokio::spawn(async move {
         send_h1(
             gw_addr,
-            Request::builder().uri("/main").body(Full::new(Bytes::new())).unwrap(),
+            Request::builder()
+                .uri("/main")
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
         )
         .await
     });
@@ -1279,15 +1356,32 @@ async fn hot_reload_preserves_warm_pools_and_plugin_state_and_drains_inflight() 
     assert_eq!(stable_counter_after.load(Ordering::SeqCst), 42);
 
     let snap2 = SnapshotBuilder::new(2)
-        .upstream(UpstreamConfig::new("stable", vec![format!("http://{stable_up}")]))
-        .upstream(UpstreamConfig::new("new_up", vec![format!("http://{v2_up}")]))
-        .route(RouteSpec::new("r-main", RouteMatch::prefix("/main"), "new_up"))
-        .route(RouteSpec::new("r-stable", RouteMatch::prefix("/stable"), "stable"))
+        .upstream(UpstreamConfig::new(
+            "stable",
+            vec![format!("http://{stable_up}")],
+        ))
+        .upstream(UpstreamConfig::new(
+            "new_up",
+            vec![format!("http://{v2_up}")],
+        ))
+        .route(RouteSpec::new(
+            "r-main",
+            RouteMatch::prefix("/main"),
+            "new_up",
+        ))
+        .route(RouteSpec::new(
+            "r-stable",
+            RouteMatch::prefix("/stable"),
+            "stable",
+        ))
         .build(&registry, true)
         .unwrap();
 
     // Verify warm pool reuse & orphan pool GC.
-    assert_eq!(snap2.upstream("stable").unwrap().pool_id(), stable_pool_id_v1);
+    assert_eq!(
+        snap2.upstream("stable").unwrap().pool_id(),
+        stable_pool_id_v1
+    );
     assert_eq!(registry.pool_count(), 2);
 
     // Atomic hot swap while v1 request is still in-flight!
@@ -1296,7 +1390,10 @@ async fn hot_reload_preserves_warm_pools_and_plugin_state_and_drains_inflight() 
     // New request immediately hits v2.
     let (st2, _, body2) = send_h1(
         gw_addr,
-        Request::builder().uri("/main").body(Full::new(Bytes::new())).unwrap(),
+        Request::builder()
+            .uri("/main")
+            .body(Full::new(Bytes::new()))
+            .unwrap(),
     )
     .await;
     assert_eq!(st2, StatusCode::OK);
@@ -1344,7 +1441,10 @@ async fn websocket_upgrade_bidirectional_tunnel() {
 
     let registry = RuntimeRegistry::new();
     let snapshot = SnapshotBuilder::new(1)
-        .upstream(UpstreamConfig::new("ws", vec![format!("http://{upstream}")]))
+        .upstream(UpstreamConfig::new(
+            "ws",
+            vec![format!("http://{upstream}")],
+        ))
         .route(RouteSpec::new("ws", RouteMatch::prefix("/ws"), "ws"))
         .build(&registry, true)
         .unwrap();
@@ -1378,7 +1478,11 @@ async fn websocket_upgrade_bidirectional_tunnel() {
     }
     let header_str = String::from_utf8_lossy(&header_buf);
     assert!(header_str.starts_with("HTTP/1.1 101"), "got: {header_str}");
-    assert!(header_str.to_ascii_lowercase().contains("sec-websocket-accept: test-accept-token"));
+    assert!(
+        header_str
+            .to_ascii_lowercase()
+            .contains("sec-websocket-accept: test-accept-token")
+    );
 
     // Send bytes over the upgraded bidirectional tunnel and verify echo.
     tcp.write_all(b"ping-over-ws").await.unwrap();
@@ -1414,7 +1518,10 @@ async fn graceful_shutdown_drains_inflight_requests() {
 
     let registry = RuntimeRegistry::new();
     let snapshot = SnapshotBuilder::new(1)
-        .upstream(UpstreamConfig::new("up", vec![format!("http://{upstream}")]))
+        .upstream(UpstreamConfig::new(
+            "up",
+            vec![format!("http://{upstream}")],
+        ))
         .route(RouteSpec::new("r", RouteMatch::any(), "up"))
         .build(&registry, true)
         .unwrap();
@@ -1429,7 +1536,10 @@ async fn graceful_shutdown_drains_inflight_requests() {
     let inflight = tokio::spawn(async move {
         send_h1(
             addr,
-            Request::builder().uri("/slow").body(Full::new(Bytes::new())).unwrap(),
+            Request::builder()
+                .uri("/slow")
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
         )
         .await
     });

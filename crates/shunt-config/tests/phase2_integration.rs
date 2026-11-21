@@ -342,7 +342,10 @@ key = "global"
     // Check GET /health
     let (st, _, body) = send_h1(
         admin.local_addr(),
-        Request::builder().uri("/health").body(Full::new(Bytes::new())).unwrap(),
+        Request::builder()
+            .uri("/health")
+            .body(Full::new(Bytes::new()))
+            .unwrap(),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -353,7 +356,10 @@ key = "global"
     // Check GET /snapshot redacts secrets
     let (st, _, body) = send_h1(
         admin.local_addr(),
-        Request::builder().uri("/snapshot").body(Full::new(Bytes::new())).unwrap(),
+        Request::builder()
+            .uri("/snapshot")
+            .body(Full::new(Bytes::new()))
+            .unwrap(),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -362,7 +368,10 @@ key = "global"
         !snap_str.contains("super-secret-token-123"),
         "secret leaked in /snapshot: {snap_str}"
     );
-    assert!(snap_str.contains("[REDACTED]"), "expected redaction marker: {snap_str}");
+    assert!(
+        snap_str.contains("[REDACTED]"),
+        "expected redaction marker: {snap_str}"
+    );
 
     // Consume 1 of 2 rate-limit tokens on v1.
     let (st, hdrs, body) = send_h1(
@@ -520,7 +529,10 @@ upstream = "app"
 
     let (_, _, body) = send_h1(
         gw.local_addr(),
-        Request::builder().uri("/").body(Full::new(Bytes::new())).unwrap(),
+        Request::builder()
+            .uri("/")
+            .body(Full::new(Bytes::new()))
+            .unwrap(),
     )
     .await;
     assert!(String::from_utf8_lossy(&body).starts_with("watch-v1"));
@@ -533,7 +545,10 @@ upstream = "app"
         tokio::time::sleep(Duration::from_millis(50)).await;
         let (_, _, body) = send_h1(
             gw.local_addr(),
-            Request::builder().uri("/").body(Full::new(Bytes::new())).unwrap(),
+            Request::builder()
+                .uri("/")
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
         )
         .await;
         if String::from_utf8_lossy(&body).starts_with("watch-v2") {
@@ -541,7 +556,10 @@ upstream = "app"
             break;
         }
     }
-    assert!(swapped, "file watcher did not hot-reload shunt.toml in time");
+    assert!(
+        swapped,
+        "file watcher did not hot-reload shunt.toml in time"
+    );
 
     watcher.stop();
     assert!(gw.shutdown().await);
@@ -600,8 +618,8 @@ routes:
     let mut plugins = PluginRegistry::new();
     register_builtin_plugins(&mut plugins, metrics);
     let runtime = Arc::new(RuntimeRegistry::new());
-    let compiler = SnapshotCompiler::new(Arc::new(plugins), runtime)
-        .with_extra_global_plugin(waterfall);
+    let compiler =
+        SnapshotCompiler::new(Arc::new(plugins), runtime).with_extra_global_plugin(waterfall);
 
     let loaded = FileConfigProvider::new(&yaml_path).load().unwrap();
     let bundle = compiler.compile(&loaded).unwrap();

@@ -21,8 +21,8 @@ pub mod model_router;
 pub mod provider_adapter;
 pub mod sse;
 pub mod translate;
-pub mod usage_tracker;
 pub mod types;
+pub mod usage_tracker;
 
 use std::sync::Arc;
 

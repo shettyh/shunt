@@ -373,17 +373,10 @@ async fn run_http_bench(
                         builder = builder.header(k, v);
                     }
                     let req = builder.body(Full::new(Bytes::new())).unwrap();
-                    client
-                        .request(req)
-                        .await
-                        .map_err(|_| ())
+                    client.request(req).await.map_err(|_| ())
                 } else {
                     // Dedicated per-worker keep-alive H1 connection (zero client-pool lock contention).
-                    if h1_sender
-                        .as_ref()
-                        .map(|s| s.is_closed())
-                        .unwrap_or(true)
-                    {
+                    if h1_sender.as_ref().map(|s| s.is_closed()).unwrap_or(true) {
                         let addr_res = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
                             TcpStream::connect(SocketAddr::new(ip, port)).await
                         } else {
@@ -511,9 +504,15 @@ async fn run_http_bench(
             elapsed.as_secs_f64()
         );
     } else {
-        println!("HTTP Benchmark: {url} (c={concurrency}, d={:.2}s, h2={http2})", elapsed.as_secs_f64());
+        println!(
+            "HTTP Benchmark: {url} (c={concurrency}, d={:.2}s, h2={http2})",
+            elapsed.as_secs_f64()
+        );
         println!("  Requests : {ok} ok, {errs} errors ({rps:.1} req/s)");
-        println!("  Latency  : p50={}µs | p95={}µs | p99={}µs | max={}µs", p50, p95, p99, max);
+        println!(
+            "  Latency  : p50={}µs | p95={}µs | p99={}µs | max={}µs",
+            p50, p95, p99, max
+        );
     }
 }
 
@@ -660,7 +659,11 @@ async fn run_sse_bench(
             "  TTFC    : p50={}µs | p95={}µs | p99={}µs",
             ttfc_p50, ttfc_p95, ttfc_p99
         );
-        println!("  Duration: p50={}ms | p99={}ms", dur_p50 / 1000, dur_p99 / 1000);
+        println!(
+            "  Duration: p50={}ms | p99={}ms",
+            dur_p50 / 1000,
+            dur_p99 / 1000
+        );
     }
 }
 

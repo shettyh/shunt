@@ -2,7 +2,9 @@
 name = "shunt-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Ultra-lean pluggable Rust HTTP gateway core engine"
 
 [dependencies]
@@ -17,7 +19,6 @@ hyper.workspace = true
 hyper-util.workspace = true
 pin-project-lite.workspace = true
 rustls.workspace = true
-rustls-pemfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
