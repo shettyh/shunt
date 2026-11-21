@@ -5,7 +5,11 @@ use std::sync::{Arc, RwLock};
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
+use crate::clock::{Clock, SystemClock};
 use crate::plugin::HttpPlugin;
+
+/// Type-erased map used to stage newly created plugin state during transactional builds.
+pub type StagedStateMap = HashMap<String, Arc<dyn Any + Send + Sync>>;
 
 /// Errors returned while compiling/building a plugin from configuration.
 #[derive(Debug, Error)]
@@ -71,6 +75,18 @@ impl StateStore {
         Self::default()
     }
 
+    /// Looks up an existing typed state value under `full_key` without mutating the store.
+    pub fn get<T>(&self, full_key: &str) -> Option<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.entries
+            .read()
+            .expect("StateStore lock poisoned")
+            .get(full_key)
+            .and_then(|v| Arc::clone(v).downcast::<T>().ok())
+    }
+
     /// Gets or initializes a typed state value under `full_key`.
     ///
     /// If an existing value under `full_key` has a different concrete type, it is replaced.
@@ -79,13 +95,7 @@ impl StateStore {
         T: Send + Sync + 'static,
         F: FnOnce() -> T,
     {
-        if let Some(existing) = self
-            .entries
-            .read()
-            .expect("StateStore lock poisoned")
-            .get(full_key)
-            .and_then(|v| Arc::clone(v).downcast::<T>().ok())
-        {
+        if let Some(existing) = self.get::<T>(full_key) {
             return existing;
         }
 
@@ -101,6 +111,23 @@ impl StateStore {
         let erased: Arc<dyn Any + Send + Sync> = created.clone();
         guard.insert(full_key.to_owned(), erased);
         created
+    }
+
+    /// Atomically commits newly staged state entries and garbage-collects any scopes
+    /// absent from `live_scopes`. Returns the number of garbage-collected entries.
+    pub fn commit_staged(&self, staged: StagedStateMap, live_scopes: &HashSet<String>) -> usize {
+        let mut guard = self.entries.write().expect("StateStore lock poisoned");
+        for (k, v) in staged {
+            guard.insert(k, v);
+        }
+        let before = guard.len();
+        guard.retain(|full_key, _| {
+            full_key
+                .split_once("::")
+                .map(|(scope, _)| live_scopes.contains(scope))
+                .unwrap_or(false)
+        });
+        before - guard.len()
     }
 
     /// Retains only entries whose namespace prefix is present in `live_scopes`.
@@ -132,6 +159,7 @@ impl StateStore {
 pub struct StateHandle {
     scope_id: String,
     store: Arc<StateStore>,
+    staged: Option<Arc<RwLock<StagedStateMap>>>,
 }
 
 impl StateHandle {
@@ -139,6 +167,21 @@ impl StateHandle {
         Self {
             scope_id: scope_id.into(),
             store,
+            staged: None,
+        }
+    }
+
+    /// Creates a transactional handle that reads existing state from `store` while
+    /// staging newly initialized entries into `staged` until explicitly committed.
+    pub fn new_staged(
+        scope_id: impl Into<String>,
+        store: Arc<StateStore>,
+        staged: Arc<RwLock<StagedStateMap>>,
+    ) -> Self {
+        Self {
+            scope_id: scope_id.into(),
+            store,
+            staged: Some(staged),
         }
     }
 
@@ -153,7 +196,37 @@ impl StateHandle {
         F: FnOnce() -> T,
     {
         let full_key = format!("{}::{}", self.scope_id, key);
-        self.store.get_or_init(&full_key, init)
+        let Some(staged) = &self.staged else {
+            return self.store.get_or_init(&full_key, init);
+        };
+
+        if let Some(existing) = self.store.get::<T>(&full_key) {
+            return existing;
+        }
+        if let Some(existing) = staged
+            .read()
+            .expect("staged StateStore lock poisoned")
+            .get(&full_key)
+            .and_then(|v| Arc::clone(v).downcast::<T>().ok())
+        {
+            return existing;
+        }
+
+        let mut guard = staged.write().expect("staged StateStore lock poisoned");
+        if let Some(existing) = self.store.get::<T>(&full_key) {
+            return existing;
+        }
+        if let Some(existing) = guard
+            .get(&full_key)
+            .and_then(|v| Arc::clone(v).downcast::<T>().ok())
+        {
+            return existing;
+        }
+
+        let created = Arc::new(init());
+        let erased: Arc<dyn Any + Send + Sync> = created.clone();
+        guard.insert(full_key, erased);
+        created
     }
 }
 
@@ -162,6 +235,8 @@ pub struct BuildContext {
     scope_id: String,
     store: Arc<StateStore>,
     touched_scopes: Arc<RwLock<HashSet<String>>>,
+    staged: Option<Arc<RwLock<StagedStateMap>>>,
+    clock: Arc<dyn Clock>,
 }
 
 impl BuildContext {
@@ -174,12 +249,42 @@ impl BuildContext {
             scope_id: scope_id.into(),
             store,
             touched_scopes,
+            staged: None,
+            clock: SystemClock::shared(),
         }
+    }
+
+    /// Creates a transactional [`BuildContext`] with staged state and an explicit [`Clock`].
+    pub fn new_staged(
+        scope_id: impl Into<String>,
+        store: Arc<StateStore>,
+        touched_scopes: Arc<RwLock<HashSet<String>>>,
+        staged: Arc<RwLock<StagedStateMap>>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self {
+            scope_id: scope_id.into(),
+            store,
+            touched_scopes,
+            staged: Some(staged),
+            clock,
+        }
+    }
+
+    /// Attaches a custom [`Clock`] implementation (e.g., [`crate::ManualClock`] in tests).
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Stable identifier for this plugin attachment (e.g., `route:<id>:plugin:<name>`).
     pub fn scope_id(&self) -> &str {
         &self.scope_id
+    }
+
+    /// Monotonic clock shared by this runtime (defaults to [`SystemClock`]).
+    pub fn clock(&self) -> Arc<dyn Clock> {
+        Arc::clone(&self.clock)
     }
 
     /// Requests a scoped [`StateHandle`] whose entries will survive snapshot reloads
@@ -189,7 +294,14 @@ impl BuildContext {
             .write()
             .expect("touched_scopes lock poisoned")
             .insert(self.scope_id.clone());
-        StateHandle::new(self.scope_id.clone(), Arc::clone(&self.store))
+        match &self.staged {
+            Some(staged) => StateHandle::new_staged(
+                self.scope_id.clone(),
+                Arc::clone(&self.store),
+                Arc::clone(staged),
+            ),
+            None => StateHandle::new(self.scope_id.clone(), Arc::clone(&self.store)),
+        }
     }
 }
 

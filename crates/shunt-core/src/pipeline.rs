@@ -1226,7 +1226,7 @@ pub fn build_error_response(status: StatusCode, message: &'static str) -> Respon
 }
 
 /// Strips RFC 9110 hop-by-hop headers (preserving `te: trailers` for gRPC / HTTP/2).
-fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
+pub fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
     // Collect any extra header names nominated by `Connection: ...`.
     let extra: Vec<HeaderName> = headers
         .get_all(header::CONNECTION)
@@ -1278,7 +1278,9 @@ fn append_forwarded_for(headers: &mut HeaderMap, client_addr: SocketAddr) {
     }
 }
 
-fn strip_uri_prefix(uri: &Uri, prefix: &str) -> Uri {
+/// Strips a leading path segment prefix from `uri`, preserving query strings verbatim
+/// and always producing a path beginning with `/`.
+pub fn strip_uri_prefix(uri: &Uri, prefix: &str) -> Uri {
     let trimmed = prefix.trim_end_matches('/');
     if trimmed.is_empty() || trimmed == "/" {
         return uri.clone();

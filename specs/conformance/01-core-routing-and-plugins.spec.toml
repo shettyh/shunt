@@ -1,0 +1,66 @@
+[spec]
+name = "core-routing-and-plugins"
+config = "../../examples/shunt.toml"
+
+[[mocks]]
+upstream = "api_backend"
+name = "echo_ok"
+status = 200
+headers = { "x-upstream-id" = "mock-echo" }
+json = { ok = true, service = "api_backend" }
+
+[[cases]]
+name = "prefix route strips prefix, forwards XFF, strips hop-by-hop, applies CORS & header-rewrite"
+use_mocks = ["echo_ok"]
+
+[cases.request]
+method = "GET"
+path = "/api/v1/items?limit=10"
+headers = { "origin" = "https://app.example.com", "connection" = "x-custom-hop", "x-custom-hop" = "secret-hop" }
+
+[cases.expect]
+status = 200
+headers = { "x-powered-by" = "shunt", "x-upstream-id" = "mock-echo", "access-control-allow-origin" = "*" }
+headers_present = ["x-request-id", "x-ratelimit-limit", "x-ratelimit-remaining"]
+json_path = { "/ok" = true, "/service" = "api_backend" }
+metrics_delta = { "shunt_requests_total" = 1 }
+
+[[cases.expect.upstream_calls]]
+upstream = "api_backend"
+count = 1
+method = "GET"
+path = "/v1/items?limit=10"
+headers_present = ["x-forwarded-for", "x-request-id"]
+headers_absent = ["x-custom-hop", "connection"]
+
+[[cases]]
+name = "unmatched path returns 404 without hitting upstream"
+use_mocks = ["echo_ok"]
+
+[cases.request]
+method = "GET"
+path = "/not-found"
+
+[cases.expect]
+status = 404
+
+[[cases.expect.upstream_calls]]
+upstream = "api_backend"
+count = 0
+
+[[cases]]
+name = "CORS preflight OPTIONS short-circuits before upstream"
+use_mocks = ["echo_ok"]
+
+[cases.request]
+method = "OPTIONS"
+path = "/api/v1/items"
+headers = { "origin" = "https://app.example.com", "access-control-request-method" = "POST" }
+
+[cases.expect]
+status = 204
+headers = { "access-control-allow-origin" = "*" }
+
+[[cases.expect.upstream_calls]]
+upstream = "api_backend"
+count = 0

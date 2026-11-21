@@ -6,6 +6,7 @@ members = [
     "crates/shunt-plugins",
     "crates/shunt-ai",
     "crates/shunt-config",
+    "crates/shunt-test",
     "crates/shunt-cli",
     "benches/shunt-bench",
 ]
@@ -23,6 +24,7 @@ shunt-core = { version = "0.0.1", path = "crates/shunt-core" } # x-release-pleas
 shunt-plugins = { version = "0.0.1", path = "crates/shunt-plugins" } # x-release-please-version
 shunt-ai = { version = "0.0.1", path = "crates/shunt-ai" } # x-release-please-version
 shunt-config = { version = "0.0.1", path = "crates/shunt-config" } # x-release-please-version
+shunt-test = { version = "0.0.1", path = "crates/shunt-test" } # x-release-please-version
 
 arc-swap = "1"
 bytes = "1"
@@ -34,6 +36,7 @@ hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-legacy", "http1", "http2"] }
 notify = "8"
 pin-project-lite = "0.2"
+proptest = "1"
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 serde = { version = "1", features = ["derive"] }
@@ -48,6 +51,9 @@ tower-service = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 webpki-roots = "0.26"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(loom)"] }
 
 [profile.release]
 opt-level = 3

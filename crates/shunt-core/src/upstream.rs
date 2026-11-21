@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -10,6 +11,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::{Connected, Connection};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::ServerName;
+use shunt_plugin_sdk::{Clock, SystemClock};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -85,17 +87,39 @@ pub struct UpstreamPoolKey {
     pub unhealthy_cooldown: Duration,
 }
 
-/// Parsed endpoint with passive health tracking.
+const UNHEALTHY_UNTIL_MASK: u64 = (1u64 << 48) - 1;
+const FAILURES_SHIFT: u32 = 48;
+
+#[inline]
+const fn pack_health(failures: u16, unhealthy_until_ms: u64) -> u64 {
+    let clamped_until = if unhealthy_until_ms > UNHEALTHY_UNTIL_MASK {
+        UNHEALTHY_UNTIL_MASK
+    } else {
+        unhealthy_until_ms
+    };
+    ((failures as u64) << FAILURES_SHIFT) | clamped_until
+}
+
+#[inline]
+const fn unpack_health(packed: u64) -> (u16, u64) {
+    let failures = (packed >> FAILURES_SHIFT) as u16;
+    let until = packed & UNHEALTHY_UNTIL_MASK;
+    (failures, until)
+}
+
+/// Parsed endpoint with single-word atomic passive health tracking.
+///
+/// Packs `(consecutive_failures: u16, unhealthy_until_ms: u48)` into a single `AtomicU64`
+/// updated via CAS (`AcqRel`/`Acquire`) so readers never observe split failure/cooldown state.
 #[derive(Debug)]
 pub struct EndpointState {
     pub raw_url: String,
     pub base_uri: Uri,
-    consecutive_failures: AtomicUsize,
-    unhealthy_until_ms: AtomicU64,
+    health: AtomicU64,
 }
 
 impl EndpointState {
-    fn new(raw_url: String) -> Result<Self, CoreError> {
+    pub fn new(raw_url: String) -> Result<Self, CoreError> {
         let base_uri: Uri = raw_url.parse().map_err(|e| CoreError::InvalidUri {
             uri: raw_url.clone(),
             message: format!("{e}"),
@@ -118,32 +142,95 @@ impl EndpointState {
         Ok(Self {
             raw_url,
             base_uri,
-            consecutive_failures: AtomicUsize::new(0),
-            unhealthy_until_ms: AtomicU64::new(0),
+            health: AtomicU64::new(0),
         })
     }
 
+    /// Atomically returns `(consecutive_failures, unhealthy_until_ms)`.
+    #[inline]
+    pub fn health_snapshot(&self) -> (usize, u64) {
+        let (failures, until) = unpack_health(self.health.load(Ordering::Acquire));
+        (failures as usize, until)
+    }
+
+    #[inline]
     pub fn is_healthy(&self, now_ms: u64) -> bool {
-        let until = self.unhealthy_until_ms.load(Ordering::Relaxed);
+        let (_, until) = unpack_health(self.health.load(Ordering::Acquire));
         until == 0 || now_ms >= until
     }
 
+    #[inline]
     pub fn consecutive_failures(&self) -> usize {
-        self.consecutive_failures.load(Ordering::Relaxed)
+        self.health_snapshot().0
     }
 
-    fn record_success(&self) {
-        self.consecutive_failures.store(0, Ordering::Relaxed);
-        self.unhealthy_until_ms.store(0, Ordering::Relaxed);
+    #[inline]
+    pub fn unhealthy_until_ms(&self) -> u64 {
+        self.health_snapshot().1
     }
 
-    fn record_failure(&self, now_ms: u64, threshold: usize, cooldown: Duration) {
-        let fails = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-        if fails >= threshold.max(1) {
-            let until = now_ms.saturating_add(cooldown.as_millis() as u64);
-            self.unhealthy_until_ms.store(until, Ordering::Relaxed);
+    /// Atomically clears both failure counter and cooldown timestamp.
+    pub fn record_success(&self) {
+        self.health.store(0, Ordering::Release);
+    }
+
+    /// Atomically increments consecutive failures and activates cooldown once `threshold` is met.
+    pub fn record_failure(&self, now_ms: u64, threshold: usize, cooldown: Duration) {
+        let threshold_u16 = threshold.clamp(1, u16::MAX as usize) as u16;
+        let cooldown_ms = cooldown.as_millis().min(UNHEALTHY_UNTIL_MASK as u128) as u64;
+
+        let _ = self
+            .health
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                let (cur_failures, cur_until) = unpack_health(cur);
+                let next_failures = cur_failures.saturating_add(1);
+                let next_until = if next_failures >= threshold_u16 {
+                    let candidate = now_ms.saturating_add(cooldown_ms).min(UNHEALTHY_UNTIL_MASK);
+                    cur_until.max(candidate)
+                } else {
+                    cur_until
+                };
+                Some(pack_health(next_failures, next_until))
+            });
+    }
+}
+
+/// Pure endpoint index selector implementing Shunt's 3-pass selection policy:
+/// 1. Healthy and untried
+/// 2. Any untried (even if currently in cooldown)
+/// 3. Any healthy, otherwise `start % len`
+///
+/// Assumes `healthy.len() >= 1`.
+pub fn select_endpoint_index(start: usize, tried_indices: &[usize], healthy: &[bool]) -> usize {
+    let len = healthy.len();
+    debug_assert!(len > 0);
+    let start = start % len;
+
+    // Pass 1: healthy & not yet tried in this request
+    for offset in 0..len {
+        let idx = (start + offset) % len;
+        if !tried_indices.contains(&idx) && healthy[idx] {
+            return idx;
         }
     }
+
+    // Pass 2: any endpoint not yet tried in this request (even if marked unhealthy)
+    for offset in 0..len {
+        let idx = (start + offset) % len;
+        if !tried_indices.contains(&idx) {
+            return idx;
+        }
+    }
+
+    // Pass 3: wrap around to any healthy endpoint, else start
+    for offset in 0..len {
+        let idx = (start + offset) % len;
+        if healthy[idx] {
+            return idx;
+        }
+    }
+
+    start
 }
 
 /// Warm HTTP/1.1 + HTTP/2 connection pool and passive health manager for an upstream.
@@ -152,7 +239,7 @@ pub struct UpstreamPool {
     key: UpstreamPoolKey,
     endpoints: Vec<EndpointState>,
     rr_cursor: AtomicUsize,
-    created_at: Instant,
+    clock: Arc<dyn Clock>,
     client: Client<ShuntConnector, ShuntBody>,
     connector_h1_tls: Option<TlsConnector>,
 }
@@ -169,6 +256,14 @@ impl std::fmt::Debug for UpstreamPool {
 
 impl UpstreamPool {
     pub fn new(pool_id: u64, config: &UpstreamConfig) -> Result<Self, CoreError> {
+        Self::new_with_clock(pool_id, config, SystemClock::shared())
+    }
+
+    pub fn new_with_clock(
+        pool_id: u64,
+        config: &UpstreamConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, CoreError> {
         if config.endpoints.is_empty() {
             return Err(CoreError::EmptyUpstream(config.name.clone()));
         }
@@ -207,7 +302,7 @@ impl UpstreamPool {
             key: config.pool_key(),
             endpoints,
             rr_cursor: AtomicUsize::new(0),
-            created_at: Instant::now(),
+            clock,
             client,
             connector_h1_tls,
         })
@@ -227,7 +322,7 @@ impl UpstreamPool {
     }
 
     fn now_ms(&self) -> u64 {
-        self.created_at.elapsed().as_millis() as u64
+        self.clock.now_ms()
     }
 
     /// Selects the next healthy endpoint (round-robin), preferring endpoints not in `tried_indices`.
@@ -531,5 +626,40 @@ async fn connect_uri(
         ))))
     } else {
         Ok(ShuntStream::new(MaybeTlsStream::Http(tcp)))
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::{UNHEALTHY_UNTIL_MASK, pack_health, select_endpoint_index, unpack_health};
+
+    #[kani::proof]
+    fn health_word_pack_unpack_roundtrip() {
+        let failures: u16 = kani::any();
+        let until: u64 = kani::any();
+        kani::assume(until <= UNHEALTHY_UNTIL_MASK);
+
+        let packed = pack_health(failures, until);
+        let (f2, u2) = unpack_health(packed);
+        assert_eq!(f2, failures);
+        assert_eq!(u2, until);
+    }
+
+    #[kani::proof]
+    fn select_endpoint_index_bounds_and_priority() {
+        let healthy: [bool; 4] = kani::any();
+        let start: usize = kani::any();
+        let t0: usize = kani::any();
+        let t1: usize = kani::any();
+        let tried = [t0 % 4, t1 % 4];
+
+        let chosen = select_endpoint_index(start, &tried, &healthy);
+        assert!(chosen < 4);
+
+        let has_healthy_untried = (0..4).any(|i| !tried.contains(&i) && healthy[i]);
+        if has_healthy_untried {
+            assert!(!tried.contains(&chosen));
+            assert!(healthy[chosen]);
+        }
     }
 }

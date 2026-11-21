@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Deserialize;
 use shunt_plugin_sdk::{
-    BuildContext, Flow, HookMask, HookResult, HttpPlugin, PluginBuildError, PluginConfig,
+    BuildContext, Clock, Flow, HookMask, HookResult, HttpPlugin, PluginBuildError, PluginConfig,
     PluginFactory, RequestCtx, ResponseHead, UpstreamSelection, header,
 };
 use tracing::{debug, info};
@@ -58,17 +58,17 @@ impl Default for AiFailoverConfig {
 #[derive(Debug, Default)]
 struct TargetHealthEntry {
     consecutive_failures: usize,
-    cooldown_until: Option<Instant>,
+    cooldown_until: Option<Duration>,
 }
 
 /// Shared cooldown circuit-breaker state stored inside `StateStore` across reloads.
 #[derive(Debug, Default)]
-struct FailoverCircuitState {
+pub struct FailoverCircuitState {
     targets: RwLock<HashMap<String, TargetHealthEntry>>,
 }
 
 impl FailoverCircuitState {
-    fn is_in_cooldown(&self, key: &str, now: Instant) -> bool {
+    pub fn is_in_cooldown(&self, key: &str, now: Duration) -> bool {
         let guard = self.targets.read().expect("FailoverCircuitState poisoned");
         guard
             .get(key)
@@ -77,21 +77,49 @@ impl FailoverCircuitState {
             .unwrap_or(false)
     }
 
-    fn record_failure(&self, key: &str, threshold: usize, cooldown: Duration, now: Instant) {
+    pub fn consecutive_failures(&self, key: &str) -> usize {
+        let guard = self.targets.read().expect("FailoverCircuitState poisoned");
+        guard.get(key).map(|e| e.consecutive_failures).unwrap_or(0)
+    }
+
+    pub fn record_failure(&self, key: &str, threshold: usize, cooldown: Duration, now: Duration) {
         let mut guard = self.targets.write().expect("FailoverCircuitState poisoned");
         let entry = guard.entry(key.to_owned()).or_default();
-        entry.consecutive_failures += 1;
+        entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
         if entry.consecutive_failures >= threshold.max(1) {
-            entry.cooldown_until = Some(now + cooldown);
+            let until = now.saturating_add(cooldown);
+            entry.cooldown_until = Some(match entry.cooldown_until {
+                Some(prev) => prev.max(until),
+                None => until,
+            });
         }
     }
 
-    fn record_success(&self, key: &str) {
+    pub fn record_success(&self, key: &str) {
         let mut guard = self.targets.write().expect("FailoverCircuitState poisoned");
         if let Some(entry) = guard.get_mut(key) {
             entry.consecutive_failures = 0;
             entry.cooldown_until = None;
         }
+    }
+}
+
+/// Computes the effective cooldown duration, optionally honoring a numeric `Retry-After`
+/// header value clamped to `[base_cooldown, max_cooldown]`.
+pub fn compute_cooldown(
+    base_cooldown: Duration,
+    max_cooldown: Duration,
+    respect_retry_after: bool,
+    retry_after_header: Option<&str>,
+) -> Duration {
+    let upper = max_cooldown.max(base_cooldown);
+    if !respect_retry_after {
+        return base_cooldown;
+    }
+    if let Some(secs) = retry_after_header.and_then(|s| s.trim().parse::<u64>().ok()) {
+        base_cooldown.max(Duration::from_secs(secs)).min(upper)
+    } else {
+        base_cooldown
     }
 }
 
@@ -130,6 +158,7 @@ impl PluginFactory for AiFailoverFactory {
             failure_threshold: cfg.failure_threshold.max(1),
             respect_retry_after: cfg.respect_retry_after,
             max_cooldown: Duration::from_millis(cfg.max_cooldown_ms.max(cfg.cooldown_ms)),
+            clock: ctx.clock(),
             circuit,
         }))
     }
@@ -144,6 +173,7 @@ pub struct AiFailoverPlugin {
     failure_threshold: usize,
     respect_retry_after: bool,
     max_cooldown: Duration,
+    clock: Arc<dyn Clock>,
     circuit: Option<Arc<FailoverCircuitState>>,
 }
 
@@ -184,7 +214,7 @@ impl HttpPlugin for AiFailoverPlugin {
             return HookResult::Ready(Flow::Continue);
         }
 
-        let now = Instant::now();
+        let now = self.clock.now();
         let start = meta.active_target_index;
         for offset in 0..len {
             let idx = (start + offset) % len;
@@ -236,21 +266,21 @@ impl HttpPlugin for AiFailoverPlugin {
 
         if let Some((Some(target), max_attempts, requested_model)) = active_meta {
             if let Some(circuit) = &self.circuit {
-                let mut cd = self.cooldown;
-                if self.respect_retry_after
-                    && let Some(secs) = res
-                        .headers
-                        .get(header::RETRY_AFTER)
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.trim().parse::<u64>().ok())
-                {
-                    cd = cd.max(Duration::from_secs(secs)).min(self.max_cooldown);
-                }
+                let retry_after_str = res
+                    .headers
+                    .get(header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok());
+                let cd = compute_cooldown(
+                    self.cooldown,
+                    self.max_cooldown,
+                    self.respect_retry_after,
+                    retry_after_str,
+                );
                 circuit.record_failure(
                     &Self::target_key(&target.upstream, &target.model),
                     self.failure_threshold,
                     cd,
-                    Instant::now(),
+                    self.clock.now(),
                 );
             }
 

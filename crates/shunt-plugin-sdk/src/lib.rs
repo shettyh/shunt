@@ -3,6 +3,7 @@
 //! This crate intentionally exposes clean, decoupled HTTP and streaming primitives
 //! (`http`, `bytes`) and never leaks `hyper` internals.
 
+pub mod clock;
 pub mod context;
 pub mod flow;
 pub mod http_types;
@@ -11,6 +12,7 @@ pub mod plugin;
 pub mod state;
 
 pub use bytes::Bytes;
+pub use clock::{Clock, ManualClock, SystemClock};
 pub use context::RequestCtx;
 pub use flow::{BoxFuture, BufferedResponse, Flow, HookResult, StreamFlow};
 pub use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version, header};

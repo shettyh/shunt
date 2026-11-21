@@ -147,13 +147,14 @@ fn extract_request_host<B>(req: &Request<B>) -> Option<String> {
         })
 }
 
-fn host_matches(pattern: &str, host: &str) -> bool {
+/// Matches a host against an exact pattern or `*.suffix` wildcard (case-insensitive, zero-alloc).
+pub fn host_matches(pattern: &str, host: &str) -> bool {
     if let Some(suffix) = pattern.strip_prefix("*.") {
         host.len() > suffix.len() + 1
-            && host.ends_with(suffix)
             && host.as_bytes()[host.len() - suffix.len() - 1] == b'.'
+            && host.as_bytes()[host.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
     } else {
-        pattern == host
+        pattern.eq_ignore_ascii_case(host)
     }
 }
 
@@ -297,8 +298,10 @@ impl SnapshotBuilder {
         self
     }
 
-    /// Compiles and validates the snapshot, reusing existing warm pools in `registry`
-    /// and optionally garbage-collecting pools no longer referenced by this snapshot.
+    /// Compiles and validates the snapshot transactionally, reusing existing warm pools in
+    /// `registry` and staging newly created pools so a failed build never mutates `registry`.
+    /// When compilation succeeds, staged pools are committed and (if `gc_unused_pools` is
+    /// true) pools no longer referenced by this snapshot are garbage-collected atomically.
     pub fn build(
         self,
         registry: &RuntimeRegistry,
@@ -306,6 +309,9 @@ impl SnapshotBuilder {
     ) -> Result<Arc<GatewaySnapshot>, CoreError> {
         let mut compiled_upstreams: HashMap<String, Arc<UpstreamPool>> =
             HashMap::with_capacity(self.upstreams.len());
+        let mut upstream_keys_by_name: HashMap<String, UpstreamPoolKey> =
+            HashMap::with_capacity(self.upstreams.len());
+        let mut staged_pools: HashMap<UpstreamPoolKey, Arc<UpstreamPool>> = HashMap::new();
         let mut active_pool_keys: HashSet<UpstreamPoolKey> =
             HashSet::with_capacity(self.upstreams.len());
 
@@ -316,8 +322,18 @@ impl SnapshotBuilder {
                     up_cfg.name
                 )));
             }
-            let pool = registry.get_or_create_pool(up_cfg)?;
-            active_pool_keys.insert(up_cfg.pool_key());
+            let key = up_cfg.pool_key();
+            let pool = if let Some(existing) = registry.get_pool(&key) {
+                existing
+            } else if let Some(staged) = staged_pools.get(&key) {
+                Arc::clone(staged)
+            } else {
+                let created = registry.create_pool_unstaged(up_cfg)?;
+                staged_pools.insert(key.clone(), Arc::clone(&created));
+                created
+            };
+            active_pool_keys.insert(key.clone());
+            upstream_keys_by_name.insert(up_cfg.name.clone(), key);
             compiled_upstreams.insert(up_cfg.name.clone(), pool);
         }
 
@@ -366,8 +382,15 @@ impl SnapshotBuilder {
             }));
         }
 
-        if gc_unused_pools {
-            registry.gc_unused_pools(&active_pool_keys);
+        // All validation & route compilation succeeded: atomically commit staged pools (+ GC).
+        let canonical_staged =
+            registry.commit_pools(staged_pools, gc_unused_pools.then_some(&active_pool_keys));
+        if !canonical_staged.is_empty() {
+            for (name, key) in upstream_keys_by_name {
+                if let Some(canonical) = canonical_staged.get(&key) {
+                    compiled_upstreams.insert(name, Arc::clone(canonical));
+                }
+            }
         }
 
         Ok(Arc::new(GatewaySnapshot {
@@ -403,5 +426,42 @@ mod tests {
         assert!(host_matches("*.example.com", "api.example.com"));
         assert!(host_matches("*.example.com", "a.b.example.com"));
         assert!(!host_matches("*.example.com", "example.com"));
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::{PathMatch, host_matches};
+
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn path_prefix_boundary_safety() {
+        let c: u8 = kani::any();
+        kani::assume(c.is_ascii_lowercase());
+
+        let sibling_bytes = [b'/', b'a', b'p', b'i', c];
+        let child_bytes = [b'/', b'a', b'p', b'i', b'/', c];
+        let sibling = std::str::from_utf8(&sibling_bytes).unwrap();
+        let child = std::str::from_utf8(&child_bytes).unwrap();
+
+        let matcher = PathMatch::Prefix("/api".to_owned());
+        assert!(matcher.matches("/api"));
+        assert!(matcher.matches(child));
+        assert!(!matcher.matches(sibling));
+    }
+
+    #[kani::proof]
+    #[kani::unwind(24)]
+    fn host_wildcard_never_matches_bare_suffix() {
+        assert!(!host_matches("*.example.com", "example.com"));
+        let c: u8 = kani::any();
+        kani::assume(c.is_ascii_alphabetic());
+
+        let valid_bytes = [
+            c, b'.', b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c', b'o', b'm',
+        ];
+        let valid = std::str::from_utf8(&valid_bytes).unwrap();
+        assert!(host_matches("*.example.com", valid));
+        assert!(host_matches("*.EXAMPLE.COM", valid));
     }
 }

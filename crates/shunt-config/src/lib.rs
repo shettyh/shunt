@@ -7,6 +7,7 @@ pub mod error;
 pub mod ir;
 pub mod provider;
 pub mod reloader;
+pub mod verify;
 
 pub use admin::{AdminHandle, AdminServer, MetricsRenderer};
 pub use compiler::{
@@ -19,3 +20,7 @@ pub use ir::{
 };
 pub use provider::{ConfigProvider, FileConfigProvider, InlineConfigProvider, LoadedConfig};
 pub use reloader::{ConfigWatcherHandle, ReloadController, start_file_watcher};
+pub use verify::{
+    RoutePolicy, Severity, VerifyDiagnostic, VerifyPolicy, VerifyReport, load_policy_file,
+    route_subsumes, verify_bundle,
+};

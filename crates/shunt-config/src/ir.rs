@@ -6,6 +6,7 @@ use http::Method;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
+use crate::verify::VerifyPolicy;
 
 /// Canonical configuration IR parsed from `shunt.toml` (or optional YAML).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -19,6 +20,8 @@ pub struct GatewayConfig {
     pub upstreams: Vec<UpstreamIr>,
     #[serde(default)]
     pub routes: Vec<RouteIr>,
+    #[serde(default)]
+    pub verify: VerifyPolicy,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

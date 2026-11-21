@@ -170,8 +170,13 @@ pub fn openai_to_anthropic_request(
     let max_tokens = obj
         .get("max_tokens")
         .and_then(Value::as_u64)
-        .or_else(|| obj.get("max_completion_tokens").and_then(Value::as_u64))
-        .unwrap_or(default_max_tokens);
+        .filter(|&n| n > 0)
+        .or_else(|| {
+            obj.get("max_completion_tokens")
+                .and_then(Value::as_u64)
+                .filter(|&n| n > 0)
+        })
+        .unwrap_or_else(|| default_max_tokens.max(1));
 
     let mut out = Map::new();
     out.insert("model".to_owned(), Value::String(target_model.to_owned()));

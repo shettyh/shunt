@@ -1,0 +1,123 @@
+name: Verification
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  verify-and-spec-test:
+    name: Static Verify & Contract Specs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build shunt CLI
+        run: cargo build --locked -p shunt-cli --bin shunt
+      - name: Run `shunt verify` on all example and benchmark configs
+        env:
+          OPENAI_API_KEY: ci-dummy-openai-key
+          ANTHROPIC_API_KEY: ci-dummy-anthropic-key
+        run: |
+          for cfg in examples/shunt.toml examples/shunt-ai.toml benches/configs/shunt-*.toml; do
+            echo "==> shunt verify -c $cfg --strict"
+            ./target/debug/shunt verify -c "$cfg" --strict
+          done
+      - name: Run `shunt test` on canonical conformance specs
+        run: |
+          for spec in specs/conformance/*.spec.toml; do
+            echo "==> shunt test -s $spec"
+            ./target/debug/shunt test -s "$spec"
+          done
+
+  proptest:
+    name: Property & Stateful Model Tests
+    runs-on: ubuntu-latest
+    env:
+      PROPTEST_CASES: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '10000' || '256' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run proptest suites (PROPTEST_CASES=$PROPTEST_CASES)
+        run: |
+          cargo test --workspace --locked \
+            --test proptest_ai \
+            --test proptest_core \
+            --test proptest_plugins \
+            --test proptest_config \
+            --test atomic_concurrency
+
+  tla-model-check:
+    name: TLA+ Model Check (TLC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Download TLA+ tools (tla2tools.jar)
+        run: |
+          curl -fsSL -o /tmp/tla2tools.jar \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+      - name: Model check Shunt TLA+ specs
+        run: |
+          for spec in AtomicReload RequestPipeline PassiveHealth; do
+            echo "==> TLC checking specs/tla/${spec}.tla"
+            java -XX:+UseParallelGC -cp /tmp/tla2tools.jar tlc2.TLC \
+              -workers auto -deadlock \
+              -config "specs/tla/${spec}.cfg" "specs/tla/${spec}.tla"
+          done
+
+  kani-nightly:
+    name: Kani Bounded Proofs (Nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
+      - name: Run Kani proofs
+        run: |
+          cargo kani -p shunt-plugin-sdk
+          cargo kani -p shunt-core
+          cargo kani -p shunt-plugins
+
+  fuzz-nightly:
+    name: Fuzzing Smoke (Nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+      - name: Run time-boxed fuzz targets (60s each)
+        run: |
+          for target in fuzz_sse_parser fuzz_anthropic_translate fuzz_config_parse fuzz_route_match; do
+            echo "==> Fuzzing $target"
+            cargo +nightly fuzz run "$target" -- -max_total_time=60
+          done

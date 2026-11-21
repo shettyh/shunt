@@ -1,0 +1,48 @@
+[package]
+name = "shunt-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+http = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+shunt-ai = { path = "../crates/shunt-ai" }
+shunt-config = { path = "../crates/shunt-config" }
+shunt-core = { path = "../crates/shunt-core" }
+
+[[bin]]
+name = "fuzz_sse_parser"
+path = "fuzz_targets/fuzz_sse_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_anthropic_translate"
+path = "fuzz_targets/fuzz_anthropic_translate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_config_parse"
+path = "fuzz_targets/fuzz_config_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_route_match"
+path = "fuzz_targets/fuzz_route_match.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
