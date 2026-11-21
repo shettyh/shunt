@@ -162,8 +162,11 @@ To give developers and companies strong visibility and self-service management *
 - Teams keep historical analytics, alerting, and prompt tracing in the tools they already operate rather than managing another siloed dashboard.
 
 ### Layer 3 — Full Management UI as a Separate Companion Control Plane (`shunt-console`)
-- A full read/write management portal—virtual API key CRUD, team/project spend budgets, model alias & routing policy editor, interactive model playground, historical spend dashboards, and SSO/RBAC—will **never** be embedded inside `shunt` or `shunt-core`.
-- Instead, when needed, it lives as a **separate optional companion service** (`shunt-console`, backed by SQLite/Postgres) that drives one or more stateless `shunt` data-plane instances strictly through the `ConfigProvider` and telemetry/admin seams.
+- A full read/write management portal will **never** be embedded inside `shunt` or `shunt-core`. Instead, when teams need centralized UI-driven management, it lives as a **separate optional companion service** (`shunt-console`, backed by SQLite/Postgres) that drives one or more stateless `shunt` data-plane instances strictly through the `ConfigProvider` and telemetry/admin seams.
+- `shunt-console` covers **both** AI Gateway and HTTP API Gateway management in one control plane:
+  - **AI Gateway Management:** Virtual API key CRUD, team/project spend budgets, model alias & fallback routing editor, provider credential management, interactive model playground, and historical token/cost dashboards.
+  - **API Gateway Management:** Visual CRUD for routes, upstream pools, weighted canary/blue-green traffic splits, active health status, SNI TLS certificates, and global/per-route plugin chains (JWT/OIDC, rate limits, CORS, header rewrites, Wasm plugins) with pre-publish config validation (`shunt check` semantics).
+  - **Fleet & Governance:** Multi-instance `shunt` fleet status, config revision history, diff previews, one-click atomic snapshot rollout/rollback across nodes, audit logs, and SSO/RBAC.
 - Solo developers and GitOps teams deploy only the ~20 MB `shunt` binary; larger organizations deploy `shunt` + `shunt-console` side by side.
 
 ---
@@ -193,7 +196,7 @@ To execute Path A immediately while laying clean rails for Path B, the recommend
 | **5** | **RFC 0011 — Admin Read-Only Inspector UI (`--ui`)** | Opt-in embedded read-only Web UI on Admin listener for live trace waterfalls, snapshot/HookMask graph & AI usage | Path A + Path B |
 | **6** | **RFC 0012 — JWT/OIDC Auth & Kubernetes Gateway API** | JWKS/JWT auth plugin + K8s Gateway API `ConfigProvider` | Path B (B1–B2) |
 | **7** | **RFC 0013 — Wasm Component Model Plugin Host** | Tier 2 hot-reloadable Wasm plugins on `shunt-plugin-sdk` | Path B (B3) |
-| **8** | **RFC 0014 — Companion Control Plane (`shunt-console`)** | Separate optional DB-backed management UI & control plane driving `shunt` via `ConfigProvider` | Path A + Path B |
+| **8** | **RFC 0014 — Companion Control Plane (`shunt-console`)** | Separate optional DB-backed management UI & control plane for both AI Gateway (keys, budgets, models, playground) and API Gateway (routes, upstreams, canaries, plugins, TLS, fleet rollouts) driving `shunt` via `ConfigProvider` | Path A + Path B |
 
 ---
 
