@@ -5,3 +5,8 @@
 .env
 .env.*
 .idea/
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+specs/tla/*_TTrace_*
+/states/

@@ -1,0 +1,129 @@
+use std::time::Duration;
+
+use proptest::prelude::*;
+use shunt_plugin_sdk::{Clock, ManualClock};
+use shunt_plugins::rate_limit::{BucketTable, TokenBucket};
+
+#[derive(Debug, Clone)]
+enum BucketOp {
+    Consume,
+    AdvanceMs(u64),
+}
+
+fn arb_bucket_op() -> impl Strategy<Value = BucketOp> {
+    prop_oneof![
+        Just(BucketOp::Consume),
+        (0u64..2_500).prop_map(BucketOp::AdvanceMs),
+    ]
+}
+
+#[derive(Debug, Clone)]
+enum TableOp {
+    Request { key_id: usize },
+    AdvanceMs(u64),
+    Shrink(usize),
+}
+
+fn arb_table_op() -> impl Strategy<Value = TableOp> {
+    prop_oneof![
+        (0usize..120).prop_map(|key_id| TableOp::Request { key_id }),
+        (0u64..5_000).prop_map(TableOp::AdvanceMs),
+        (1usize..25).prop_map(TableOp::Shrink),
+    ]
+}
+
+proptest! {
+    #[test]
+    fn token_bucket_obeys_capacity_rate_and_retry_after_invariants(
+        rps in 0.5f64..100.0,
+        burst in 1u32..50,
+        ops in prop::collection::vec(arb_bucket_op(), 1..120),
+    ) {
+        let clock = ManualClock::new();
+        let mut bucket = TokenBucket::new(burst, clock.now());
+        let mut allowed: u64 = 0;
+
+        for op in ops {
+            match op {
+                BucketOp::Consume => {
+                    let now = clock.now();
+                    match bucket.try_consume(rps, f64::from(burst), now) {
+                        Ok(remaining) => {
+                            allowed += 1;
+                            prop_assert!(remaining < burst);
+                        }
+                        Err(retry_after) => {
+                            prop_assert!(retry_after >= 1, "Retry-After must be >= 1");
+                        }
+                    }
+
+                    // Tokens always finite and within [0, burst]
+                    let t = bucket.tokens();
+                    prop_assert!(t.is_finite());
+                    prop_assert!(t >= 0.0 && t <= f64::from(burst) + 1e-9);
+
+                    // Over [0, T], total allowed <= burst + floor(T * rps) (+1e-6 FP tolerance)
+                    let total_secs = clock.now().as_secs_f64();
+                    let upper_bound = f64::from(burst) + (total_secs * rps).floor() + 1e-6;
+                    prop_assert!(
+                        (allowed as f64) <= upper_bound,
+                        "allowed={allowed} exceeded burst({burst}) + floor(T({total_secs})*rps({rps}))"
+                    );
+                }
+                BucketOp::AdvanceMs(dt) => {
+                    clock.advance_ms(dt);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bucket_table_enforces_bounded_cardinality_across_ops(
+        initial_max in 1usize..30,
+        idle_ttl_ms in 0u64..10_000,
+        rps in 1.0f64..50.0,
+        burst in 1u32..10,
+        ops in prop::collection::vec(arb_table_op(), 1..150),
+    ) {
+        let clock = ManualClock::new();
+        let table = BucketTable::new();
+        let mut max_entries = initial_max;
+        let idle_ttl = Duration::from_millis(idle_ttl_ms);
+
+        for op in ops {
+            match op {
+                TableOp::Request { key_id } => {
+                    let key = format!("client-{key_id}");
+                    let res = table.check_and_consume(
+                        key,
+                        rps,
+                        burst,
+                        clock.now(),
+                        max_entries,
+                        idle_ttl,
+                    );
+                    if let Err(retry_after) = res {
+                        prop_assert!(retry_after >= 1);
+                    }
+                    prop_assert!(
+                        table.len() <= max_entries,
+                        "table.len()={} exceeded max_entries={max_entries}",
+                        table.len()
+                    );
+                }
+                TableOp::AdvanceMs(dt) => {
+                    clock.advance_ms(dt);
+                }
+                TableOp::Shrink(new_cap) => {
+                    max_entries = new_cap.max(1);
+                    table.shrink_to(max_entries);
+                    prop_assert!(
+                        table.len() <= max_entries,
+                        "after shrink_to({max_entries}), table.len()={}",
+                        table.len()
+                    );
+                }
+            }
+        }
+    }
+}

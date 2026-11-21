@@ -4,17 +4,23 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use shunt_ai::{AiMetrics, register_ai_plugins};
 use shunt_config::{
-    AdminServer, ConfigProvider, FileConfigProvider, ReloadController, SnapshotCompiler,
-    SnapshotInspect, start_file_watcher,
+    AdminServer, ConfigProvider, FileConfigProvider, ReloadController, Severity, SnapshotCompiler,
+    SnapshotInspect, load_policy_file, start_file_watcher, verify_bundle,
 };
 use shunt_core::{DynamicCertResolver, GatewayServer, RuntimeRegistry, TlsListenerConfig};
 use shunt_plugin_sdk::PluginRegistry;
 use shunt_plugins::{DevWaterfallPlugin, PrometheusMetrics, register_builtin_plugins};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum OutputFormat {
+    Text,
+    Json,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -34,6 +40,36 @@ enum Commands {
         /// Path to shunt.toml (or .yaml/.yml).
         #[arg(short = 'c', long = "config", default_value = "shunt.toml")]
         config: PathBuf,
+    },
+    /// Run static IR, route-shadowing, AI chain, and declarative policy verification.
+    Verify {
+        /// Path to shunt.toml (or .yaml/.yml).
+        #[arg(short = 'c', long = "config", default_value = "shunt.toml")]
+        config: PathBuf,
+        /// Optional external policy TOML file overriding `[verify]` rules.
+        #[arg(long = "policy")]
+        policy: Option<PathBuf>,
+        /// Output format (`text` or `json`).
+        #[arg(long = "format", value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+        /// Treat warnings as errors (non-zero exit code).
+        #[arg(long = "strict")]
+        strict: bool,
+    },
+    /// Execute declarative TOML contract tests (`shunt.spec.toml`) against in-process mocks.
+    Test {
+        /// Optional override path to shunt.toml (defaults to `spec.config` inside the spec file).
+        #[arg(short = 'c', long = "config")]
+        config: Option<PathBuf>,
+        /// Path to shunt.spec.toml contract test suite.
+        #[arg(short = 's', long = "spec")]
+        spec: PathBuf,
+        /// Only run test cases whose name contains this substring (case-insensitive).
+        #[arg(long = "filter")]
+        filter: Option<String>,
+        /// Output format (`text` or `json`).
+        #[arg(long = "format", value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
     },
     /// Run the production gateway with atomic hot reloads, Admin API, and graceful draining.
     Run {
@@ -58,6 +94,18 @@ async fn main() -> ExitCode {
 
     match cli.command {
         Commands::Check { config } => run_check(config),
+        Commands::Verify {
+            config,
+            policy,
+            format,
+            strict,
+        } => run_verify(config, policy, format, strict),
+        Commands::Test {
+            config,
+            spec,
+            filter,
+            format,
+        } => run_test(config, spec, filter, format).await,
         Commands::Run { config, no_watch } => {
             init_tracing("info");
             run_server(config, false, !no_watch).await
@@ -120,6 +168,136 @@ fn run_check(config_path: PathBuf) -> ExitCode {
             eprintln!("error: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn run_verify(
+    config_path: PathBuf,
+    policy_path: Option<PathBuf>,
+    format: OutputFormat,
+    strict: bool,
+) -> ExitCode {
+    let provider = FileConfigProvider::new(&config_path);
+    let loaded = match provider.load() {
+        Ok(l) => l,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let policy = match policy_path {
+        Some(p) => match load_policy_file(&p) {
+            Ok(pol) => Some(pol),
+            Err(err) => {
+                eprintln!("error: {err}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
+
+    let (plugins, runtime, _metrics, _ai_metrics) = build_registries();
+    let compiler = SnapshotCompiler::new(plugins, runtime);
+    let bundle = match compiler.compile(&loaded) {
+        Ok(b) => b,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let report = verify_bundle(&bundle, policy.as_ref(), strict);
+    match format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_owned())
+            );
+        }
+        OutputFormat::Text => {
+            if report.diagnostics.is_empty() {
+                println!(
+                    "Verification passed: {} (0 errors, 0 warnings)",
+                    config_path.display()
+                );
+            } else {
+                for d in &report.diagnostics {
+                    let level = match d.severity {
+                        Severity::Error => "ERROR",
+                        Severity::Warning => "WARN ",
+                        Severity::Info => "INFO ",
+                    };
+                    match &d.subject {
+                        Some(subj) => println!("[{level}] {} ({subj}): {}", d.rule, d.message),
+                        None => println!("[{level}] {}: {}", d.rule, d.message),
+                    }
+                }
+                println!(
+                    "\nVerification {}: {} error(s), {} warning(s), {} info(s)",
+                    if report.passed { "passed" } else { "FAILED" },
+                    report.errors,
+                    report.warnings,
+                    report.infos
+                );
+            }
+        }
+    }
+
+    if report.passed {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+async fn run_test(
+    config_path: Option<PathBuf>,
+    spec_path: PathBuf,
+    filter: Option<String>,
+    format: OutputFormat,
+) -> ExitCode {
+    let report = match shunt_test::run_spec_file(
+        &spec_path,
+        config_path.as_deref(),
+        filter.as_deref(),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_owned())
+            );
+        }
+        OutputFormat::Text => {
+            println!("Spec: {} ({} case(s))", report.spec_name, report.total);
+            for c in &report.cases {
+                let mark = if c.passed { "PASS" } else { "FAIL" };
+                println!("  [{mark}] {} ({}ms)", c.name, c.duration_ms);
+                for f in &c.failures {
+                    println!("         - {f}");
+                }
+            }
+            println!(
+                "\nResult: {} passed, {} failed (total {})",
+                report.passed, report.failed, report.total
+            );
+        }
+    }
+
+    if report.all_passed() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

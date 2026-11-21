@@ -1,0 +1,102 @@
+[spec]
+name = "fault-injection-and-timeouts"
+config_inline = """
+[server]
+listen = "127.0.0.1:0"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+[[plugins]]
+name = "metrics"
+
+[[upstreams]]
+name = "flaky"
+endpoints = ["http://127.0.0.1:1"]
+connect_timeout_ms = 5000
+
+[[routes]]
+id = "connect_check"
+path_prefix = "/connect"
+upstream = "flaky"
+max_attempts = 2
+response_headers_timeout_ms = 5000
+idle_chunk_timeout_ms = 5000
+
+[[routes]]
+id = "fast_timeout"
+path_prefix = "/fast"
+upstream = "flaky"
+max_attempts = 2
+response_headers_timeout_ms = 150
+idle_chunk_timeout_ms = 200
+"""
+
+[[mocks]]
+upstream = "flaky"
+name = "refused"
+fault = "connect_refused"
+
+[[mocks]]
+upstream = "flaky"
+name = "stalled_headers"
+fault = "stall_headers"
+
+[[mocks]]
+upstream = "flaky"
+name = "mid_stream_reset"
+fault = "tcp_reset_mid_stream"
+
+[[mocks]]
+upstream = "flaky"
+name = "healthy_backup"
+status = 200
+body = "survived-failover"
+
+[[cases]]
+name = "connect_refused on single endpoint returns 502 Bad Gateway"
+use_mocks = ["refused"]
+
+[cases.request]
+method = "GET"
+path = "/connect/check"
+
+[cases.expect]
+status = 502
+
+[[cases]]
+name = "connect_refused on endpoint 1 retries cleanly to healthy endpoint 2"
+use_mocks = ["refused", "healthy_backup"]
+
+[cases.request]
+method = "GET"
+path = "/connect/retry"
+
+[cases.expect]
+status = 200
+body_eq = "survived-failover"
+
+[[cases]]
+name = "stall_headers triggers response_headers_timeout and returns 504 Gateway Timeout"
+use_mocks = ["stalled_headers"]
+
+[cases.request]
+method = "GET"
+path = "/fast/slow"
+
+[cases.expect]
+status = 504
+
+[[cases]]
+name = "tcp_reset_mid_stream surfaces stream error and increments shunt_stream_aborts_total"
+use_mocks = ["mid_stream_reset"]
+
+[cases.request]
+method = "GET"
+path = "/fast/stream"
+
+[cases.expect]
+status = 200
+stream_error = true
+metrics_delta = { "shunt_stream_aborts_total" = 1 }

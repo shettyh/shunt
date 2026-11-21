@@ -1,0 +1,148 @@
+[spec]
+name = "ai-gateway-contract"
+config = "../../examples/shunt-ai.toml"
+
+[env]
+OPENAI_API_KEY = "sk-test-openai-secret"
+ANTHROPIC_API_KEY = "sk-test-anthropic-secret"
+
+[[mocks]]
+upstream = "openai"
+name = "openai_429_then_ok"
+sequence = [
+  { status = 429, headers = { "retry-after" = "10" }, json = { error = { message = "rate limited" } } },
+  { status = 200, json = { id = "chatcmpl-2", object = "chat.completion", model = "gpt-4o", choices = [{ index = 0, message = { role = "assistant", content = "recovered" }, finish_reason = "stop" }], usage = { prompt_tokens = 4, completion_tokens = 2, total_tokens = 6 } } }
+]
+
+[[mocks]]
+upstream = "openai"
+name = "openai_two_429s_then_ok"
+sequence = [
+  { status = 429, json = { error = { message = "rl-1" } } },
+  { status = 429, json = { error = { message = "rl-2" } } },
+  { status = 200, json = { id = "chatcmpl-3", object = "chat.completion", model = "gpt-4o", choices = [{ index = 0, message = { role = "assistant", content = "back-online" }, finish_reason = "stop" }], usage = { prompt_tokens = 3, completion_tokens = 2, total_tokens = 5 } } }
+]
+
+[[mocks]]
+upstream = "anthropic"
+name = "anthropic_sse"
+chunk_split_bytes = 9
+sse_raw = [
+  "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-3-5-sonnet-20241022\",\"usage\":{\"input_tokens\":5}}}\n\n",
+  "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n",
+  "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+  "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+]
+
+[[mocks]]
+upstream = "anthropic"
+name = "anthropic_json"
+status = 200
+json = { id = "msg_json_1", type = "message", role = "assistant", model = "claude-3-5-sonnet-20241022", content = [{ type = "text", text = "translated-ok" }], stop_reason = "end_turn", usage = { input_tokens = 11, output_tokens = 7 } }
+
+[[cases]]
+name = "smart alias fails over from OpenAI 429 to Anthropic live SSE"
+use_mocks = ["openai_429_then_ok", "anthropic_sse"]
+
+[cases.request]
+method = "POST"
+path = "/v1/chat/completions"
+headers = { "content-type" = "application/json" }
+json = { model = "smart", stream = true, messages = [{ role = "user", content = "hi" }] }
+
+[cases.expect]
+status = 200
+headers = { "x-shunt-provider" = "anthropic", "x-shunt-attempt" = "2" }
+sse_contains_text = "hello"
+sse_ends_with = "[DONE]"
+metrics_delta = { "shunt_ai_failovers_total" = 1 }
+snapshot_redacts = ["sk-test-openai-secret", "sk-test-anthropic-secret"]
+
+[[cases.expect.upstream_calls]]
+upstream = "anthropic"
+count = 1
+path = "/v1/messages"
+headers_present = ["x-api-key", "anthropic-version"]
+headers_absent = ["authorization"]
+json_path = { "/model" = "claude-3-5-sonnet-20241022", "/stream" = true }
+
+[[cases]]
+name = "direct claude model translates OpenAI JSON to Anthropic and back"
+use_mocks = ["openai_429_then_ok", "anthropic_json"]
+
+[cases.request]
+method = "POST"
+path = "/v1/chat/completions"
+json = { model = "claude-3-5-sonnet-20241022", stream = false, messages = [{ role = "system", content = "be concise" }, { role = "user", content = "ping" }] }
+
+[cases.expect]
+status = 200
+headers = { "x-shunt-provider" = "anthropic", "x-shunt-attempt" = "1" }
+json_path = { "/choices/0/message/content" = "translated-ok", "/usage/prompt_tokens" = 11, "/usage/completion_tokens" = 7 }
+
+[[cases.expect.upstream_calls]]
+upstream = "openai"
+count = 0
+
+[[cases.expect.upstream_calls]]
+upstream = "anthropic"
+count = 1
+path = "/v1/messages"
+json_path = { "/system" = "be concise", "/model" = "claude-3-5-sonnet-20241022" }
+
+[[cases]]
+name = "failover cooldown skips cooled-down OpenAI and recovers via ManualClock"
+use_mocks = ["openai_two_429s_then_ok", "anthropic_json"]
+
+[[cases.steps]]
+name = "failure #1 fails over to anthropic"
+[cases.steps.request]
+method = "POST"
+path = "/v1/chat/completions"
+json = { model = "smart", stream = false, messages = [{ role = "user", content = "req1" }] }
+[cases.steps.expect]
+status = 200
+headers = { "x-shunt-provider" = "anthropic", "x-shunt-attempt" = "2" }
+
+[[cases.steps]]
+name = "failure #2 hits failure_threshold=2 and activates 15s cooldown on OpenAI"
+[cases.steps.request]
+method = "POST"
+path = "/v1/chat/completions"
+json = { model = "smart", stream = false, messages = [{ role = "user", content = "req2" }] }
+[cases.steps.expect]
+status = 200
+headers = { "x-shunt-provider" = "anthropic", "x-shunt-attempt" = "2" }
+
+[[cases.steps]]
+name = "during cooldown, OpenAI is skipped completely and Anthropic serves attempt #1"
+reset_captures = true
+[cases.steps.request]
+method = "POST"
+path = "/v1/chat/completions"
+json = { model = "smart", stream = false, messages = [{ role = "user", content = "req3" }] }
+[cases.steps.expect]
+status = 200
+headers = { "x-shunt-provider" = "anthropic", "x-shunt-attempt" = "1" }
+[[cases.steps.expect.upstream_calls]]
+upstream = "openai"
+count = 0
+[[cases.steps.expect.upstream_calls]]
+upstream = "anthropic"
+count = 1
+
+[[cases.steps]]
+name = "advance ManualClock past 15s cooldown -> OpenAI is retried and succeeds"
+advance_clock_ms = 16000
+reset_captures = true
+[cases.steps.request]
+method = "POST"
+path = "/v1/chat/completions"
+json = { model = "smart", stream = false, messages = [{ role = "user", content = "req4" }] }
+[cases.steps.expect]
+status = 200
+headers = { "x-shunt-provider" = "openai", "x-shunt-attempt" = "1" }
+json_path = { "/choices/0/message/content" = "back-online" }
+[[cases.steps.expect.upstream_calls]]
+upstream = "openai"
+count = 1

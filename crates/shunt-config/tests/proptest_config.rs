@@ -1,0 +1,423 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use proptest::prelude::*;
+use serde_json::{Map, Value};
+use shunt_config::{
+    ConfigProvider, InlineConfigProvider, SnapshotCompiler, redact_secrets, route_subsumes,
+};
+use shunt_core::{PathMatch, RouteMatch, RuntimeRegistry, UpstreamConfig, UpstreamPoolKey};
+use shunt_plugin_sdk::{
+    BuildContext, HookMask, HttpPlugin, PluginBuildError, PluginConfig, PluginFactory,
+    PluginRegistry,
+};
+
+const SECRET_SUBSTRINGS: &[&str] = &[
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "api_key",
+    "apikey",
+    "authorization",
+    "private_key",
+    "credential",
+];
+
+fn random_case(base: &str, mask: u64) -> String {
+    base.chars()
+        .enumerate()
+        .map(|(i, c)| {
+            if (mask >> (i % 64)) & 1 == 1 {
+                c.to_ascii_uppercase()
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
+        .collect()
+}
+
+proptest! {
+    #[test]
+    fn redact_secrets_eliminates_all_nested_secret_values_regardless_of_casing(
+        prefix in "[a-z_-]{0,6}",
+        suffix in "[a-z_-]{0,6}",
+        pattern_idx in 0usize..SECRET_SUBSTRINGS.len(),
+        case_mask in any::<u64>(),
+        secret_val in "[A-Za-z0-9]{12,24}",
+        safe_val in "[a-z]{6,12}",
+    ) {
+        let raw_key = format!("{prefix}{}{suffix}", SECRET_SUBSTRINGS[pattern_idx]);
+        let cased_key = random_case(&raw_key, case_mask);
+
+        // Ensure secret_val cannot collide with safe_val or "[REDACTED]"
+        prop_assume!(!secret_val.contains("REDACTED"));
+        prop_assume!(secret_val != safe_val);
+
+        let mut inner = Map::new();
+        inner.insert(cased_key.clone(), Value::String(secret_val.clone()));
+        inner.insert("public_label".to_owned(), Value::String(safe_val.clone()));
+
+        let mut root = Map::new();
+        root.insert(cased_key, Value::String(secret_val.clone()));
+        root.insert("nested".to_owned(), Value::Array(vec![Value::Object(inner)]));
+        root.insert("normal_field".to_owned(), Value::String(safe_val.clone()));
+
+        let redacted = redact_secrets(&Value::Object(root));
+        let serialized = serde_json::to_string(&redacted).unwrap();
+
+        prop_assert!(
+            !serialized.contains(&secret_val),
+            "secret `{secret_val}` survived redaction in: {serialized}"
+        );
+        prop_assert!(serialized.contains("[REDACTED]"));
+        prop_assert_eq!(redacted["normal_field"].as_str(), Some(safe_val.as_str()));
+        prop_assert_eq!(
+            redacted["nested"][0]["public_label"].as_str(),
+            Some(safe_val.as_str())
+        );
+    }
+}
+
+/// Stateful dummy plugin that allocates a persistent counter in `StateStore` during build.
+struct StatefulCounterPlugin {
+    _counter: Arc<AtomicU64>,
+}
+
+impl HttpPlugin for StatefulCounterPlugin {
+    fn name(&self) -> &str {
+        "test-counter"
+    }
+
+    fn hook_mask(&self) -> HookMask {
+        HookMask::EMPTY
+    }
+}
+
+struct StatefulCounterFactory;
+
+impl PluginFactory for StatefulCounterFactory {
+    fn name(&self) -> &str {
+        "test-counter"
+    }
+
+    fn build(
+        &self,
+        config: &PluginConfig,
+        ctx: &BuildContext,
+    ) -> Result<Arc<dyn HttpPlugin>, PluginBuildError> {
+        if config.raw().get("fail").and_then(Value::as_bool) == Some(true) {
+            return Err(PluginBuildError::BuildFailed {
+                plugin: self.name().to_owned(),
+                message: "injected failure".to_owned(),
+            });
+        }
+        let counter = ctx.state_handle().get_or_init("hits", || AtomicU64::new(0));
+        counter.fetch_add(1, Ordering::Relaxed);
+        Ok(Arc::new(StatefulCounterPlugin { _counter: counter }))
+    }
+}
+
+#[derive(Debug, Clone)]
+enum CompilerOp {
+    Valid {
+        upstream_ports: Vec<u16>,
+        route_ids: Vec<u8>,
+    },
+    InvalidMidway {
+        extra_port: u16,
+        extra_route: u8,
+    },
+    InvalidUnknownUpstream,
+}
+
+fn arb_compiler_op() -> impl Strategy<Value = CompilerOp> {
+    prop_oneof![
+        (
+            prop::collection::vec(10000u16..10006, 1..4),
+            prop::collection::vec(0u8..5, 1..4),
+        )
+            .prop_map(|(upstream_ports, route_ids)| CompilerOp::Valid {
+                upstream_ports,
+                route_ids,
+            }),
+        (11000u16..11010, 10u8..20).prop_map(|(extra_port, extra_route)| {
+            CompilerOp::InvalidMidway {
+                extra_port,
+                extra_route,
+            }
+        }),
+        Just(CompilerOp::InvalidUnknownUpstream),
+    ]
+}
+
+fn render_valid_toml(
+    ports: &[u16],
+    route_ids: &[u8],
+) -> (String, Vec<UpstreamPoolKey>, BTreeSet<String>) {
+    let mut toml = String::from("[server]\nlisten = \"127.0.0.1:0\"\n[admin]\nenabled = false\n");
+
+    let unique_ports: BTreeSet<u16> = ports.iter().copied().collect();
+    let mut keys = Vec::new();
+    let mut up_names = Vec::new();
+    for p in &unique_ports {
+        let name = format!("up_{p}");
+        let ep = format!("http://127.0.0.1:{p}");
+        toml.push_str(&format!(
+            "\n[[upstreams]]\nname = \"{name}\"\nendpoints = [\"{ep}\"]\n"
+        ));
+        let mut cfg = UpstreamConfig::new(name.clone(), vec![ep]);
+        cfg.connect_timeout = std::time::Duration::from_millis(5_000);
+        cfg.pool_idle_timeout = std::time::Duration::from_millis(90_000);
+        cfg.pool_max_idle_per_host = 64;
+        cfg.unhealthy_threshold = 3;
+        cfg.unhealthy_cooldown = std::time::Duration::from_millis(10_000);
+        keys.push(cfg.pool_key());
+        up_names.push(name);
+    }
+
+    let unique_routes: BTreeSet<u8> = route_ids.iter().copied().collect();
+    let mut scopes = BTreeSet::new();
+    for (i, rid) in unique_routes.iter().enumerate() {
+        let up = &up_names[i % up_names.len()];
+        let route_id = format!("r_{rid}");
+        let scope = format!("route:{route_id}:counter-{rid}");
+        scopes.insert(scope);
+        toml.push_str(&format!(
+            "\n[[routes]]\nid = \"{route_id}\"\npath_prefix = \"/{route_id}\"\nupstream = \"{up}\"\n\
+             [[routes.plugins]]\nname = \"test-counter\"\nid = \"counter-{rid}\"\n"
+        ));
+    }
+
+    (toml, keys, scopes)
+}
+
+proptest! {
+    #[test]
+    fn transactional_compiler_and_registry_match_reference_model(
+        ops in prop::collection::vec(arb_compiler_op(), 1..30),
+    ) {
+        let mut reg = PluginRegistry::new();
+        reg.register(StatefulCounterFactory);
+        let runtime = Arc::new(RuntimeRegistry::new());
+        let compiler = SnapshotCompiler::new(Arc::new(reg), Arc::clone(&runtime));
+
+        // Reference model: active pool keys -> pool_id, active scopes -> build count
+        let mut model_pools: BTreeMap<String, u64> = BTreeMap::new();
+        let mut model_scopes: BTreeSet<String> = BTreeSet::new();
+        let mut last_version: u64 = 0;
+
+        for op in ops {
+            match op {
+                CompilerOp::Valid { upstream_ports, route_ids } => {
+                    let (toml, _keys, scopes) = render_valid_toml(&upstream_ports, &route_ids);
+                    let loaded = InlineConfigProvider::from_toml("prop.toml", toml)
+                        .load()
+                        .unwrap();
+                    let bundle = compiler.compile(&loaded).expect("valid config must compile");
+
+                    // Monotonic versions
+                    prop_assert!(bundle.snapshot.version > last_version);
+                    last_version = bundle.snapshot.version;
+
+                    // Verify unchanged upstream keys preserved exact pool_id!
+                    let mut next_model_pools = BTreeMap::new();
+                    for up in &bundle.inspect.upstreams {
+                        if let Some(&prev_id) = model_pools.get(&up.name) {
+                            prop_assert_eq!(
+                                up.pool_id, prev_id,
+                                "unchanged upstream `{}` must reuse warm pool_id", up.name
+                            );
+                        }
+                        next_model_pools.insert(up.name.clone(), up.pool_id);
+                    }
+                    model_pools = next_model_pools;
+                    model_scopes = scopes;
+
+                    // Exact pool & state counts after GC
+                    prop_assert_eq!(runtime.pool_count(), model_pools.len());
+                    prop_assert_eq!(runtime.state_store().len(), model_scopes.len());
+                }
+                CompilerOp::InvalidMidway { extra_port, extra_route } => {
+                    // Builds a brand-new stateful plugin on route 1 (which would pollute StateStore
+                    // if not staged), then fails on route 2's plugin!
+                    let toml = format!(
+                        r#"
+[server]
+listen = "127.0.0.1:0"
+[admin]
+enabled = false
+
+[[upstreams]]
+name = "ephemeral_{extra_port}"
+endpoints = ["http://127.0.0.1:{extra_port}"]
+
+[[routes]]
+id = "ok_{extra_route}"
+path_prefix = "/ok"
+upstream = "ephemeral_{extra_port}"
+[[routes.plugins]]
+name = "test-counter"
+id = "ephemeral-counter-{extra_route}"
+
+[[routes]]
+id = "boom_{extra_route}"
+path_prefix = "/boom"
+upstream = "ephemeral_{extra_port}"
+[[routes.plugins]]
+name = "test-counter"
+[routes.plugins.config]
+fail = true
+"#
+                    );
+                    let loaded = InlineConfigProvider::from_toml("bad-midway.toml", toml)
+                        .load()
+                        .unwrap();
+                    let before_pools = runtime.pool_count();
+                    let before_state = runtime.state_store().len();
+
+                    prop_assert!(compiler.compile(&loaded).is_err());
+
+                    // Transactional invariant: failed compile NEVER mutates pool count or StateStore!
+                    prop_assert_eq!(runtime.pool_count(), before_pools);
+                    prop_assert_eq!(runtime.state_store().len(), before_state);
+                    prop_assert_eq!(runtime.pool_count(), model_pools.len());
+                    prop_assert_eq!(runtime.state_store().len(), model_scopes.len());
+                }
+                CompilerOp::InvalidUnknownUpstream => {
+                    let toml = r#"
+[server]
+listen = "127.0.0.1:0"
+[admin]
+enabled = false
+[[upstreams]]
+name = "orphan_up"
+endpoints = ["http://127.0.0.1:19999"]
+[[routes]]
+id = "bad_route"
+path_prefix = "/"
+upstream = "does_not_exist"
+"#;
+                    let loaded = InlineConfigProvider::from_toml("bad-up.toml", toml)
+                        .load()
+                        .unwrap();
+                    let before_pools = runtime.pool_count();
+                    let before_state = runtime.state_store().len();
+
+                    prop_assert!(compiler.compile(&loaded).is_err());
+
+                    prop_assert_eq!(runtime.pool_count(), before_pools);
+                    prop_assert_eq!(runtime.state_store().len(), before_state);
+                }
+            }
+        }
+    }
+}
+
+fn arb_path_match() -> impl Strategy<Value = PathMatch> {
+    prop_oneof![
+        Just(PathMatch::Any),
+        prop_oneof![
+            Just("/".to_owned()),
+            Just("/api".to_owned()),
+            Just("/api/v1".to_owned()),
+            Just("/apiv2".to_owned()),
+            Just("/v1/chat".to_owned()),
+        ]
+        .prop_map(PathMatch::Prefix),
+        prop_oneof![
+            Just("/".to_owned()),
+            Just("/api".to_owned()),
+            Just("/api/v1".to_owned()),
+            Just("/apiv2".to_owned()),
+            Just("/v1/chat".to_owned()),
+        ]
+        .prop_map(PathMatch::Exact),
+    ]
+}
+
+fn arb_host_list() -> impl Strategy<Value = Vec<String>> {
+    prop::collection::vec(
+        prop_oneof![
+            Just("example.com".to_owned()),
+            Just("api.example.com".to_owned()),
+            Just("v1.api.example.com".to_owned()),
+            Just("*.example.com".to_owned()),
+            Just("*.api.example.com".to_owned()),
+            Just("other.org".to_owned()),
+        ],
+        0..3,
+    )
+}
+
+fn arb_method_list() -> impl Strategy<Value = Vec<http::Method>> {
+    prop::collection::vec(
+        prop_oneof![
+            Just(http::Method::GET),
+            Just(http::Method::POST),
+            Just(http::Method::PUT),
+            Just(http::Method::DELETE),
+        ],
+        0..3,
+    )
+}
+
+fn arb_route_match() -> impl Strategy<Value = RouteMatch> {
+    (arb_host_list(), arb_path_match(), arb_method_list()).prop_map(|(hosts, path, methods)| {
+        RouteMatch {
+            hosts,
+            path,
+            methods,
+        }
+    })
+}
+
+proptest! {
+    /// Soundness proof (by exhaustive random testing) of `shunt verify`'s route-shadowing algebra:
+    /// `route_subsumes(r1, r2) ==> ∀ req, r2.matches(req) ==> r1.matches(req)`.
+    #[test]
+    fn route_subsumes_is_sound_against_real_route_matcher(
+        r1 in arb_route_match(),
+        r2 in arb_route_match(),
+        req_host in prop_oneof![
+            Just("example.com"),
+            Just("api.example.com"),
+            Just("v1.api.example.com"),
+            Just("sub.example.com"),
+            Just("other.org"),
+        ],
+        req_path in prop_oneof![
+            Just("/"),
+            Just("/api"),
+            Just("/api/"),
+            Just("/api/v1"),
+            Just("/api/v1/users"),
+            Just("/apiv2"),
+            Just("/apiv2/foo"),
+            Just("/v1/chat"),
+            Just("/other"),
+        ],
+        req_method in prop_oneof![
+            Just(http::Method::GET),
+            Just(http::Method::POST),
+            Just(http::Method::PUT),
+            Just(http::Method::DELETE),
+        ],
+    ) {
+        if route_subsumes(&r1, &r2) {
+            let req = http::Request::builder()
+                .method(req_method)
+                .uri(req_path)
+                .header(http::header::HOST, req_host)
+                .body(())
+                .unwrap();
+            if r2.matches(&req) {
+                prop_assert!(
+                    r1.matches(&req),
+                    "soundness violation: r1={r1:?} claimed to subsume r2={r2:?}, but r2 matched {req_host}{req_path} while r1 did not"
+                );
+            }
+        }
+    }
+}

@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -7,7 +6,7 @@ use http::Method;
 use serde::Serialize;
 use shunt_core::{
     CertStore, GatewaySnapshot, PathMatch, RouteMatch, RouteSpec, RuntimeRegistry, SnapshotBuilder,
-    TimeoutConfig, UpstreamConfig, UpstreamPoolKey, UpstreamTlsConfig, load_certified_key_pem,
+    TimeoutConfig, UpstreamConfig, UpstreamTlsConfig, load_certified_key_pem,
 };
 use shunt_plugin_sdk::{HookMask, HttpPlugin, PluginConfig, PluginRegistry};
 
@@ -140,10 +139,8 @@ impl SnapshotCompiler {
             builder = builder.global_plugin(Arc::clone(extra));
         }
 
-        let mut active_pool_keys: HashSet<UpstreamPoolKey> = HashSet::new();
         for up_ir in &loaded.config.upstreams {
             let up_cfg = compile_upstream_ir(up_ir)?;
-            active_pool_keys.insert(up_cfg.pool_key());
             builder = builder.upstream(up_cfg);
         }
 
@@ -164,11 +161,11 @@ impl SnapshotCompiler {
             builder = builder.route(spec);
         }
 
-        // Compile snapshot without GC first so any error leaves live pools/state intact.
-        let snapshot = builder.build(&self.runtime_registry, false)?;
+        // Transactionally build snapshot: pools are staged and only committed + GC'd
+        // after every upstream and route compiles cleanly.
+        let snapshot = builder.build(&self.runtime_registry, true)?;
 
-        // Compilation fully succeeded: atomically GC orphaned pools & plugin state scopes.
-        self.runtime_registry.gc_unused_pools(&active_pool_keys);
+        // Compilation fully succeeded: atomically commit staged plugin state & GC orphans.
         build_session.commit_gc();
 
         let mut upstreams_inspect: Vec<UpstreamInspect> = loaded

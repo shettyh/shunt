@@ -153,3 +153,34 @@ mod tests {
         assert_eq!(HookMask::EMPTY.to_string(), "EMPTY");
     }
 }
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::HookMask;
+
+    #[kani::proof]
+    fn hook_mask_bitwise_algebra() {
+        let a = HookMask::from_bits(kani::any());
+        let b = HookMask::from_bits(kani::any());
+
+        // Identity & emptiness
+        assert!(HookMask::EMPTY.is_empty());
+        assert_eq!(a | HookMask::EMPTY, a);
+        assert_eq!(a & HookMask::EMPTY, HookMask::EMPTY);
+        assert_eq!(a.union(b), a | b);
+
+        // Commutativity & idempotence
+        assert_eq!(a | b, b | a);
+        assert_eq!(a & b, b & a);
+        assert_eq!(a | a, a);
+        assert_eq!(a & a, a);
+
+        // Containment & intersection laws
+        assert!((a | b).contains(a));
+        assert!((a | b).contains(b));
+        assert!(a.contains(a & b));
+        if !b.is_empty() && a.contains(b) {
+            assert!(a.intersects(b));
+        }
+    }
+}

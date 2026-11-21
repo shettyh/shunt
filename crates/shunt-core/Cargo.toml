@@ -27,6 +27,10 @@ tracing.workspace = true
 webpki-roots.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 rcgen.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -19,10 +19,12 @@ pub use registry::{BuildSession, RuntimeRegistry};
 pub use server::{GatewayServer, ServerHandle, ServerReloader};
 pub use snapshot::{
     CompiledRoute, DEFAULT_MAX_BODY_BYTES, GatewaySnapshot, PathMatch, RouteMatch, RouteSpec,
-    SnapshotBuilder, TimeoutConfig,
+    SnapshotBuilder, TimeoutConfig, host_matches,
 };
 pub use tls::{
     CertStore, DynamicCertResolver, TlsListenerConfig, UpstreamTlsConfig, ensure_crypto_provider,
     load_certified_key_pem,
 };
-pub use upstream::{EndpointState, UpstreamConfig, UpstreamPool, UpstreamPoolKey};
+pub use upstream::{
+    EndpointState, UpstreamConfig, UpstreamPool, UpstreamPoolKey, select_endpoint_index,
+};

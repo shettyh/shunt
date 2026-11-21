@@ -1,0 +1,162 @@
+[spec]
+name = "rate-limit-hot-reload-and-redaction"
+config_inline = """
+[server]
+listen = "127.0.0.1:0"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+[[upstreams]]
+name = "backend"
+endpoints = ["http://127.0.0.1:1"]
+
+[[routes]]
+id = "protected_api"
+path_prefix = "/api"
+upstream = "backend"
+
+[[routes.plugins]]
+name = "bearer-auth"
+[routes.plugins.config]
+tokens = ["super-secret-bearer-token-999"]
+
+[[routes.plugins]]
+name = "rate-limit"
+id = "rl-main"
+[routes.plugins.config]
+requests_per_second = 0.5
+burst = 2
+key = "header"
+header_name = "x-client"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+response_set = { "x-gen" = "v1" }
+"""
+
+[[mocks]]
+upstream = "backend"
+name = "ok_backend"
+status = 200
+body = "hello-v1"
+
+[[cases]]
+name = "rate-limit state and warm pool survive failed & valid reloads and recover via ManualClock"
+use_mocks = ["ok_backend"]
+
+[[cases.steps]]
+name = "unauthorized request rejected with 401"
+[cases.steps.request]
+method = "GET"
+path = "/api/ping"
+[cases.steps.expect]
+status = 401
+snapshot_redacts = ["super-secret-bearer-token-999"]
+
+[[cases.steps]]
+name = "burst request #1 allowed"
+[cases.steps.request]
+method = "GET"
+path = "/api/ping"
+headers = { "authorization" = "Bearer super-secret-bearer-token-999", "x-client" = "alice" }
+[cases.steps.expect]
+status = 200
+headers = { "x-gen" = "v1", "x-ratelimit-remaining" = "1" }
+
+[[cases.steps]]
+name = "burst request #2 allowed"
+[cases.steps.request]
+method = "GET"
+path = "/api/ping"
+headers = { "authorization" = "Bearer super-secret-bearer-token-999", "x-client" = "alice" }
+[cases.steps.expect]
+status = 200
+headers = { "x-gen" = "v1", "x-ratelimit-remaining" = "0" }
+
+[[cases.steps]]
+name = "burst exhausted -> 429 Too Many Requests"
+[cases.steps.request]
+method = "GET"
+path = "/api/ping"
+headers = { "authorization" = "Bearer super-secret-bearer-token-999", "x-client" = "alice" }
+[cases.steps.expect]
+status = 429
+headers_present = ["retry-after"]
+
+[[cases.steps]]
+name = "invalid config reload is rejected atomically"
+reload_config_inline = """
+[server]
+listen = "127.0.0.1:0"
+[[upstreams]]
+name = "backend"
+endpoints = ["http://127.0.0.1:1"]
+[[routes]]
+id = "broken"
+path_prefix = "/"
+upstream = "does_not_exist"
+"""
+expect_reload_ok = false
+
+[[cases.steps]]
+name = "valid config reload updates header, reuses warm pool, and preserves rate-limit bucket"
+reload_config_inline = """
+[server]
+listen = "127.0.0.1:0"
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+[[upstreams]]
+name = "backend"
+endpoints = ["http://127.0.0.1:1"]
+
+[[routes]]
+id = "protected_api"
+path_prefix = "/api"
+upstream = "backend"
+
+[[routes.plugins]]
+name = "bearer-auth"
+[routes.plugins.config]
+tokens = ["super-secret-bearer-token-999"]
+
+[[routes.plugins]]
+name = "rate-limit"
+id = "rl-main"
+[routes.plugins.config]
+requests_per_second = 0.5
+burst = 2
+key = "header"
+header_name = "x-client"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+response_set = { "x-gen" = "v2" }
+"""
+expect_reload_ok = true
+expect_pool_reused = ["backend"]
+
+[[cases.steps]]
+name = "alice is still rate-limited immediately after hot reload (state preserved)"
+[cases.steps.request]
+method = "GET"
+path = "/api/ping"
+headers = { "authorization" = "Bearer super-secret-bearer-token-999", "x-client" = "alice" }
+[cases.steps.expect]
+status = 429
+
+[[cases.steps]]
+name = "advance ManualClock by 2500ms -> 1 token refilled at 0.5 rps -> request succeeds on v2"
+advance_clock_ms = 2500
+[cases.steps.request]
+method = "GET"
+path = "/api/ping"
+headers = { "authorization" = "Bearer super-secret-bearer-token-999", "x-client" = "alice" }
+[cases.steps.expect]
+status = 200
+headers = { "x-gen" = "v2" }
