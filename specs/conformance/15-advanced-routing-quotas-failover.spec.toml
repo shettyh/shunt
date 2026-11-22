@@ -1,0 +1,229 @@
+[spec]
+name = "rfc0017-advanced-routing-quotas-failover"
+config_inline = """
+[server]
+listen = "127.0.0.1:0"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+[[upstreams]]
+name = "openai_us"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "openai_eu"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "gemini_big"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "mirror_sink"
+endpoints = ["http://127.0.0.1:1"]
+
+[[routes]]
+id = "ai"
+path_prefix = "/v1/"
+upstream = "openai_us"
+
+[[routes.mirrors]]
+upstream = "mirror_sink"
+sample_rate = 1.0
+timeout_ms = 2000
+
+[[routes.plugins]]
+name = "ai-virtual-keys"
+[routes.plugins.config]
+[[routes.plugins.config.keys]]
+id = "alice"
+api_key = "vk-alice"
+org = "acme"
+team = "core"
+expires_at = "2099-01-01T00:00:00Z"
+[routes.plugins.config.keys.model_limits.limited]
+rpm = 1
+
+[[routes.plugins.config.keys]]
+id = "expired"
+api_key = "vk-expired"
+expires_at = "2020-01-01T00:00:00Z"
+
+[[routes.plugins.config.keys]]
+id = "us-only"
+api_key = "vk-us-only"
+allowed_providers = ["openai_us"]
+
+[[routes.plugins]]
+name = "ai-model-router"
+[routes.plugins.config]
+allow_request_routing_overrides = true
+include_routing_headers = true
+
+[routes.plugins.config.models]
+smart = [
+  { provider = "openai_us", upstream = "openai_us", model = "gpt-4o", context_window = 60, max_output_tokens = 16384, zdr = false, regions = ["us"], capabilities = ["chat"] },
+  { provider = "openai_eu", upstream = "openai_eu", model = "gpt-4o", context_window = 60, max_output_tokens = 16384, zdr = true, regions = ["eu"], tags = ["hipaa"], capabilities = ["chat"] },
+  { provider = "gemini_big", upstream = "gemini_big", model = "gemini-2.5-pro", context_window = 1048576, max_output_tokens = 65536, zdr = true, regions = ["us", "eu"], capabilities = ["chat"] }
+]
+overflow = [
+  { provider = "openai_us", upstream = "openai_us", model = "gpt-4o", context_window = 100000 },
+  { provider = "gemini_big", upstream = "gemini_big", model = "gemini-2.5-pro", context_window = 1048576 }
+]
+limited = [
+  { provider = "openai_us", upstream = "openai_us", model = "gpt-4o-mini" }
+]
+
+[[routes.plugins]]
+name = "ai-token-rate-limit"
+[routes.plugins.config]
+window_secs = 60
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+[routes.plugins.config.providers.openai_us]
+preset = "openai"
+api_key = "sk-us"
+[routes.plugins.config.providers.openai_eu]
+preset = "openai"
+api_key = "sk-eu"
+[routes.plugins.config.providers.gemini_big]
+preset = "openai"
+api_key = "sk-big"
+
+[[routes.plugins]]
+name = "ai-failover"
+[routes.plugins.config]
+failover_on_context_overflow = true
+
+[[routes.plugins]]
+name = "ai-usage-tracker"
+[routes.plugins.config]
+log_usage = false
+"""
+
+[[mocks]]
+name = "us_ok"
+upstream = "openai_us"
+status = 200
+headers = { "content-type" = "application/json" }
+body = '{"id":"c-us","object":"chat.completion","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"ok-us"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":5,"total_tokens":10}}'
+
+[[mocks]]
+name = "eu_ok"
+upstream = "openai_eu"
+status = 200
+headers = { "content-type" = "application/json" }
+body = '{"id":"c-eu","object":"chat.completion","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"ok-eu-zdr"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":5,"total_tokens":10}}'
+
+[[mocks]]
+name = "big_ok"
+upstream = "gemini_big"
+status = 200
+headers = { "content-type" = "application/json" }
+body = '{"id":"c-big","object":"chat.completion","model":"gemini-2.5-pro","choices":[{"index":0,"message":{"role":"assistant","content":"ok-big"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":5,"total_tokens":10}}'
+
+[[mocks]]
+name = "us_overflow"
+upstream = "openai_us"
+status = 400
+headers = { "content-type" = "application/json" }
+body = '{"error":{"message":"This model maximum context length is exceeded","type":"invalid_request_error","code":"context_length_exceeded"}}'
+
+[[mocks]]
+name = "us_bad_param"
+upstream = "openai_us"
+status = 400
+headers = { "content-type" = "application/json" }
+body = '{"error":{"message":"bad temperature","type":"invalid_request_error","code":"invalid_param"}}'
+
+[[mocks]]
+name = "mirror_ok"
+upstream = "mirror_sink"
+status = 202
+headers = { "content-type" = "application/json" }
+body = '{}'
+
+[[cases]]
+name = "enriched_models_catalog_and_key_expiration"
+use_mocks = ["us_ok", "eu_ok", "big_ok", "mirror_ok"]
+
+[[cases.steps]]
+name = "models_endpoint_exposes_enriched_metadata"
+request = { method = "GET", path = "/v1/models/smart", headers = { "authorization" = "Bearer vk-alice" } }
+[cases.steps.expect]
+status = 200
+json_path = { "/id" = "smart", "/context_length" = 1048576, "/zdr" = true, "/pricing/input_per_million_usd" = 2.5 }
+
+[[cases.steps]]
+name = "expired_virtual_key_is_rejected_with_401"
+request = { method = "POST", path = "/v1/chat/completions", headers = { "authorization" = "Bearer vk-expired" }, json = { model = "limited", messages = [{ role = "user", content = "hi" }] } }
+[cases.steps.expect]
+status = 401
+json_path = { "/error/code" = "api_key_expired" }
+
+[[cases]]
+name = "openrouter_overrides_acl_intersection_and_mirror"
+use_mocks = ["us_ok", "eu_ok", "big_ok", "mirror_ok"]
+
+[[cases.steps]]
+name = "zdr_and_region_routes_to_eu_and_mirrors"
+request = { method = "POST", path = "/v1/chat/completions", headers = { "authorization" = "Bearer vk-alice" }, json = { model = "smart", provider = { data_collection = "deny", regions = ["eu"], tags = ["hipaa"] }, messages = [{ role = "user", content = "hi" }] } }
+[cases.steps.expect]
+status = 200
+headers = { "x-shunt-selected-provider" = "openai_eu" }
+json_path = { "/choices/0/message/content" = "ok-eu-zdr" }
+upstream_calls = [{ upstream = "openai_eu", count = 1 }]
+
+[[cases.steps]]
+name = "wait_for_mirror_delivery"
+wait_ms = 60
+
+[[cases.steps]]
+name = "client_provider_only_cannot_bypass_virtual_key_acl"
+request = { method = "POST", path = "/v1/chat/completions", headers = { "authorization" = "Bearer vk-us-only" }, json = { model = "smart", provider = { only = ["openai_eu"] }, messages = [{ role = "user", content = "hi" }] } }
+[cases.steps.expect]
+status = 400
+json_path = { "/error/code" = "no_matching_provider" }
+
+[[cases]]
+name = "context_overflow_400_fails_over_to_larger_model"
+use_mocks = ["us_overflow", "big_ok", "mirror_ok"]
+
+[[cases.steps]]
+name = "context_overflow_400_fails_over_to_gemini_big"
+request = { method = "POST", path = "/v1/chat/completions", headers = { "authorization" = "Bearer vk-alice" }, json = { model = "overflow", messages = [{ role = "user", content = "overflow" }] } }
+[cases.steps.expect]
+status = 200
+headers = { "x-shunt-selected-provider" = "gemini_big" }
+json_path = { "/choices/0/message/content" = "ok-big" }
+
+[[cases]]
+name = "regular_400_passes_through_verbatim"
+use_mocks = ["us_bad_param", "big_ok", "mirror_ok"]
+
+[[cases.steps]]
+name = "regular_400_does_not_fail_over"
+request = { method = "POST", path = "/v1/chat/completions", headers = { "authorization" = "Bearer vk-alice" }, json = { model = "overflow", messages = [{ role = "user", content = "bad" }] } }
+[cases.steps.expect]
+status = 400
+json_path = { "/error/code" = "invalid_param" }
+
+[[cases]]
+name = "per_model_rpm_quota"
+use_mocks = ["us_ok", "mirror_ok"]
+
+[[cases.steps]]
+name = "first_request_within_per_model_rpm_succeeds"
+request = { method = "POST", path = "/v1/chat/completions", headers = { "authorization" = "Bearer vk-alice" }, json = { model = "limited", messages = [{ role = "user", content = "one" }] } }
+[cases.steps.expect]
+status = 200
+
+[[cases.steps]]
+name = "second_request_exceeds_per_model_rpm"
+request = { method = "POST", path = "/v1/chat/completions", headers = { "authorization" = "Bearer vk-alice" }, json = { model = "limited", messages = [{ role = "user", content = "two" }] } }
+[cases.steps.expect]
+status = 429
+json_path = { "/error/code" = "model_rpm_limit_exceeded" }

@@ -62,6 +62,7 @@ pub async fn handle_websocket_upgrade(
         endpoint_override: None,
         attempt: 1,
         max_attempts: 1,
+        response_headers_timeout_override: None,
     };
 
     if mask.contains(HookMask::ON_UPSTREAM_SELECT) {
@@ -76,7 +77,9 @@ pub async fn handle_websocket_upgrade(
                 ctx.record_timing(plugin.name(), "on_upstream_select", s.elapsed());
             }
             match res {
-                Ok(Flow::Continue) | Ok(Flow::RetryUpstream) => {}
+                Ok(Flow::Continue)
+                | Ok(Flow::RetryUpstream)
+                | Ok(Flow::InspectResponseBody { .. }) => {}
                 Ok(Flow::Respond(resp)) => {
                     let status = resp.status;
                     let bytes = resp.body.len() as u64;
@@ -185,7 +188,9 @@ pub async fn handle_websocket_upgrade(
                 ctx.record_timing(plugin.name(), "on_upstream_request", s.elapsed());
             }
             match res {
-                Ok(Flow::Continue) | Ok(Flow::RetryUpstream) => {}
+                Ok(Flow::Continue)
+                | Ok(Flow::RetryUpstream)
+                | Ok(Flow::InspectResponseBody { .. }) => {}
                 Ok(Flow::Respond(resp)) => {
                     let status = resp.status;
                     let bytes = resp.body.len() as u64;
@@ -349,7 +354,10 @@ pub async fn handle_websocket_upgrade(
     };
 
     let send_fut = sender.send_request(hyper_req);
-    let mut upstream_res = match route.timeouts.response_headers_timeout {
+    let effective_headers_timeout = selection
+        .response_headers_timeout_override
+        .or(route.timeouts.response_headers_timeout);
+    let mut upstream_res = match effective_headers_timeout {
         Some(dur) => match tokio::time::timeout(dur, send_fut).await {
             Ok(Ok(res)) => res,
             Ok(Err(e)) => {
@@ -452,7 +460,9 @@ pub async fn handle_websocket_upgrade(
                 ctx.record_timing(plugin.name(), "on_response_headers", s.elapsed());
             }
             match res {
-                Ok(Flow::Continue) | Ok(Flow::RetryUpstream) => {}
+                Ok(Flow::Continue)
+                | Ok(Flow::RetryUpstream)
+                | Ok(Flow::InspectResponseBody { .. }) => {}
                 Ok(Flow::Respond(resp)) => {
                     let status = resp.status;
                     let bytes = resp.body.len() as u64;

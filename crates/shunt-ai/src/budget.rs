@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -16,8 +18,10 @@ use crate::alerts::{
 };
 use crate::generation::AiRecordedCost;
 use crate::pricing::{ModelPricing, PricingCatalog, nano_usd_to_usd, usd_to_nano_usd};
+use crate::token_rate_limit::apply_signed_delta;
+use crate::tokens::estimate_request_tokens;
 use crate::types::{
-    AiEndpointKind, AiKeyPolicy, AiRequestMeta, AiUsage, BudgetWindow, DetectedEndpoint,
+    AiEndUser, AiEndpointKind, AiKeyPolicy, AiRequestMeta, AiUsage, BudgetWindow, DetectedEndpoint,
     endpoint_error_response,
 };
 use crate::usage_tracker::AiMetrics;
@@ -34,12 +38,18 @@ fn default_reject_status() -> u16 {
     429
 }
 
+fn default_reserve_output_tokens_cap() -> u64 {
+    1024
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum BudgetScope {
     #[default]
     VirtualKey,
     Team,
+    Org,
+    EndUser,
     Global,
 }
 
@@ -65,7 +75,7 @@ struct TeamBudgetConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct AiBudgetConfig {
-    /// Primary spend tracking scope (`"virtual_key"` default, `"team"`, or `"global"`).
+    /// Primary spend tracking scope (`"virtual_key"` default, `"team"`, `"org"`, `"end_user"`, or `"global"`).
     scope: BudgetScope,
     /// Default hard budget limit in USD per window (overridden by `AiKeyPolicy::budget_usd`).
     default_limit_usd: Option<f64>,
@@ -85,12 +95,31 @@ struct AiBudgetConfig {
     /// User-supplied exact or wildcard model pricing overrides (USD per 1M tokens).
     #[serde(default)]
     pricing: HashMap<String, ModelPricing>,
+    /// Optional path to an external JSON pricing catalog (Shunt or LiteLLM format).
+    #[serde(default)]
+    pricing_file: Option<PathBuf>,
     /// Optional fallback pricing when a model is not found in `pricing` or built-ins.
     #[serde(default)]
     default_pricing: Option<ModelPricing>,
     /// Optional per-team aggregate budgets enforced in addition to per-key budgets.
     #[serde(default)]
     team_budgets: HashMap<String, TeamBudgetConfig>,
+    /// Optional per-organization aggregate budgets enforced in addition to team/key budgets.
+    #[serde(default)]
+    org_budgets: HashMap<String, TeamBudgetConfig>,
+    /// Optional per-end-user rolling spend budget (USD) enforced when `AiEndUser` is present.
+    #[serde(default)]
+    end_user_budget_usd: Option<f64>,
+    /// Optional budget window for `end_user_budget_usd` (defaults to `window`).
+    #[serde(default)]
+    end_user_budget_window: Option<BudgetWindow>,
+    /// Atomically reserve estimated request cost pre-flight and reconcile against actual usage
+    /// in `on_complete` (default: false) to prevent concurrent bursts from overshooting hard limits.
+    #[serde(default)]
+    preflight_reserve: bool,
+    /// Cap on estimated output tokens reserved during `preflight_reserve` (default: `1024`).
+    #[serde(default = "default_reserve_output_tokens_cap")]
+    reserve_output_tokens_cap: u64,
     /// Use the gateway's configured distributed store (e.g., Redis/Valkey) when available (default: true).
     #[serde(default = "default_true")]
     distributed: bool,
@@ -107,8 +136,14 @@ impl Default for AiBudgetConfig {
             reject_status: default_reject_status(),
             use_builtin_pricing: true,
             pricing: HashMap::new(),
+            pricing_file: None,
             default_pricing: None,
             team_budgets: HashMap::new(),
+            org_budgets: HashMap::new(),
+            end_user_budget_usd: None,
+            end_user_budget_window: None,
+            preflight_reserve: false,
+            reserve_output_tokens_cap: default_reserve_output_tokens_cap(),
             distributed: true,
         }
     }
@@ -174,6 +209,116 @@ impl SpendLedgerTable {
         entry.spent_nano_usd = entry.spent_nano_usd.saturating_add(delta_nano);
         entry.spent_nano_usd
     }
+
+    /// Atomically adjusts spend for `key` in `window_id` by a signed nano-USD delta (clamped at 0).
+    pub fn adjust_spend(&self, key: &str, window_id: u64, delta_nano: i64) -> u64 {
+        let mut guard = self.entries.write().expect("SpendLedgerTable poisoned");
+        let entry = guard.entry(key.to_owned()).or_insert(LedgerEntry {
+            window_id,
+            spent_nano_usd: 0,
+        });
+        if entry.window_id != window_id {
+            entry.window_id = window_id;
+            entry.spent_nano_usd = 0;
+        }
+        entry.spent_nano_usd = apply_signed_delta(entry.spent_nano_usd, delta_nano);
+        entry.spent_nano_usd
+    }
+
+    /// Atomically checks and reserves `reserve_nano` for `key` in `window_id`.
+    /// When `enforce_hard` is `true`, rejects with `Err(current_spent)` if `current + reserve_nano > hard_limit_nano`
+    /// (or if `current >= hard_limit_nano` when `reserve_nano == 0`).
+    pub fn try_reserve_spend(
+        &self,
+        key: &str,
+        window_id: u64,
+        reserve_nano: u64,
+        hard_limit_nano: u64,
+        enforce_hard: bool,
+    ) -> Result<u64, u64> {
+        let mut guard = self.entries.write().expect("SpendLedgerTable poisoned");
+        let entry = guard.entry(key.to_owned()).or_insert(LedgerEntry {
+            window_id,
+            spent_nano_usd: 0,
+        });
+        if entry.window_id != window_id {
+            entry.window_id = window_id;
+            entry.spent_nano_usd = 0;
+        }
+        let cur = entry.spent_nano_usd;
+        if enforce_hard
+            && ((reserve_nano == 0 && cur >= hard_limit_nano)
+                || (reserve_nano > 0 && cur.saturating_add(reserve_nano) > hard_limit_nano))
+        {
+            return Err(cur);
+        }
+        entry.spent_nano_usd = cur.saturating_add(reserve_nano);
+        Ok(entry.spent_nano_usd)
+    }
+}
+
+#[derive(Debug)]
+struct BudgetHoldInner {
+    ledger: Arc<SpendLedgerTable>,
+    distributed: Option<Arc<dyn DistributedStore>>,
+    targets: Vec<BudgetTarget>,
+    reserved_nano: u64,
+    reconciled: AtomicBool,
+}
+
+impl Drop for BudgetHoldInner {
+    fn drop(&mut self) {
+        if self.reserved_nano == 0 || self.reconciled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let refund = -(self.reserved_nano.min(i64::MAX as u64) as i64);
+        if let Some(dist) = &self.distributed {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let dist = Arc::clone(dist);
+                let targets = self.targets.clone();
+                handle.spawn(async move {
+                    for t in targets {
+                        let _ = dist.adjust_counter(&t.dist_key, refund, t.window).await;
+                    }
+                });
+            }
+        } else {
+            for t in &self.targets {
+                self.ledger.adjust_spend(&t.local_key, t.window_id, refund);
+            }
+        }
+    }
+}
+
+/// Leak-free RAII pre-flight budget hold stored in `RequestCtx::extensions`.
+///
+/// Reconciled explicitly in `on_complete` with `(actual_cost - reserved_cost)`; if dropped early
+/// (e.g., short-circuit, stream abort, or panic), automatically refunds the reserved amount.
+#[derive(Debug, Clone)]
+pub struct BudgetHoldGuard(Arc<BudgetHoldInner>);
+
+impl BudgetHoldGuard {
+    fn new(
+        ledger: Arc<SpendLedgerTable>,
+        distributed: Option<Arc<dyn DistributedStore>>,
+        targets: Vec<BudgetTarget>,
+        reserved_nano: u64,
+    ) -> Self {
+        Self(Arc::new(BudgetHoldInner {
+            ledger,
+            distributed,
+            targets,
+            reserved_nano,
+            reconciled: AtomicBool::new(false),
+        }))
+    }
+
+    fn take_for_reconcile(&self) -> Option<(Vec<BudgetTarget>, u64)> {
+        if self.0.reconciled.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        Some((self.0.targets.clone(), self.0.reserved_nano))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -234,42 +379,66 @@ impl PluginFactory for AiBudgetFactory {
             }
         };
 
-        let catalog =
-            PricingCatalog::new(cfg.pricing, cfg.use_builtin_pricing, cfg.default_pricing)
-                .map_err(|msg| PluginBuildError::BuildFailed {
-                    plugin: self.name().to_owned(),
-                    message: msg,
-                })?;
+        let catalog = PricingCatalog::new_with_file(
+            cfg.pricing,
+            cfg.use_builtin_pricing,
+            cfg.default_pricing,
+            cfg.pricing_file.as_deref(),
+        )
+        .map_err(|msg| PluginBuildError::BuildFailed {
+            plugin: self.name().to_owned(),
+            message: msg,
+        })?;
 
-        let mut team_budgets = HashMap::with_capacity(cfg.team_budgets.len());
-        for (team, tb) in cfg.team_budgets {
-            if !tb.limit_usd.is_finite() || tb.limit_usd < 0.0 {
-                return Err(PluginBuildError::BuildFailed {
-                    plugin: self.name().to_owned(),
-                    message: format!("team_budgets.{team}.limit_usd must be non-negative finite"),
-                });
-            }
-            let hard_limit_nano = usd_to_nano_usd(tb.limit_usd);
-            let soft_limit_nano = match tb.soft_limit_usd {
-                Some(s) if s.is_finite() && s >= 0.0 => usd_to_nano_usd(s).min(hard_limit_nano),
-                Some(_) => {
+        let compile_group_budgets = |map: HashMap<String, TeamBudgetConfig>,
+                                     prefix: &str|
+         -> Result<
+            HashMap<String, CompiledTeamBudget>,
+            PluginBuildError,
+        > {
+            let mut out = HashMap::with_capacity(map.len());
+            for (name, tb) in map {
+                if !tb.limit_usd.is_finite() || tb.limit_usd < 0.0 {
                     return Err(PluginBuildError::BuildFailed {
                         plugin: self.name().to_owned(),
-                        message: format!(
-                            "team_budgets.{team}.soft_limit_usd must be non-negative finite"
-                        ),
+                        message: format!("{prefix}.{name}.limit_usd must be non-negative finite"),
                     });
                 }
-                None => usd_to_nano_usd(tb.limit_usd * cfg.soft_warning_ratio),
-            };
-            team_budgets.insert(
-                team,
-                CompiledTeamBudget {
-                    hard_limit_nano,
-                    soft_limit_nano,
-                    window: tb.window.unwrap_or(cfg.window),
-                },
-            );
+                let hard_limit_nano = usd_to_nano_usd(tb.limit_usd);
+                let soft_limit_nano = match tb.soft_limit_usd {
+                    Some(s) if s.is_finite() && s >= 0.0 => usd_to_nano_usd(s).min(hard_limit_nano),
+                    Some(_) => {
+                        return Err(PluginBuildError::BuildFailed {
+                            plugin: self.name().to_owned(),
+                            message: format!(
+                                "{prefix}.{name}.soft_limit_usd must be non-negative finite"
+                            ),
+                        });
+                    }
+                    None => usd_to_nano_usd(tb.limit_usd * cfg.soft_warning_ratio),
+                };
+                out.insert(
+                    name,
+                    CompiledTeamBudget {
+                        hard_limit_nano,
+                        soft_limit_nano,
+                        window: tb.window.unwrap_or(cfg.window),
+                    },
+                );
+            }
+            Ok(out)
+        };
+
+        let team_budgets = compile_group_budgets(cfg.team_budgets, "team_budgets")?;
+        let org_budgets = compile_group_budgets(cfg.org_budgets, "org_budgets")?;
+
+        if let Some(eu) = cfg.end_user_budget_usd
+            && (!eu.is_finite() || eu < 0.0)
+        {
+            return Err(PluginBuildError::BuildFailed {
+                plugin: self.name().to_owned(),
+                message: "`end_user_budget_usd` must be a non-negative finite number".to_owned(),
+            });
         }
 
         let ledger = ctx
@@ -291,6 +460,11 @@ impl PluginFactory for AiBudgetFactory {
             reject_status,
             catalog,
             team_budgets,
+            org_budgets,
+            end_user_budget_usd: cfg.end_user_budget_usd,
+            end_user_budget_window: cfg.end_user_budget_window.unwrap_or(cfg.window),
+            preflight_reserve: cfg.preflight_reserve,
+            reserve_output_tokens_cap: cfg.reserve_output_tokens_cap,
             clock: ctx.clock(),
             ledger,
             distributed,
@@ -301,9 +475,10 @@ impl PluginFactory for AiBudgetFactory {
 
 /// Cost attribution & spend budget enforcement plugin (`ai-budget`).
 ///
-/// Tracks exact integer nano-USD spend per virtual key / team / global window, emits
-/// `shunt_ai_cost_usd_total` Prometheus metrics, adds `x-shunt-budget-*` headers, and
-/// enforces soft warnings or hard `429`/`402` rejections locally or across Redis replicas.
+/// Tracks exact integer nano-USD spend per virtual key / per-model / team / org / end-user / global
+/// window, emits `shunt_ai_cost_usd_total` Prometheus metrics, adds `x-shunt-budget-*` headers,
+/// supports opt-in atomic pre-flight budget holds with reconciliation, and enforces soft warnings
+/// or hard `429`/`402` rejections locally or across Redis replicas.
 pub struct AiBudgetPlugin {
     scope_id: String,
     scope: BudgetScope,
@@ -314,6 +489,11 @@ pub struct AiBudgetPlugin {
     reject_status: StatusCode,
     catalog: PricingCatalog,
     team_budgets: HashMap<String, CompiledTeamBudget>,
+    org_budgets: HashMap<String, CompiledTeamBudget>,
+    end_user_budget_usd: Option<f64>,
+    end_user_budget_window: BudgetWindow,
+    preflight_reserve: bool,
+    reserve_output_tokens_cap: u64,
     clock: Arc<dyn Clock>,
     ledger: Arc<SpendLedgerTable>,
     distributed: Option<Arc<dyn DistributedStore>>,
@@ -321,12 +501,45 @@ pub struct AiBudgetPlugin {
 }
 
 impl AiBudgetPlugin {
+    fn estimate_preflight_cost_nano(
+        &self,
+        ctx: &RequestCtx,
+        endpoint: AiEndpointKind,
+        body: &[u8],
+    ) -> u64 {
+        let meta = ctx.get_ext::<AiRequestMeta>();
+        let requested_model = meta.map(|m| m.requested_model.as_str()).unwrap_or("");
+        let target_model = meta
+            .and_then(|m| m.targets.first())
+            .map(|t| t.model.as_str())
+            .unwrap_or(requested_model);
+        let Some(pricing) = self.catalog.lookup(target_model, requested_model) else {
+            return 0;
+        };
+        let est = estimate_request_tokens(endpoint, body);
+        let est_out = match endpoint {
+            AiEndpointKind::Embeddings | AiEndpointKind::Rerank | AiEndpointKind::Moderations => 0,
+            _ => match est.requested_max_output {
+                Some(m) if self.reserve_output_tokens_cap > 0 => {
+                    m.min(self.reserve_output_tokens_cap)
+                }
+                Some(m) => m,
+                None => self.reserve_output_tokens_cap,
+            },
+        };
+        pricing.cost_nano_usd(est.input_tokens, 0, est_out)
+    }
+
     fn resolve_targets(&self, ctx: &RequestCtx) -> Vec<BudgetTarget> {
         let now_ms = self.clock.now_ms();
         let policy = ctx.get_ext::<AiKeyPolicy>();
-        let mut targets = Vec::with_capacity(2);
+        let end_user = ctx.get_ext::<AiEndUser>().map(|u| u.0.as_str());
+        let requested_model = ctx
+            .get_ext::<AiRequestMeta>()
+            .map(|m| m.requested_model.as_str());
+        let mut targets = Vec::with_capacity(4);
 
-        // 1. Primary budget target (key, team, or global)
+        // 1. Primary budget target (key, team, org, end_user, or global)
         let primary_limit_usd = policy.and_then(|p| p.budget_usd).or(self.default_limit_usd);
         let primary_window = policy
             .and_then(|p| p.budget_window)
@@ -347,6 +560,15 @@ impl AiBudgetPlugin {
                     .and_then(|p| p.team.as_deref().map(|t| format!("team:{t}")))
                     .or_else(|| policy.map(|p| format!("key:{}", p.key_id)))
                     .unwrap_or_else(|| "global".to_owned()),
+                BudgetScope::Org => policy
+                    .and_then(|p| p.org.as_deref().map(|o| format!("org:{o}")))
+                    .or_else(|| policy.and_then(|p| p.team.as_deref().map(|t| format!("team:{t}"))))
+                    .or_else(|| policy.map(|p| format!("key:{}", p.key_id)))
+                    .unwrap_or_else(|| "global".to_owned()),
+                BudgetScope::EndUser => end_user
+                    .map(|u| format!("user:{u}"))
+                    .or_else(|| policy.map(|p| format!("key:{}", p.key_id)))
+                    .unwrap_or_else(|| format!("ip:{}", ctx.client_addr.ip())),
                 BudgetScope::Global => "global".to_owned(),
             };
             let dur = primary_window.as_duration();
@@ -369,7 +591,34 @@ impl AiBudgetPlugin {
             });
         }
 
-        // 2. Additional per-team aggregate budget (if configured and not already identical)
+        // 2. Per-key per-model budget override (`model_limits.<pat>.budget_usd`)
+        if let Some(p) = policy
+            && let Some(model) = requested_model
+            && let Some((pat, ml)) = p.limit_for_model(model)
+            && let Some(m_limit_usd) = ml.budget_usd
+        {
+            let m_window = ml.budget_window.unwrap_or(primary_window);
+            let hard_limit_nano = usd_to_nano_usd(m_limit_usd);
+            let soft_limit_nano = ml
+                .budget_soft_limit_usd
+                .map(|s| usd_to_nano_usd(s).min(hard_limit_nano))
+                .unwrap_or_else(|| usd_to_nano_usd(m_limit_usd * self.soft_warning_ratio));
+            let subject = format!("key:{}:model:{pat}", p.key_id);
+            let dur = m_window.as_duration();
+            let win_ms = dur.as_millis().max(1) as u64;
+            let window_id = now_ms / win_ms;
+            targets.push(BudgetTarget {
+                label: subject.clone(),
+                local_key: format!("key_model:{subject}"),
+                dist_key: format!("ai_budget:{}:{subject}:{}", self.scope_id, m_window.label()),
+                window: dur,
+                window_id,
+                hard_limit_nano,
+                soft_limit_nano,
+            });
+        }
+
+        // 3. Additional per-team aggregate budget
         if let Some(team) = policy.and_then(|p| p.team.as_deref())
             && let Some(tb) = self.team_budgets.get(team)
         {
@@ -380,7 +629,7 @@ impl AiBudgetPlugin {
                 let win_ms = dur.as_millis().max(1) as u64;
                 let window_id = now_ms / win_ms;
                 targets.push(BudgetTarget {
-                    label: subject.clone(),
+                    label: subject,
                     local_key: format!("team_agg:{team}"),
                     dist_key: format!(
                         "ai_budget:{}:team_agg:{team}:{}",
@@ -391,6 +640,58 @@ impl AiBudgetPlugin {
                     window_id,
                     hard_limit_nano: tb.hard_limit_nano,
                     soft_limit_nano: tb.soft_limit_nano,
+                });
+            }
+        }
+
+        // 4. Additional per-organization aggregate budget
+        if let Some(org) = policy.and_then(|p| p.org.as_deref())
+            && let Some(ob) = self.org_budgets.get(org)
+        {
+            let subject = format!("org:{org}");
+            let already_present = targets.iter().any(|t| t.label == subject);
+            if !already_present {
+                let dur = ob.window.as_duration();
+                let win_ms = dur.as_millis().max(1) as u64;
+                let window_id = now_ms / win_ms;
+                targets.push(BudgetTarget {
+                    label: subject,
+                    local_key: format!("org_agg:{org}"),
+                    dist_key: format!(
+                        "ai_budget:{}:org_agg:{org}:{}",
+                        self.scope_id,
+                        ob.window.label()
+                    ),
+                    window: dur,
+                    window_id,
+                    hard_limit_nano: ob.hard_limit_nano,
+                    soft_limit_nano: ob.soft_limit_nano,
+                });
+            }
+        }
+
+        // 5. Additional per-end-user rolling budget
+        if let (Some(eu), Some(eu_limit)) = (end_user, self.end_user_budget_usd) {
+            let subject = format!("user:{eu}");
+            let already_present = targets.iter().any(|t| t.label == subject);
+            if !already_present {
+                let hard_limit_nano = usd_to_nano_usd(eu_limit);
+                let soft_limit_nano = usd_to_nano_usd(eu_limit * self.soft_warning_ratio);
+                let dur = self.end_user_budget_window.as_duration();
+                let win_ms = dur.as_millis().max(1) as u64;
+                let window_id = now_ms / win_ms;
+                targets.push(BudgetTarget {
+                    label: subject,
+                    local_key: format!("user_agg:{eu}"),
+                    dist_key: format!(
+                        "ai_budget:{}:user_agg:{eu}:{}",
+                        self.scope_id,
+                        self.end_user_budget_window.label()
+                    ),
+                    window: dur,
+                    window_id,
+                    hard_limit_nano,
+                    soft_limit_nano,
                 });
             }
         }
@@ -573,7 +874,7 @@ impl HttpPlugin for AiBudgetPlugin {
     fn on_request_body_buffered<'a>(
         &'a self,
         ctx: &'a mut RequestCtx,
-        _body: &'a mut Bytes,
+        body: &'a mut Bytes,
     ) -> HookResult<'a, Flow> {
         let endpoint = ctx
             .get_ext::<DetectedEndpoint>()
@@ -601,10 +902,110 @@ impl HttpPlugin for AiBudgetPlugin {
             .get_ext::<AiKeyPolicy>()
             .map(|p| (Some(p.key_id.clone()), p.team.clone()))
             .unwrap_or((None, None));
+        let reserve_nano = if self.preflight_reserve {
+            self.estimate_preflight_cost_nano(ctx, endpoint, body)
+        } else {
+            0
+        };
+        let enforce_hard = self.mode == BudgetMode::Hard;
 
         if let Some(dist) = &self.distributed {
             let dist = Arc::clone(dist);
+            let ledger = Arc::clone(&self.ledger);
             return HookResult::pending(async move {
+                if self.preflight_reserve && reserve_nano > 0 && enforce_hard {
+                    let mut reserved_targets: Vec<BudgetTarget> = Vec::with_capacity(targets.len());
+                    let mut spends = Vec::with_capacity(targets.len());
+                    for t in &targets {
+                        match dist
+                            .try_consume_quota(
+                                &t.dist_key,
+                                reserve_nano,
+                                t.hard_limit_nano,
+                                t.window,
+                            )
+                            .await
+                        {
+                            Ok(out) if out.allowed => {
+                                reserved_targets.push(t.clone());
+                                spends.push(out.current);
+                            }
+                            Ok(out) => {
+                                let refund = -(reserve_nano.min(i64::MAX as u64) as i64);
+                                for prev in reserved_targets {
+                                    let _ = dist
+                                        .adjust_counter(&prev.dist_key, refund, prev.window)
+                                        .await;
+                                }
+                                let limit_usd = nano_usd_to_usd(t.hard_limit_nano);
+                                let spent_usd = nano_usd_to_usd(out.current);
+                                let mut resp = endpoint_error_response(
+                                    endpoint,
+                                    self.reject_status,
+                                    "budget_exceeded",
+                                    Some("budget_exceeded"),
+                                    &format!(
+                                        "Spend budget exceeded for `{}` (${spent_usd:.6} + reserved ${:.6} > ${limit_usd:.6} USD)",
+                                        t.label,
+                                        nano_usd_to_usd(reserve_nano)
+                                    ),
+                                );
+                                attach_budget_headers(
+                                    &mut resp.headers,
+                                    t.hard_limit_nano,
+                                    out.current,
+                                    Some("hard_limit_exceeded"),
+                                );
+                                return Flow::Respond(resp);
+                            }
+                            Err(err) => {
+                                warn!(
+                                    plugin = "ai-budget",
+                                    backend = dist.backend_name(),
+                                    error = %err,
+                                    "distributed pre-flight budget hold failed"
+                                );
+                                let refund = -(reserve_nano.min(i64::MAX as u64) as i64);
+                                for prev in reserved_targets {
+                                    let _ = dist
+                                        .adjust_counter(&prev.dist_key, refund, prev.window)
+                                        .await;
+                                }
+                                if dist.failure_policy() == FailurePolicy::FailClosed {
+                                    return Flow::Respond(endpoint_error_response(
+                                        endpoint,
+                                        StatusCode::SERVICE_UNAVAILABLE,
+                                        "server_error",
+                                        Some("budget_store_unavailable"),
+                                        "Distributed budget store unavailable",
+                                    ));
+                                }
+                                return Flow::Continue;
+                            }
+                        }
+                    }
+                    let primary_limit_nano = targets.first().map(|t| t.hard_limit_nano);
+                    let primary_spent_nano = spends.first().copied().unwrap_or(0);
+                    let warning_reason = targets
+                        .iter()
+                        .zip(spends.iter())
+                        .any(|(t, &s)| s >= t.soft_limit_nano)
+                        .then_some("soft_limit_reached");
+                    ctx.insert_ext(BudgetHoldGuard::new(
+                        ledger,
+                        Some(dist),
+                        reserved_targets,
+                        reserve_nano,
+                    ));
+                    ctx.insert_ext(AiBudgetState {
+                        targets,
+                        primary_limit_nano,
+                        primary_spent_nano,
+                        warning_reason,
+                    });
+                    return Flow::Continue;
+                }
+
                 let mut spends = Vec::with_capacity(targets.len());
                 for t in &targets {
                     match dist.get_counter(&t.dist_key).await {
@@ -653,7 +1054,99 @@ impl HttpPlugin for AiBudgetPlugin {
             });
         }
 
-        // Zero-allocation synchronous local fast path.
+        // Synchronous local fast path with optional atomic pre-flight budget holds.
+        if self.preflight_reserve && reserve_nano > 0 {
+            let mut reserved_targets: Vec<BudgetTarget> = Vec::with_capacity(targets.len());
+            let mut spends_after = Vec::with_capacity(targets.len());
+            for t in &targets {
+                match self.ledger.try_reserve_spend(
+                    &t.local_key,
+                    t.window_id,
+                    reserve_nano,
+                    t.hard_limit_nano,
+                    enforce_hard,
+                ) {
+                    Ok(after) => {
+                        reserved_targets.push(t.clone());
+                        spends_after.push(after);
+                    }
+                    Err(cur) => {
+                        let refund = -(reserve_nano.min(i64::MAX as u64) as i64);
+                        for prev in &reserved_targets {
+                            self.ledger
+                                .adjust_spend(&prev.local_key, prev.window_id, refund);
+                        }
+                        let limit_usd = nano_usd_to_usd(t.hard_limit_nano);
+                        let spent_usd = nano_usd_to_usd(cur);
+                        push_alert_event(
+                            ctx,
+                            AiAlertEvent {
+                                kind: AiAlertKind::BudgetHardExceeded,
+                                severity: AiAlertSeverity::Critical,
+                                dedup_key: format!("hard::{}::{}", t.label, t.window_id),
+                                title: format!("AI spend budget exceeded for {}", t.label),
+                                message: format!(
+                                    "Pre-flight budget hold rejected for `{}` (${spent_usd:.6} + reserved ${:.6} > ${limit_usd:.6} USD)",
+                                    t.label,
+                                    nano_usd_to_usd(reserve_nano)
+                                ),
+                                subject: Some(t.label.clone()),
+                                provider: None,
+                                model: None,
+                                key_id,
+                                team,
+                                details: serde_json::json!({
+                                    "spent_usd": spent_usd,
+                                    "reserved_usd": nano_usd_to_usd(reserve_nano),
+                                    "limit_usd": limit_usd,
+                                    "mode": "hard_preflight",
+                                }),
+                            },
+                        );
+                        let mut resp = endpoint_error_response(
+                            endpoint,
+                            self.reject_status,
+                            "budget_exceeded",
+                            Some("budget_exceeded"),
+                            &format!(
+                                "Spend budget exceeded for `{}` (${spent_usd:.6} + reserved ${:.6} > ${limit_usd:.6} USD)",
+                                t.label,
+                                nano_usd_to_usd(reserve_nano)
+                            ),
+                        );
+                        attach_budget_headers(
+                            &mut resp.headers,
+                            t.hard_limit_nano,
+                            cur,
+                            Some("hard_limit_exceeded"),
+                        );
+                        return HookResult::Ready(Flow::Respond(resp));
+                    }
+                }
+            }
+            let primary_limit_nano = targets.first().map(|t| t.hard_limit_nano);
+            let primary_spent_nano = spends_after.first().copied().unwrap_or(0);
+            let warning_reason = targets
+                .iter()
+                .zip(spends_after.iter())
+                .any(|(t, &s)| s >= t.soft_limit_nano)
+                .then_some("soft_limit_reached");
+            ctx.insert_ext(BudgetHoldGuard::new(
+                Arc::clone(&self.ledger),
+                None,
+                reserved_targets,
+                reserve_nano,
+            ));
+            ctx.insert_ext(AiBudgetState {
+                targets,
+                primary_limit_nano,
+                primary_spent_nano,
+                warning_reason,
+            });
+            return HookResult::Ready(Flow::Continue);
+        }
+
+        // Standard non-reserving synchronous local fast path.
         let spends: Vec<u64> = targets
             .iter()
             .map(|t| self.ledger.current_spend(&t.local_key, t.window_id))
@@ -704,6 +1197,11 @@ impl HttpPlugin for AiBudgetPlugin {
         ctx: &'a RequestCtx,
         summary: &'a RequestSummary,
     ) -> HookResult<'a, ()> {
+        // Always claim any pre-flight hold so short-circuits/errors refund deterministically.
+        let preflight_hold = ctx
+            .get_ext::<BudgetHoldGuard>()
+            .and_then(BudgetHoldGuard::take_for_reconcile);
+
         if ctx
             .get_ext::<DetectedEndpoint>()
             .map(|d| d.0.is_models_discovery())
@@ -711,91 +1209,109 @@ impl HttpPlugin for AiBudgetPlugin {
         {
             return HookResult::Ready(());
         }
-        if summary.attempts == 0 {
-            return HookResult::Ready(());
-        }
-
-        let Some(usage) = ctx.get_ext::<AiUsage>() else {
-            return HookResult::Ready(());
-        };
-        let prompt = usage.prompt_tokens.unwrap_or(0);
-        let cached = usage.cached_prompt_tokens.unwrap_or(0);
-        let cache_write = usage.cache_creation_prompt_tokens.unwrap_or(0);
-        let completion = usage.completion_tokens.unwrap_or(0);
-        if prompt == 0 && completion == 0 {
-            return HookResult::Ready(());
-        }
 
         let meta = ctx.get_ext::<AiRequestMeta>();
         let active_target = meta.and_then(AiRequestMeta::active_target);
-        let provider = usage
-            .provider
-            .clone()
-            .or_else(|| active_target.map(|t| t.provider.clone()))
-            .unwrap_or_else(|| "unknown".to_owned());
-        let requested_model = meta
-            .map(|m| m.requested_model.as_str())
-            .unwrap_or("unknown");
-        let served_model = usage
-            .served_model
-            .as_deref()
-            .or_else(|| active_target.map(|t| t.model.as_str()))
-            .unwrap_or(requested_model);
+        let usage = ctx.get_ext::<AiUsage>();
 
-        let Some(pricing) = self.catalog.lookup(served_model, requested_model) else {
-            return HookResult::Ready(());
+        let (cost_nano, provider, served_model) = if summary.attempts > 0
+            && let Some(u) = usage
+        {
+            let prompt = u.prompt_tokens.unwrap_or(0);
+            let cached = u.cached_prompt_tokens.unwrap_or(0);
+            let cache_write = u.cache_creation_prompt_tokens.unwrap_or(0);
+            let completion = u.completion_tokens.unwrap_or(0);
+            let provider = u
+                .provider
+                .clone()
+                .or_else(|| active_target.map(|t| t.provider.clone()))
+                .unwrap_or_else(|| "unknown".to_owned());
+            let requested_model = meta
+                .map(|m| m.requested_model.as_str())
+                .unwrap_or("unknown");
+            let served_model = u
+                .served_model
+                .as_deref()
+                .or_else(|| active_target.map(|t| t.model.as_str()))
+                .unwrap_or(requested_model)
+                .to_owned();
+            let cost = if prompt > 0 || completion > 0 {
+                self.catalog
+                    .lookup(&served_model, requested_model)
+                    .map(|p| p.cost_nano_usd_detailed(prompt, cached, cache_write, completion))
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            (cost, provider, served_model)
+        } else {
+            (0, "unknown".to_owned(), "unknown".to_owned())
         };
-        let cost_nano = pricing.cost_nano_usd_detailed(prompt, cached, cache_write, completion);
-        if cost_nano == 0 {
-            return HookResult::Ready(());
-        }
 
         let policy = ctx.get_ext::<AiKeyPolicy>();
-        let key_label = policy.map(|p| p.key_id.as_str()).unwrap_or("anonymous");
-        let team_label = policy.and_then(|p| p.team.as_deref()).unwrap_or("default");
+        if cost_nano > 0 {
+            let key_label = policy.map(|p| p.key_id.as_str()).unwrap_or("anonymous");
+            let team_label = policy.and_then(|p| p.team.as_deref()).unwrap_or("default");
 
-        self.metrics
-            .record_cost(&provider, served_model, key_label, team_label, cost_nano);
+            self.metrics
+                .record_cost(&provider, &served_model, key_label, team_label, cost_nano);
 
-        if let Some(slot) = ctx.get_ext::<AiRecordedCost>() {
-            slot.set_nano_usd(cost_nano);
+            if let Some(slot) = ctx.get_ext::<AiRecordedCost>() {
+                slot.set_nano_usd(cost_nano);
+            }
+
+            ctx.annotate_float("shunt.ai.cost_usd", nano_usd_to_usd(cost_nano));
+
+            if let Some(u) = usage {
+                info!(
+                    request_id = summary.request_id,
+                    provider = %provider,
+                    model = %served_model,
+                    key_id = %key_label,
+                    team = %team_label,
+                    prompt_tokens = u.prompt_tokens.unwrap_or(0),
+                    cached_prompt_tokens = u.cached_prompt_tokens.unwrap_or(0),
+                    cache_creation_prompt_tokens = u.cache_creation_prompt_tokens.unwrap_or(0),
+                    completion_tokens = u.completion_tokens.unwrap_or(0),
+                    cost_usd = nano_usd_to_usd(cost_nano),
+                    "ai_cost"
+                );
+            }
         }
 
-        ctx.annotate_float("shunt.ai.cost_usd", nano_usd_to_usd(cost_nano));
+        // Compute net signed ledger delta (reconciling pre-flight hold if present, else +cost_nano).
+        let (targets, signed_delta): (Vec<BudgetTarget>, i64) =
+            if let Some((held_targets, reserved_nano)) = preflight_hold {
+                let actual_i64 = cost_nano.min(i64::MAX as u64) as i64;
+                let reserved_i64 = reserved_nano.min(i64::MAX as u64) as i64;
+                (held_targets, actual_i64.saturating_sub(reserved_i64))
+            } else if cost_nano > 0 {
+                let targets = ctx
+                    .get_ext::<AiBudgetState>()
+                    .map(|s| s.targets.clone())
+                    .unwrap_or_default();
+                (targets, cost_nano.min(i64::MAX as u64) as i64)
+            } else {
+                (Vec::new(), 0)
+            };
 
-        info!(
-            request_id = summary.request_id,
-            provider = %provider,
-            model = %served_model,
-            key_id = %key_label,
-            team = %team_label,
-            prompt_tokens = prompt,
-            cached_prompt_tokens = cached,
-            cache_creation_prompt_tokens = cache_write,
-            completion_tokens = completion,
-            cost_usd = nano_usd_to_usd(cost_nano),
-            "ai_cost"
-        );
-
-        let targets = ctx
-            .get_ext::<AiBudgetState>()
-            .map(|s| s.targets.clone())
-            .unwrap_or_default();
-        if targets.is_empty() {
+        if targets.is_empty() || signed_delta == 0 {
             return HookResult::Ready(());
         }
 
         if let Some(dist) = &self.distributed {
             let dist = Arc::clone(dist);
-            let delta = cost_nano.min(i64::MAX as u64) as i64;
             return HookResult::pending(async move {
                 for t in targets {
-                    if let Err(err) = dist.adjust_counter(&t.dist_key, delta, t.window).await {
+                    if let Err(err) = dist
+                        .adjust_counter(&t.dist_key, signed_delta, t.window)
+                        .await
+                    {
                         warn!(
                             plugin = "ai-budget",
                             subject = %t.label,
                             error = %err,
-                            "distributed budget charge failed"
+                            "distributed budget adjustment failed"
                         );
                     }
                 }
@@ -804,7 +1320,9 @@ impl HttpPlugin for AiBudgetPlugin {
 
         for t in &targets {
             let prev = self.ledger.current_spend(&t.local_key, t.window_id);
-            let after = self.ledger.add_spend(&t.local_key, t.window_id, cost_nano);
+            let after = self
+                .ledger
+                .adjust_spend(&t.local_key, t.window_id, signed_delta);
             if prev < t.hard_limit_nano && after >= t.hard_limit_nano {
                 let limit_usd = nano_usd_to_usd(t.hard_limit_nano);
                 let spent_usd = nano_usd_to_usd(after);
@@ -821,7 +1339,7 @@ impl HttpPlugin for AiBudgetPlugin {
                         ),
                         subject: Some(t.label.clone()),
                         provider: Some(provider.clone()),
-                        model: Some(served_model.to_owned()),
+                        model: Some(served_model.clone()),
                         key_id: policy.map(|p| p.key_id.clone()),
                         team: policy.and_then(|p| p.team.clone()),
                         details: serde_json::json!({
@@ -848,7 +1366,7 @@ impl HttpPlugin for AiBudgetPlugin {
                         ),
                         subject: Some(t.label.clone()),
                         provider: Some(provider.clone()),
-                        model: Some(served_model.to_owned()),
+                        model: Some(served_model.clone()),
                         key_id: policy.map(|p| p.key_id.clone()),
                         team: policy.and_then(|p| p.team.clone()),
                         details: serde_json::json!({

@@ -32,8 +32,9 @@ pub use redis::{
 pub use registry::{BuildSession, RuntimeRegistry};
 pub use server::{GatewayServer, ServerHandle, ServerReloader};
 pub use snapshot::{
-    CompiledRoute, DEFAULT_MAX_BODY_BYTES, GatewaySnapshot, PathMatch, RouteMatch, RouteSpec,
-    SnapshotBuilder, TimeoutConfig, UpstreamHealthReport, host_matches,
+    CompiledMirror, CompiledRoute, DEFAULT_MAX_BODY_BYTES, GatewaySnapshot, PathMatch, RouteMatch,
+    RouteSpec, SnapshotBuilder, TimeoutConfig, TrafficMirrorSpec, UpstreamHealthReport,
+    host_matches,
 };
 pub use tls::{
     CertStore, DynamicCertResolver, TlsListenerConfig, UpstreamTlsConfig, ensure_crypto_provider,

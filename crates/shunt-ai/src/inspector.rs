@@ -8,8 +8,12 @@ use crate::cloud_auth::{CloudTokenCache, CloudTokenSnapshot};
 use crate::failover::{CooldownSnapshot, FailoverCircuitState};
 use crate::generation::{AiGenerationStore, GenerationStoreSnapshot};
 use crate::guardrails::{GuardrailStatsSnapshot, GuardrailStatsTable};
+use crate::model_router::{AiShadowStatsSnapshot, AiShadowStatsTable};
 use crate::presets::{KeyPoolSnapshot, KeyPoolTable};
-use crate::routing::{LatencyEntrySnapshot, TargetLatencyTable};
+use crate::routing::{
+    HeadroomEntrySnapshot, LatencyEntrySnapshot, TargetHeadroomTable, TargetLatencyTable,
+    TargetThroughputTable, ThroughputEntrySnapshot,
+};
 use crate::usage_tracker::{AiMetrics, AiMetricsSnapshot, AiModelBreakdown};
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,6 +66,27 @@ pub struct ScopedLatencySnapshot {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ScopedThroughputSnapshot {
+    pub scope: String,
+    #[serde(flatten)]
+    pub entry: ThroughputEntrySnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopedHeadroomSnapshot {
+    pub scope: String,
+    #[serde(flatten)]
+    pub entry: HeadroomEntrySnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopedShadowStatsSnapshot {
+    pub scope: String,
+    #[serde(flatten)]
+    pub entry: AiShadowStatsSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ScopedCacheSnapshot {
     pub scope: String,
     pub entries: usize,
@@ -89,6 +114,9 @@ pub struct AiRuntimeInspect {
     pub models: Vec<AiModelBreakdown>,
     pub cooldowns: Vec<ScopedCooldownSnapshot>,
     pub latency_targets: Vec<ScopedLatencySnapshot>,
+    pub throughput_targets: Vec<ScopedThroughputSnapshot>,
+    pub headroom_targets: Vec<ScopedHeadroomSnapshot>,
+    pub shadow_stats: Vec<ScopedShadowStatsSnapshot>,
     pub caches: Vec<ScopedCacheSnapshot>,
     pub semantic_caches: Vec<ScopedSemanticCacheSnapshot>,
     pub generation_stores: Vec<ScopedGenerationStoreSnapshot>,
@@ -131,6 +159,34 @@ pub fn inspect_ai_runtime(
                 entry,
             });
         }
+    }
+
+    let mut throughput_targets = Vec::new();
+    for (scope, _key, table) in state_store.collect_by_type::<TargetThroughputTable>() {
+        for entry in table.snapshot_entries(now_ms) {
+            throughput_targets.push(ScopedThroughputSnapshot {
+                scope: scope.clone(),
+                entry,
+            });
+        }
+    }
+
+    let mut headroom_targets = Vec::new();
+    for (scope, _key, table) in state_store.collect_by_type::<TargetHeadroomTable>() {
+        for entry in table.snapshot_entries(now_ms) {
+            headroom_targets.push(ScopedHeadroomSnapshot {
+                scope: scope.clone(),
+                entry,
+            });
+        }
+    }
+
+    let mut shadow_stats = Vec::new();
+    for (scope, _key, table) in state_store.collect_by_type::<AiShadowStatsTable>() {
+        shadow_stats.push(ScopedShadowStatsSnapshot {
+            scope,
+            entry: table.snapshot(),
+        });
     }
 
     let mut caches = Vec::new();
@@ -208,6 +264,9 @@ pub fn inspect_ai_runtime(
         models: detailed.models,
         cooldowns,
         latency_targets,
+        throughput_targets,
+        headroom_targets,
+        shadow_stats,
         caches,
         semantic_caches,
         generation_stores,

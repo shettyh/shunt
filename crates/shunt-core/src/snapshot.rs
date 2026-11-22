@@ -1,10 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use http::header::{HeaderName, HeaderValue};
 use http::{Method, Request};
 use shunt_plugin_sdk::{HookMask, HttpPlugin};
+use tokio::sync::Semaphore;
 
 use crate::error::CoreError;
 use crate::registry::RuntimeRegistry;
@@ -159,6 +162,86 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
     }
 }
 
+/// Uncompiled fire-and-forget HTTP traffic mirroring specification attached to a [`RouteSpec`].
+#[derive(Debug, Clone)]
+pub struct TrafficMirrorSpec {
+    /// Target upstream pool name to receive mirrored copies.
+    pub upstream: String,
+    /// Fraction of requests to mirror in `[0.0, 1.0]` (default: `1.0`).
+    pub sample_rate: f64,
+    /// Per-mirror upstream request timeout (default: `5s`).
+    pub timeout: Duration,
+    /// Maximum concurrent in-flight mirrored requests (excess are dropped silently, default: `128`).
+    pub max_in_flight: usize,
+    /// Optional extra HTTP headers attached to mirrored requests.
+    pub headers: Vec<(HeaderName, HeaderValue)>,
+}
+
+impl TrafficMirrorSpec {
+    pub fn new(upstream: impl Into<String>, sample_rate: f64) -> Self {
+        Self {
+            upstream: upstream.into(),
+            sample_rate,
+            timeout: Duration::from_secs(5),
+            max_in_flight: 128,
+            headers: Vec::new(),
+        }
+    }
+}
+
+/// Immutable compiled traffic mirror target baked into a [`CompiledRoute`].
+#[derive(Debug)]
+pub struct CompiledMirror {
+    pub upstream: String,
+    /// Sampling probability scaled to basis points (`0..=10_000`) for lock-free deterministic sampling.
+    pub sample_rate_bps: u32,
+    pub timeout: Duration,
+    pub headers: Vec<(HeaderName, HeaderValue)>,
+    pub semaphore: Arc<Semaphore>,
+    sample_cursor: AtomicU64,
+    pub sent_total: AtomicU64,
+    pub dropped_total: AtomicU64,
+    pub errors_total: AtomicU64,
+}
+
+impl CompiledMirror {
+    fn from_spec(spec: TrafficMirrorSpec) -> Self {
+        let clamped = if spec.sample_rate.is_finite() {
+            spec.sample_rate.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let sample_rate_bps = (clamped * 10_000.0).round() as u32;
+        Self {
+            upstream: spec.upstream,
+            sample_rate_bps,
+            timeout: spec.timeout.max(Duration::from_millis(1)),
+            headers: spec.headers,
+            semaphore: Arc::new(Semaphore::new(spec.max_in_flight.max(1))),
+            sample_cursor: AtomicU64::new(0),
+            sent_total: AtomicU64::new(0),
+            dropped_total: AtomicU64::new(0),
+            errors_total: AtomicU64::new(0),
+        }
+    }
+
+    /// Deterministically decides whether the next request should be mirrored using
+    /// lock-free fixed-point stride sampling (no RNG overhead).
+    #[inline]
+    pub fn should_sample(&self) -> bool {
+        if self.sample_rate_bps == 0 {
+            return false;
+        }
+        if self.sample_rate_bps >= 10_000 {
+            return true;
+        }
+        let n = self.sample_cursor.fetch_add(1, Ordering::Relaxed);
+        let rate = self.sample_rate_bps as u64;
+        // Bresenham/fixed-point exact stride: triggers exactly `rate` times per 10,000 requests.
+        ((n.wrapping_add(1)).wrapping_mul(rate) / 10_000) > (n.wrapping_mul(rate) / 10_000)
+    }
+}
+
 /// Uncompiled route specification passed to [`SnapshotBuilder`].
 pub struct RouteSpec {
     pub id: String,
@@ -170,6 +253,7 @@ pub struct RouteSpec {
     pub timeouts: TimeoutConfig,
     pub allow_websockets: bool,
     pub strip_prefix: Option<String>,
+    pub mirrors: Vec<TrafficMirrorSpec>,
 }
 
 impl RouteSpec {
@@ -184,6 +268,7 @@ impl RouteSpec {
             timeouts: TimeoutConfig::default(),
             allow_websockets: true,
             strip_prefix: None,
+            mirrors: Vec::new(),
         }
     }
 
@@ -216,6 +301,11 @@ impl RouteSpec {
         self.allow_websockets = allow;
         self
     }
+
+    pub fn with_mirror(mut self, mirror: TrafficMirrorSpec) -> Self {
+        self.mirrors.push(mirror);
+        self
+    }
 }
 
 /// Immutable compiled route baked into a [`GatewaySnapshot`].
@@ -230,6 +320,7 @@ pub struct CompiledRoute {
     pub timeouts: TimeoutConfig,
     pub allow_websockets: bool,
     pub strip_prefix: Option<String>,
+    pub mirrors: Arc<[Arc<CompiledMirror>]>,
 }
 
 impl std::fmt::Debug for CompiledRoute {
@@ -351,6 +442,44 @@ impl GatewaySnapshot {
 
         out
     }
+
+    /// Renders traffic mirror counters in Prometheus exposition text format (v0.0.4).
+    pub fn render_mirror_metrics_prometheus(&self) -> String {
+        let mut has_mirrors = false;
+        for route in &self.routes {
+            if !route.mirrors.is_empty() {
+                has_mirrors = true;
+                break;
+            }
+        }
+        if !has_mirrors {
+            return String::new();
+        }
+
+        let mut out = String::with_capacity(256);
+        out.push_str(
+            "# HELP shunt_traffic_mirror_requests_total Total HTTP traffic mirror dispatch outcomes.\n",
+        );
+        out.push_str("# TYPE shunt_traffic_mirror_requests_total counter\n");
+        for route in &self.routes {
+            for m in route.mirrors.iter() {
+                let sent = m.sent_total.load(Ordering::Relaxed);
+                let dropped = m.dropped_total.load(Ordering::Relaxed);
+                let errors = m.errors_total.load(Ordering::Relaxed);
+                for (result, count) in [("sent", sent), ("dropped", dropped), ("error", errors)] {
+                    if count > 0 {
+                        let _ = writeln!(
+                            out,
+                            "shunt_traffic_mirror_requests_total{{route=\"{}\",upstream=\"{}\",result=\"{result}\"}} {count}",
+                            escape_prom_label(&route.id),
+                            escape_prom_label(&m.upstream),
+                        );
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 fn escape_prom_label(s: &str) -> String {
@@ -445,6 +574,11 @@ impl SnapshotBuilder {
             if !compiled_upstreams.contains_key(&spec.upstream) {
                 return Err(CoreError::UnknownUpstream(spec.upstream));
             }
+            for m in &spec.mirrors {
+                if !compiled_upstreams.contains_key(&m.upstream) {
+                    return Err(CoreError::UnknownUpstream(m.upstream.clone()));
+                }
+            }
 
             let mut chain = Vec::with_capacity(self.global_plugins.len() + spec.plugins.len());
             chain.extend(self.global_plugins.iter().cloned());
@@ -463,6 +597,12 @@ impl SnapshotBuilder {
                 }
             }
 
+            let compiled_mirrors: Vec<Arc<CompiledMirror>> = spec
+                .mirrors
+                .into_iter()
+                .map(|m| Arc::new(CompiledMirror::from_spec(m)))
+                .collect();
+
             compiled_routes.push(Arc::new(CompiledRoute {
                 id: spec.id,
                 matcher: spec.matcher,
@@ -474,6 +614,7 @@ impl SnapshotBuilder {
                 timeouts: spec.timeouts,
                 allow_websockets: spec.allow_websockets,
                 strip_prefix: spec.strip_prefix,
+                mirrors: Arc::from(compiled_mirrors),
             }));
         }
 

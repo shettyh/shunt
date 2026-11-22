@@ -108,5 +108,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_routing_overrides"
+path = "fuzz_targets/fuzz_routing_overrides.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

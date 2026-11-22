@@ -352,6 +352,35 @@ pub struct UpstreamTlsIr {
     pub alpn: Option<Vec<String>>,
 }
 
+/// Fire-and-forget HTTP traffic mirror attached to a route (`[[routes.mirrors]]`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RouteMirrorIr {
+    /// Target upstream name to mirror sampled requests to.
+    pub upstream: String,
+    /// Fraction of requests to mirror in `[0.0, 1.0]` (default: `1.0`).
+    #[serde(default = "default_mirror_sample_rate")]
+    pub sample_rate: f64,
+    /// Per-mirror request timeout in milliseconds (default: `5000`).
+    #[serde(default = "default_mirror_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Max concurrent in-flight mirrored requests (default: `128`).
+    #[serde(default = "default_mirror_max_in_flight")]
+    pub max_in_flight: usize,
+    /// Optional extra HTTP headers attached to mirrored requests.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+fn default_mirror_sample_rate() -> f64 {
+    1.0
+}
+fn default_mirror_timeout_ms() -> u64 {
+    5_000
+}
+fn default_mirror_max_in_flight() -> usize {
+    128
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RouteIr {
     pub id: String,
@@ -372,6 +401,8 @@ pub struct RouteIr {
     pub idle_chunk_timeout_ms: Option<u64>,
     #[serde(default = "default_allow_websockets")]
     pub allow_websockets: bool,
+    #[serde(default)]
+    pub mirrors: Vec<RouteMirrorIr>,
     #[serde(default)]
     pub plugins: Vec<PluginAttachment>,
 }
@@ -715,6 +746,49 @@ impl GatewayConfig {
             for m in &route.methods {
                 if Method::from_bytes(m.as_bytes()).is_err() {
                     errors.push(format!("routes.{}: invalid HTTP method `{m}`", route.id));
+                }
+            }
+            for (idx, mirror) in route.mirrors.iter().enumerate() {
+                if !upstream_names.contains(&mirror.upstream) {
+                    errors.push(format!(
+                        "routes.{}.mirrors[{idx}]: references unknown upstream `{}`",
+                        route.id, mirror.upstream
+                    ));
+                }
+                if !mirror.sample_rate.is_finite()
+                    || mirror.sample_rate < 0.0
+                    || mirror.sample_rate > 1.0
+                {
+                    errors.push(format!(
+                        "routes.{}.mirrors[{idx}].sample_rate: must be in [0.0, 1.0]",
+                        route.id
+                    ));
+                }
+                if mirror.timeout_ms == 0 {
+                    errors.push(format!(
+                        "routes.{}.mirrors[{idx}].timeout_ms: must be >= 1",
+                        route.id
+                    ));
+                }
+                if mirror.max_in_flight == 0 {
+                    errors.push(format!(
+                        "routes.{}.mirrors[{idx}].max_in_flight: must be >= 1",
+                        route.id
+                    ));
+                }
+                for (k, v) in &mirror.headers {
+                    if HeaderName::from_bytes(k.as_bytes()).is_err() {
+                        errors.push(format!(
+                            "routes.{}.mirrors[{idx}].headers: invalid header name `{k}`",
+                            route.id
+                        ));
+                    }
+                    if HeaderValue::from_str(v).is_err() {
+                        errors.push(format!(
+                            "routes.{}.mirrors[{idx}].headers.{k}: invalid header value",
+                            route.id
+                        ));
+                    }
                 }
             }
         }

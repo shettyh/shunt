@@ -22,6 +22,7 @@ This directory contains Request for Comments (RFC) design documents for **Shunt*
 | [0014](./0014-cloud-iam-and-http-client.md) | Dynamic Cloud IAM Auth & Outbound `HttpClient` Primitive | Implemented | `shunt-plugin-sdk`, `shunt-core`, `shunt-ai`, `shunt-test`, `specs/`, `examples/`, `fuzz/` |
 | [0015](./0015-guardrails-audit-and-webhooks.md) | Pluggable AI Guardrails (`ai-guardrails`), Audit Sinks (`ai-audit`) & Alert Webhooks (`ai-alerts`) | Implemented | `shunt-plugin-sdk`, `shunt-core`, `shunt-config`, `shunt-ai`, `specs/`, `examples/`, `fuzz/` |
 | [0016](./0016-multimodal-endpoints-and-streaming-cache.md) | Multimodal Endpoints, Generation Lookup & Streaming/Singleflight/Semantic AI Cache | Implemented | `shunt-ai`, `shunt-config`, `specs/`, `examples/`, `fuzz/` |
+| [0017](./0017-per-request-routing-quotas-and-advanced-failover.md) | Per-Request Routing, Concurrency Quotas & Advanced Failover | Implemented | `shunt-plugin-sdk`, `shunt-core`, `shunt-config`, `shunt-ai`, `specs/`, `examples/`, `fuzz/` |
 
 ## Status Definitions
 

@@ -53,6 +53,12 @@ pub enum Flow {
     ///
     /// Allowed only pre-flush and when the request body is empty or buffered.
     RetryUpstream,
+    /// Buffer up to `max_bytes` of the upstream response body pre-flush and invoke
+    /// [`crate::HttpPlugin::on_response_body_inspected`] before deciding whether to
+    /// [`Flow::RetryUpstream`], [`Flow::Respond`], or [`Flow::Continue`] (flush verbatim).
+    ///
+    /// Valid only when returned from `on_response_headers`.
+    InspectResponseBody { max_bytes: usize },
 }
 
 /// Control-flow directive returned by streaming body chunk hooks.

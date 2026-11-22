@@ -61,7 +61,9 @@ pub use aws_eventstream::{
     crc32_ieee, encode_eventstream_frame,
 };
 pub use aws_sigv4::{AwsSigV4Credentials, SigV4Output, sign_canonical, sign_upstream_request};
-pub use budget::{AiBudgetFactory, AiBudgetPlugin, AiBudgetState, SpendLedgerTable};
+pub use budget::{
+    AiBudgetFactory, AiBudgetPlugin, AiBudgetState, BudgetHoldGuard, SpendLedgerTable,
+};
 pub use cache::{
     AiCacheFactory, AiCachePending, AiCachePlugin, AiCacheStatus, AiCacheTable,
     AiSingleflightTable, AiTranslatedResponseBody, CacheScope, CachedAiResponse,
@@ -89,7 +91,10 @@ pub use dialects::gemini::{
     gemini_to_openai_embeddings_response, gemini_to_openai_response, map_gemini_finish_reason,
     openai_to_gemini_embeddings_request, openai_to_gemini_request,
 };
-pub use failover::{AiFailoverFactory, AiFailoverPlugin, CooldownSnapshot, FailoverCircuitState};
+pub use failover::{
+    AiFailoverFactory, AiFailoverPlugin, CooldownSnapshot, FailoverCircuitState,
+    is_context_overflow_error,
+};
 pub use generation::{
     AiGenerationRecord, AiGenerationStore, AiRecordedCost, GenerationStoreSnapshot,
 };
@@ -115,12 +120,14 @@ pub use ingress::responses::{
 pub use inspector::{
     AiRuntimeInspect, ScopedAlertSnapshot, ScopedAuditSnapshot, ScopedCacheSnapshot,
     ScopedCloudTokenSnapshot, ScopedCooldownSnapshot, ScopedGenerationStoreSnapshot,
-    ScopedGuardrailSnapshot, ScopedKeyPoolSnapshot, ScopedLatencySnapshot,
-    ScopedSemanticCacheSnapshot, inspect_ai_runtime,
+    ScopedGuardrailSnapshot, ScopedHeadroomSnapshot, ScopedKeyPoolSnapshot, ScopedLatencySnapshot,
+    ScopedSemanticCacheSnapshot, ScopedShadowStatsSnapshot, ScopedThroughputSnapshot,
+    inspect_ai_runtime,
 };
 pub use model_router::{
-    AiModelRouterFactory, AiModelRouterPlugin, ModelEntryConfig, ModelRule, MultipartBoundary,
-    TargetSpec, classify_ai_endpoint,
+    AiModelRouterFactory, AiModelRouterPlugin, AiShadowStatsSnapshot, AiShadowStatsTable,
+    ModelEntryConfig, ModelRule, MultipartBoundary, ShadowTargetSpec, TargetSpec,
+    classify_ai_endpoint,
 };
 pub use multimodal::{
     RerankRequestContext, bedrock_to_openai_rerank_response, extract_query_param,
@@ -138,19 +145,24 @@ pub use presets::{
     default_auth_shape_for_dialect,
 };
 pub use pricing::{
-    ModelPricing, NANO_USD_PER_USD, PricingCatalog, nano_usd_to_usd, usd_to_nano_usd,
+    ModelPricing, NANO_USD_PER_USD, PricingCatalog, nano_usd_to_usd, parse_external_pricing_json,
+    usd_to_nano_usd,
 };
 pub use provider_adapter::{
     AiProviderAdapterFactory, AiProviderAdapterPlugin, ProviderAuthConfig, ProviderInstanceConfig,
 };
 pub use routing::{
-    LatencyEntrySnapshot, LatencyRoutingConfig, RoutingCursorTable, TargetLatencyStats,
-    TargetLatencyTable, UnknownCostPolicy, detect_required_capabilities, order_cost_targets,
+    HeadroomEntrySnapshot, LatencyEntrySnapshot, LatencyRoutingConfig, ProviderRoutingPreferences,
+    RoutingCursorTable, TargetHeadroomTable, TargetLatencyStats, TargetLatencyTable,
+    TargetThroughputStats, TargetThroughputTable, ThroughputEntrySnapshot, ThroughputRoutingConfig,
+    UnknownCostPolicy, apply_provider_preferences, detect_required_capabilities,
+    extract_end_user_from_body, filter_targets_by_context_window, order_cost_targets,
     order_weighted_targets, pick_weighted_primary,
 };
 pub use sse::{SseEvent, SseParser};
 pub use token_rate_limit::{
-    AiTokenRateLimitFactory, AiTokenRateLimitPlugin, AiTokenReservation, QuotaWindowTable,
+    AiModelTokenReservation, AiTokenRateLimitFactory, AiTokenRateLimitPlugin, AiTokenReservation,
+    ConcurrencyLeaseGuard, ConcurrencyTable, QuotaWindowTable,
 };
 pub use tokens::{TokenEstimate, estimate_request_tokens, estimate_text_tokens};
 pub use translate::{
@@ -160,10 +172,10 @@ pub use translate::{
     rewrite_openai_embeddings_request, rewrite_openai_request, vertex_anthropic_path,
 };
 pub use types::{
-    AiCapability, AiEndpointKind, AiFailoverHistory, AiKeyPolicy, AiRequestMeta, AiTarget, AiUsage,
-    AiUsageReport, BudgetWindow, DetectedEndpoint, FailoverEvent, IntraProviderKeyRetry,
-    ProviderDialect, RoutingStrategy, anthropic_error_response, endpoint_error_response,
-    openai_error_response, wildcard_match,
+    AiCapability, AiEndUser, AiEndpointKind, AiFailoverHistory, AiKeyPolicy, AiRequestMeta,
+    AiTarget, AiUsage, AiUsageReport, BudgetWindow, ContextOverflowFloor, DetectedEndpoint,
+    FailoverEvent, IntraProviderKeyRetry, ModelLimitOverride, ProviderDialect, RoutingStrategy,
+    anthropic_error_response, endpoint_error_response, openai_error_response, wildcard_match,
 };
 pub use usage_tracker::{
     AiDetailedMetricsSnapshot, AiMetrics, AiMetricsSnapshot, AiModelBreakdown,

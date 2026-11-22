@@ -57,6 +57,9 @@ pub struct UpstreamSelection {
     pub attempt: usize,
     /// Maximum configured attempts for this request.
     pub max_attempts: usize,
+    /// Optional per-attempt override for the upstream response-headers (TTFB/TTFT) timeout.
+    /// When `None`, the route's default `response_headers_timeout` is used.
+    pub response_headers_timeout_override: Option<Duration>,
 }
 
 /// Per-hook execution timing entry (populated when tracing is enabled, e.g., `shunt dev`).

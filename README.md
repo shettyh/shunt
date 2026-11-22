@@ -249,6 +249,7 @@ impl HttpPlugin for PoweredByPlugin {
   - [RFC 0014](rfcs/0014-cloud-iam-and-http-client.md) — Dynamic Cloud IAM Auth & Outbound `HttpClient` Primitive
   - [RFC 0015](rfcs/0015-guardrails-audit-and-webhooks.md) — Pluggable AI Guardrails (`ai-guardrails`), Redacted Audit Sinks (`ai-audit`) & Alert Webhooks (`ai-alerts`)
   - [RFC 0016](rfcs/0016-multimodal-endpoints-and-streaming-cache.md) — Multimodal Endpoints, Generation Lookup & Streaming/Singleflight/Semantic AI Cache
+  - [RFC 0017](rfcs/0017-per-request-routing-quotas-and-advanced-failover.md) — Per-Request Routing, Concurrency Quotas & Advanced Failover
 
 ---
 
