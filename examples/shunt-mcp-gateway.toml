@@ -1,0 +1,174 @@
+# Example Shunt MCP & Agentic Governance Gateway (`shunt-mcp`, RFC 0019)
+#
+# Exposes a single virtual Streamable HTTP MCP endpoint (`/mcp`) that multiplexes
+# multiple backend MCP servers (`github`, `postgres`) with:
+# - Constant-time virtual API keys & RFC 9728 OAuth Protected Resource discovery
+# - Per-agent tool/server/resource ACLs (unauthorized tools are hidden from `tools/list`)
+# - Cross-principal `Mcp-Session-Id` hijacking protection
+# - Per-tool JSON argument policies (read-only SQL, path traversal blocking)
+# - High-risk tool approval gating (`x-shunt-approved: true` or `params._meta.approved`)
+# - Outbound secret redaction & inbound indirect prompt-injection defense (JSON + SSE)
+# - Identical-call agent loop breaker & per-session call caps
+# - Prometheus `/metrics` (`shunt_mcp_*`) + Admin `/api/status` (`mcp`) introspection
+#
+# Usage:
+#   export MCP_ALICE_KEY="sk-mcp-alice"
+#   export MCP_BOT_KEY="sk-mcp-bot"
+#   export GITHUB_MCP_TOKEN="ghp_upstream_secret"
+#   export POSTGRES_MCP_TOKEN="pg_upstream_secret"
+#   shunt verify -c examples/shunt-mcp-gateway.toml
+#   shunt dev --ui -c examples/shunt-mcp-gateway.toml
+
+[server]
+listen = "127.0.0.1:8080"
+drain_timeout_ms = 15000
+
+[admin]
+enabled = true
+listen = "127.0.0.1:9090"
+
+[[plugins]]
+name = "request-id"
+
+[[plugins]]
+name = "metrics"
+
+[[upstreams]]
+name = "github_mcp"
+endpoints = ["http://127.0.0.1:18081"]
+connect_timeout_ms = 5000
+
+[[upstreams]]
+name = "postgres_mcp"
+endpoints = ["http://127.0.0.1:18082"]
+connect_timeout_ms = 5000
+
+[[routes]]
+id = "mcp_virtual_gateway"
+path_prefix = "/"
+methods = ["GET", "POST", "DELETE"]
+upstream = "github_mcp"
+max_body_bytes = 2097152
+response_headers_timeout_ms = 30000
+idle_chunk_timeout_ms = 60000
+
+# 1. Authenticate agents, bind Mcp-Session-Id to principal, and attach least-privilege ACLs.
+[[routes.plugins]]
+name = "mcp-auth"
+id = "mcp-auth"
+[routes.plugins.config]
+strip_key_header = true
+bind_session_to_principal = true
+
+[routes.plugins.config.oauth_protected_resource]
+path = "/.well-known/oauth-protected-resource"
+resource = "https://mcp.example.com"
+authorization_servers = ["https://auth.example.com"]
+scopes_supported = ["mcp:tools:read", "mcp:tools:write"]
+
+[[routes.plugins.config.keys]]
+id = "eng-alice"
+api_key = "env:MCP_ALICE_KEY"
+team = "platform"
+agent_id = "claude-code"
+allowed_servers = ["github", "postgres"]
+allowed_tools = ["github__*", "postgres__*"]
+denied_tools = ["*delete*", "*drop*"]
+allowed_resources = ["github://*", "postgres://*"]
+allowed_prompts = ["github__*"]
+rpm = 60
+tool_rpm = 30
+max_calls_per_session = 25
+max_parallel_calls = 4
+
+[[routes.plugins.config.keys]]
+id = "bot-readonly"
+api_key = "env:MCP_BOT_KEY"
+team = "analytics"
+agent_id = "sql-reporter"
+allowed_servers = ["postgres"]
+allowed_tools = ["postgres__query"]
+allowed_resources = ["postgres://schema/*"]
+rpm = 30
+tool_rpm = 15
+max_calls_per_session = 5
+max_parallel_calls = 2
+
+# 2. Virtual MCP Streamable HTTP multiplexer aggregating `github` + `postgres` MCP servers.
+[[routes.plugins]]
+name = "mcp-router"
+id = "mcp-router"
+[routes.plugins.config]
+max_body_bytes = 2097152
+namespace_separator = "__"
+server_name = "shunt-mcp-gateway"
+catalog_ttl_secs = 60
+session_ttl_secs = 3600
+response_headers = true
+mirror_mcp_name_header = true
+
+[routes.plugins.config.servers.github]
+upstream = "github_mcp"
+endpoint = "mock://github_mcp/mcp"
+path = "/mcp"
+auth = { type = "bearer", api_key = "env:GITHUB_MCP_TOKEN" }
+resource_prefixes = ["github://"]
+stateful = false
+
+[routes.plugins.config.servers.postgres]
+upstream = "postgres_mcp"
+endpoint = "mock://postgres_mcp/mcp"
+path = "/mcp"
+auth = { type = "header", header = "x-api-key", api_key = "env:POSTGRES_MCP_TOKEN" }
+resource_prefixes = ["postgres://"]
+stateful = false
+
+# 3. Tool policies, high-risk approval gates, JSON argument rules, secret redaction & prompt-injection defense.
+[[routes.plugins]]
+name = "mcp-guardrails"
+id = "mcp-guardrails"
+[routes.plugins.config]
+denied_tools = ["*drop_database*"]
+require_approval_tools = ["github__create_issue"]
+argument_detectors = ["aws_key", "private_key"]
+argument_action = "redact"
+response_detectors = ["prompt_injection", "private_key"]
+response_action = "block"
+
+[[routes.plugins.config.argument_rules]]
+tool = "postgres__query"
+max_arg_bytes = 4096
+required_args = ["sql"]
+allow_patterns = { sql = "(?i)^\\s*SELECT\\b" }
+deny_patterns = { sql = "(?i)\\b(DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE)\\b" }
+
+[[routes.plugins.config.argument_rules]]
+tool = "github__*"
+deny_patterns = { path = "\\.\\.[/\\\\]" }
+
+# 4. Agent loop breaker, per-session call caps, per-tool quotas & concurrency caps.
+[[routes.plugins]]
+name = "mcp-rate-limit"
+id = "mcp-rate-limit"
+[routes.plugins.config]
+rpm = 120
+tool_rpm = 60
+window_secs = 60
+max_calls_per_session = 50
+max_parallel_calls = 8
+
+[routes.plugins.config.tool_limits."github__create_issue"]
+rpm = 5
+window_secs = 60
+
+[routes.plugins.config.loop_breaker]
+max_repeats = 2
+window_secs = 60
+
+# 5. Prometheus metrics (`shunt_mcp_*`), OTLP span enrichment & structured audit logs.
+[[routes.plugins]]
+name = "mcp-telemetry"
+id = "mcp-telemetry"
+[routes.plugins.config]
+log_calls = true
+inspect_tool_errors = true

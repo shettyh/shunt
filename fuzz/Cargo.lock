@@ -831,9 +831,23 @@ dependencies = [
  "shunt-ai",
  "shunt-config",
  "shunt-core",
+ "shunt-mcp",
  "shunt-plugin-sdk",
  "shunt-plugins",
  "toml",
+]
+
+[[package]]
+name = "shunt-mcp"
+version = "0.0.1"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shunt-plugin-sdk",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

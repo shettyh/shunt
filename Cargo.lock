@@ -1171,6 +1171,7 @@ dependencies = [
  "shunt-ai",
  "shunt-config",
  "shunt-core",
+ "shunt-mcp",
  "shunt-plugin-sdk",
  "shunt-plugins",
  "shunt-test",
@@ -1234,6 +1235,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "shunt-mcp"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "proptest",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shunt-config",
+ "shunt-core",
+ "shunt-plugin-sdk",
+ "shunt-plugins",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "shunt-plugin-sdk"
 version = "0.0.1"
 dependencies = [
@@ -1283,6 +1308,7 @@ dependencies = [
  "shunt-ai",
  "shunt-config",
  "shunt-core",
+ "shunt-mcp",
  "shunt-plugin-sdk",
  "shunt-plugins",
  "thiserror",

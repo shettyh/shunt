@@ -14,6 +14,7 @@ use shunt_config::{
     ui_feature_compiled, verify_bundle,
 };
 use shunt_core::{DynamicCertResolver, GatewayServer, RuntimeRegistry, TlsListenerConfig};
+use shunt_mcp::{McpMetrics, inspect_mcp_runtime, register_mcp_plugins};
 use shunt_plugin_sdk::PluginRegistry;
 use shunt_plugins::{DevWaterfallPlugin, PrometheusMetrics, register_builtin_plugins};
 use tracing::{error, info, warn};
@@ -285,24 +286,30 @@ fn init_tracing(default_filter: &str) {
         .try_init();
 }
 
-fn build_registries() -> (
-    Arc<PluginRegistry>,
-    Arc<RuntimeRegistry>,
-    Arc<PrometheusMetrics>,
-    Arc<AiMetrics>,
-) {
+struct GatewayRegistries {
+    plugins: Arc<PluginRegistry>,
+    runtime: Arc<RuntimeRegistry>,
+    metrics: Arc<PrometheusMetrics>,
+    ai_metrics: Arc<AiMetrics>,
+    mcp_metrics: Arc<McpMetrics>,
+}
+
+fn build_registries() -> GatewayRegistries {
     let metrics = Arc::new(PrometheusMetrics::new());
     let ai_metrics = Arc::new(AiMetrics::new());
+    let mcp_metrics = Arc::new(McpMetrics::new());
     let mut plugin_registry = PluginRegistry::new();
     register_builtin_plugins(&mut plugin_registry, Arc::clone(&metrics));
     register_ai_plugins(&mut plugin_registry, Arc::clone(&ai_metrics));
-    let runtime_registry = Arc::new(RuntimeRegistry::new());
-    (
-        Arc::new(plugin_registry),
-        runtime_registry,
+    register_mcp_plugins(&mut plugin_registry, Arc::clone(&mcp_metrics));
+    let runtime = Arc::new(RuntimeRegistry::new());
+    GatewayRegistries {
+        plugins: Arc::new(plugin_registry),
+        runtime,
         metrics,
         ai_metrics,
-    )
+        mcp_metrics,
+    }
 }
 
 fn run_check(provider: &dyn ConfigProvider) -> ExitCode {
@@ -314,8 +321,8 @@ fn run_check(provider: &dyn ConfigProvider) -> ExitCode {
         }
     };
 
-    let (plugins, runtime, _metrics, _ai_metrics) = build_registries();
-    let compiler = SnapshotCompiler::new(plugins, runtime);
+    let regs = build_registries();
+    let compiler = SnapshotCompiler::new(regs.plugins, regs.runtime);
     match compiler.compile(&loaded) {
         Ok(bundle) => {
             println!("Configuration valid: {}", provider.source_name());
@@ -354,8 +361,8 @@ fn run_verify(
         None => None,
     };
 
-    let (plugins, runtime, _metrics, _ai_metrics) = build_registries();
-    let compiler = SnapshotCompiler::new(plugins, runtime);
+    let regs = build_registries();
+    let compiler = SnapshotCompiler::new(regs.plugins, regs.runtime);
     let bundle = match compiler.compile(&loaded) {
         Ok(b) => b,
         Err(err) => {
@@ -545,7 +552,13 @@ async fn run_server(
         return ExitCode::FAILURE;
     }
 
-    let (plugins, runtime, metrics, ai_metrics) = build_registries();
+    let GatewayRegistries {
+        plugins,
+        runtime,
+        metrics,
+        ai_metrics,
+        mcp_metrics,
+    } = build_registries();
     let mut compiler = SnapshotCompiler::new(plugins, Arc::clone(&runtime));
     if dev_mode {
         compiler = compiler.with_extra_global_plugin(Arc::new(DevWaterfallPlugin::stderr()));
@@ -611,10 +624,13 @@ async fn run_server(
         };
         let metrics_clone = Arc::clone(&metrics);
         let ai_metrics_clone = Arc::clone(&ai_metrics);
+        let mcp_metrics_clone = Arc::clone(&mcp_metrics);
         let controller_metrics = Arc::clone(&controller);
         let runtime_metrics = Arc::clone(&runtime);
         let ai_metrics_status = Arc::clone(&ai_metrics);
+        let mcp_metrics_status = Arc::clone(&mcp_metrics);
         let runtime_status = Arc::clone(&runtime);
+        let runtime_mcp_status = Arc::clone(&runtime);
         let mut admin = AdminServer::new(
             Arc::clone(&controller),
             Arc::new(move || {
@@ -648,6 +664,13 @@ async fn run_server(
                     }
                     out.push_str(&ai_out);
                 }
+                let mcp_out = mcp_metrics_clone.render_prometheus();
+                if !mcp_out.is_empty() {
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push_str(&mcp_out);
+                }
                 out
             }),
         )
@@ -659,6 +682,16 @@ async fn run_server(
                     &ai_metrics_status,
                     runtime_status.state_store(),
                     runtime_status.clock().as_ref(),
+                )
+            }),
+        )
+        .with_status_provider(
+            "mcp",
+            Arc::new(move || {
+                inspect_mcp_runtime(
+                    &mcp_metrics_status,
+                    runtime_mcp_status.state_store(),
+                    runtime_mcp_status.clock().as_ref(),
                 )
             }),
         );

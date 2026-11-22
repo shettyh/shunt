@@ -170,6 +170,16 @@ The read-only Admin API always binds to a separate listener (`127.0.0.1:9090` by
 | `ai-failover` | Triggers `Flow::RetryUpstream` on `429`/`5xx`/`529` with `StateStore`/Redis-backed provider cooldowns and `Retry-After` support |
 | `ai-usage-tracker` | Extracts prompt, cached-prompt, and completion tokens + TTFT across all dialects for Prometheus metrics, structured logs, and OTLP GenAI span enrichment |
 
+### MCP & Agentic Governance Plugin Pack (`shunt-mcp`)
+
+| Plugin | Purpose |
+| --- | --- |
+| `mcp-auth` | Constant-time SHA-256 virtual keys or forwarded `jwt-auth`/`mtls-auth` identity, RFC 9728 `/.well-known/oauth-protected-resource` discovery, per-agent server/tool/resource/prompt ACLs, and `Mcp-Session-Id` principal binding |
+| `mcp-router` | Streamable HTTP JSON-RPC 2.0 router & multi-server virtual MCP multiplexer (`initialize`, cached concurrent ACL-filtered `tools/list`/`resources/list`/`prompts/list` fan-out, `<server>__<tool>` routing, `Mcp-Name` mirroring, stateful upstream handshakes) |
+| `mcp-guardrails` | Tool allow/deny policies, approval gates (`x-shunt-approved` / `_meta.approved`), per-tool JSON argument regex/schema rules, outbound PII/secret redaction, inbound indirect prompt-injection & secret scanning (JSON + SSE), and OPA/HTTP policy webhooks |
+| `mcp-rate-limit` | Per-principal RPM & `tools/call` RPM, per-tool quotas, per-session call caps, identical-call agent loop breaker, and RAII `max_parallel_calls` concurrency caps (local or Redis/Valkey) |
+| `mcp-telemetry` | `shunt_mcp_*` Prometheus metrics, OTLP `mcp.*` span enrichment, structured SHA-256 audit logs, and `/api/status` (`"mcp"`) runtime inspection |
+
 ---
 
 ## Writing a Plugin
@@ -231,6 +241,7 @@ impl HttpPlugin for PoweredByPlugin {
 | [`crates/shunt-config`](crates/shunt-config) | Canonical IR, TOML/YAML loader, file watcher, `SnapshotCompiler`, and Admin API |
 | [`crates/shunt-plugins`](crates/shunt-plugins) | First-party HTTP plugins built strictly on `shunt-plugin-sdk` |
 | [`crates/shunt-ai`](crates/shunt-ai) | Multi-provider AI router & gateway plugin pack built 100% on `shunt-plugin-sdk` |
+| [`crates/shunt-mcp`](crates/shunt-mcp) | Model Context Protocol (MCP) & Agentic Governance plugin pack built 100% on `shunt-plugin-sdk` |
 | [`crates/shunt-test`](crates/shunt-test) | Declarative TOML conformance test harness (`shunt.spec.toml`) and in-process mock upstreams |
 | [`crates/shunt-cli`](crates/shunt-cli) | `shunt` CLI binary (`check`, `verify`, `test`, `run`, `dev`) |
 | [`benches/shunt-bench`](benches/shunt-bench) | Self-contained mock upstream and HTTP/SSE load generator |
@@ -260,6 +271,7 @@ impl HttpPlugin for PoweredByPlugin {
   - [RFC 0016](rfcs/0016-multimodal-endpoints-and-streaming-cache.md) — Multimodal Endpoints, Generation Lookup & Streaming/Singleflight/Semantic AI Cache
   - [RFC 0017](rfcs/0017-per-request-routing-quotas-and-advanced-failover.md) — Per-Request Routing, Concurrency Quotas & Advanced Failover
   - [RFC 0018](rfcs/0018-jwt-http-security-compression-and-k8s-gateway.md) — JWT/OIDC Auth, HTTP Gateway Security, Response Compression & Kubernetes Gateway API
+  - [RFC 0019](rfcs/0019-mcp-and-agentic-gateway.md) — `shunt-mcp`: Model Context Protocol (MCP) & Agentic Governance Plugin Pack
 
 ---
 
