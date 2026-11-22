@@ -1,0 +1,55 @@
+# Workload 2b/2c: Modern HTTP API Gateway Security & Compression Chain (RFC 0018)
+# request-id + ip-filter + jwt-auth (HS256 + claims/scope check) + body-limit + compression (zstd/br/gzip)
+[server]
+listen = "127.0.0.1:18081"
+drain_timeout_ms = 5000
+
+[admin]
+enabled = false
+
+[[upstreams]]
+name = "bench_upstream"
+endpoints = ["http://127.0.0.1:18080"]
+connect_timeout_ms = 5000
+pool_max_idle_per_host = 512
+
+[[routes]]
+id = "security_compression"
+path_prefix = "/"
+upstream = "bench_upstream"
+max_attempts = 1
+allow_websockets = false
+
+[[routes.plugins]]
+name = "request-id"
+
+[[routes.plugins]]
+name = "ip-filter"
+[routes.plugins.config]
+allow = ["127.0.0.0/8", "10.0.0.0/8", "::1/128"]
+deny = ["10.99.0.0/16"]
+trusted_proxies = ["127.0.0.1/32"]
+use_forwarded_for = true
+
+[[routes.plugins]]
+name = "jwt-auth"
+[routes.plugins.config]
+algorithms = ["HS256"]
+keys = [{ kid = "bench-hs1", secret = "shunt-bench-hs256-secret-key-32b!" }]
+issuer = "https://bench.shunt.dev"
+audience = "shunt-api"
+required_scopes = ["read"]
+forward_claims = { "sub" = "x-user-id", "org.id" = "x-org-id" }
+strip_header = true
+
+[[routes.plugins]]
+name = "body-limit"
+[routes.plugins.config]
+max_bytes = 1048576
+
+[[routes.plugins]]
+name = "compression"
+[routes.plugins.config]
+encodings = ["zstd", "br", "gzip"]
+min_size_bytes = 512
+level = 3

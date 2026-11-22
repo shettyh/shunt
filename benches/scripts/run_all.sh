@@ -163,6 +163,20 @@ if command -v envoy >/dev/null 2>&1; then
 fi
 
 # ------------------------------------------------------------------------------
+# Workload 2b/2c: Modern API Gateway Security & Compression (RFC 0018)
+# ------------------------------------------------------------------------------
+# Deterministic HS256 JWT (iss=https://bench.shunt.dev, aud=shunt-api, scope="read write", exp=2100)
+BENCH_JWT="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJlbmNoLWhzMSJ9.eyJpc3MiOiJodHRwczovL2JlbmNoLnNodW50LmRldiIsImF1ZCI6InNodW50LWFwaSIsInN1YiI6ImJlbmNoLXVzZXIiLCJzY29wZSI6InJlYWQgd3JpdGUiLCJvcmciOnsiaWQiOiJhY21lIn0sImV4cCI6NDEwMjQ0NDgwMH0.oNwB3NTg0O9xnqR3IhQ9CqJfbgpiN597a1vthqYA7G0"
+
+W2B_CMD="$BENCH_BIN http --url http://127.0.0.1:$GATEWAY_PORT/ping -c $HTTP_CONCURRENCY -d $DURATION_SECS --warmup-secs $WARMUP_SECS -H 'Authorization: Bearer $BENCH_JWT'"
+run_gateway_workload "Shunt (req-id + ip-filter + jwt-auth HS256 + body-limit)" "Workload 2b: JWT & Security Chain" \
+    "env RUST_LOG=error $SHUNT_BIN run --no-watch -c $CONFIG_DIR/shunt-security-compression.toml" "$W2B_CMD"
+
+W2C_CMD="$BENCH_BIN http --url http://127.0.0.1:$GATEWAY_PORT/json -c $HTTP_CONCURRENCY -d $DURATION_SECS --warmup-secs $WARMUP_SECS -H 'Authorization: Bearer $BENCH_JWT' -H 'Accept-Encoding: zstd'"
+run_gateway_workload "Shunt (JWT + security + streaming zstd on ~4KB JSON)" "Workload 2c: Security + zstd Compression" \
+    "env RUST_LOG=error $SHUNT_BIN run --no-watch -c $CONFIG_DIR/shunt-security-compression.toml" "$W2C_CMD"
+
+# ------------------------------------------------------------------------------
 # Workload 3: High-Concurrency SSE Streaming (1,000+ concurrent streams)
 # ------------------------------------------------------------------------------
 W3_RAW_CMD="$BENCH_BIN sse --url http://127.0.0.1:$GATEWAY_PORT/sse -c $SSE_CONCURRENCY --waves 1 --method GET"
