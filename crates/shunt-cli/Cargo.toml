@@ -21,6 +21,7 @@ shunt-core.workspace = true
 shunt-config.workspace = true
 shunt-plugins.workspace = true
 shunt-ai.workspace = true
+shunt-mcp.workspace = true
 shunt-test.workspace = true
 
 clap.workspace = true

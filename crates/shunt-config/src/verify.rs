@@ -454,6 +454,79 @@ pub fn verify_bundle(
                 }
             }
         }
+
+        // mcp.plugin_order, mcp.unknown_upstream & mcp.auth_recommended
+        let mcp_router_pos = route_ir.plugins.iter().position(|p| p.name == "mcp-router");
+        if let Some(mr_idx) = mcp_router_pos {
+            for (idx, att) in route_ir.plugins.iter().enumerate() {
+                if idx < mr_idx && matches!(att.name.as_str(), "mcp-guardrails" | "mcp-rate-limit")
+                {
+                    diags.push(VerifyDiagnostic {
+                        rule: "mcp.plugin_order".to_owned(),
+                        severity: Severity::Error,
+                        subject: Some(route_ir.id.clone()),
+                        message: format!(
+                            "plugin `{}` (index {idx}) appears before `mcp-router` (index {mr_idx}) on route `{}`; place `mcp-router` before guardrails and rate limits so parsed MCP metadata is available",
+                            att.name, route_ir.id
+                        ),
+                    });
+                }
+                if idx > mr_idx && att.name == "mcp-auth" {
+                    diags.push(VerifyDiagnostic {
+                        rule: "mcp.plugin_order".to_owned(),
+                        severity: Severity::Error,
+                        subject: Some(route_ir.id.clone()),
+                        message: format!(
+                            "plugin `mcp-auth` (index {idx}) appears after `mcp-router` (index {mr_idx}) on route `{}`; place `mcp-auth` first so authentication, session binding, and tool ACLs run before routing",
+                            route_ir.id
+                        ),
+                    });
+                }
+            }
+
+            if let Some(router_att) = route_ir.plugins.get(mr_idx)
+                && let Some(servers) = router_att.config.get("servers").and_then(Value::as_object)
+            {
+                for (srv_name, srv_cfg) in servers {
+                    if let Some(up) = srv_cfg.get("upstream").and_then(Value::as_str)
+                        && !upstream_names.contains(up)
+                    {
+                        diags.push(VerifyDiagnostic {
+                            rule: "mcp.unknown_upstream".to_owned(),
+                            severity: Severity::Error,
+                            subject: Some(route_ir.id.clone()),
+                            message: format!(
+                                "mcp-router server `{srv_name}` on route `{}` references undeclared upstream `{up}`",
+                                route_ir.id
+                            ),
+                        });
+                    }
+                }
+            }
+
+            let has_auth = route_ir.plugins.iter().any(|p| {
+                matches!(
+                    p.name.as_str(),
+                    "mcp-auth" | "jwt-auth" | "mtls-auth" | "bearer-auth"
+                )
+            }) || bundle.config.plugins.iter().any(|p| {
+                matches!(
+                    p.name.as_str(),
+                    "mcp-auth" | "jwt-auth" | "mtls-auth" | "bearer-auth"
+                )
+            });
+            if !has_auth {
+                diags.push(VerifyDiagnostic {
+                    rule: "mcp.auth_recommended".to_owned(),
+                    severity: Severity::Info,
+                    subject: Some(route_ir.id.clone()),
+                    message: format!(
+                        "MCP route `{}` has `mcp-router` without an authentication plugin (`mcp-auth`, `jwt-auth`, `mtls-auth`, or `bearer-auth`)",
+                        route_ir.id
+                    ),
+                });
+            }
+        }
     }
 
     // 3. admin.non_loopback & admin.ui_non_loopback

@@ -12,6 +12,7 @@ shunt-plugin-sdk.workspace = true
 shunt-core.workspace = true
 shunt-plugins.workspace = true
 shunt-ai.workspace = true
+shunt-mcp.workspace = true
 shunt-config.workspace = true
 
 bytes.workspace = true

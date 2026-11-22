@@ -20,6 +20,7 @@ use shunt_config::{
     TraceRingBuffer, UpstreamEndpointIr,
 };
 use shunt_core::{GatewayServer, RuntimeRegistry};
+use shunt_mcp::{McpMetrics, inspect_mcp_runtime, register_mcp_plugins};
 use shunt_plugin_sdk::{ManualClock, PluginRegistry};
 use shunt_plugins::{PrometheusMetrics, register_builtin_plugins};
 use thiserror::Error;
@@ -426,9 +427,11 @@ async fn run_case(
     let clock = ManualClock::shared();
     let metrics = Arc::new(PrometheusMetrics::new());
     let ai_metrics = Arc::new(AiMetrics::new());
+    let mcp_metrics = Arc::new(McpMetrics::new());
     let mut plugin_registry = PluginRegistry::new();
     register_builtin_plugins(&mut plugin_registry, Arc::clone(&metrics));
     register_ai_plugins(&mut plugin_registry, Arc::clone(&ai_metrics));
+    register_mcp_plugins(&mut plugin_registry, Arc::clone(&mcp_metrics));
     let runtime_registry = Arc::new(RuntimeRegistry::with_clock(clock.clone()));
     let provider = Arc::new(MutableTestConfigProvider::new(
         base_config_name.to_owned(),
@@ -512,6 +515,7 @@ async fn run_case(
 
     let m_clone = Arc::clone(&metrics);
     let ai_m_clone = Arc::clone(&ai_metrics);
+    let mcp_m_clone = Arc::clone(&mcp_metrics);
     let ctrl_metrics = Arc::clone(&controller);
     let rt_metrics = Arc::clone(&runtime_registry);
     let render_all_metrics: MetricsRenderer = Arc::new(move || {
@@ -545,11 +549,20 @@ async fn run_case(
             }
             out.push_str(&ai_out);
         }
+        let mcp_out = mcp_m_clone.render_prometheus();
+        if !mcp_out.is_empty() {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&mcp_out);
+        }
         out
     });
 
     let ai_m_status = Arc::clone(&ai_metrics);
+    let mcp_m_status = Arc::clone(&mcp_metrics);
     let rt_status = Arc::clone(&runtime_registry);
+    let rt_mcp_status = Arc::clone(&runtime_registry);
     let mut admin_server =
         AdminServer::new(Arc::clone(&controller), Arc::clone(&render_all_metrics))
             .with_ui_enabled(ui_enabled)
@@ -560,6 +573,16 @@ async fn run_case(
                         &ai_m_status,
                         rt_status.state_store(),
                         rt_status.clock().as_ref(),
+                    )
+                }),
+            )
+            .with_status_provider(
+                "mcp",
+                Arc::new(move || {
+                    inspect_mcp_runtime(
+                        &mcp_m_status,
+                        rt_mcp_status.state_store(),
+                        rt_mcp_status.clock().as_ref(),
                     )
                 }),
             );
