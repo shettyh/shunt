@@ -248,6 +248,7 @@ impl HttpPlugin for PoweredByPlugin {
   - [RFC 0013](rfcs/0013-protocol-parity-and-provider-presets.md) — Deep Protocol Parity, Provider Presets & Multi-Key Pools
   - [RFC 0014](rfcs/0014-cloud-iam-and-http-client.md) — Dynamic Cloud IAM Auth & Outbound `HttpClient` Primitive
   - [RFC 0015](rfcs/0015-guardrails-audit-and-webhooks.md) — Pluggable AI Guardrails (`ai-guardrails`), Redacted Audit Sinks (`ai-audit`) & Alert Webhooks (`ai-alerts`)
+  - [RFC 0016](rfcs/0016-multimodal-endpoints-and-streaming-cache.md) — Multimodal Endpoints, Generation Lookup & Streaming/Singleflight/Semantic AI Cache
 
 ---
 

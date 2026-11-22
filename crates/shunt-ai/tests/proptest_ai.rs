@@ -1532,4 +1532,107 @@ proptest! {
         let _ = shunt_ai::extract_request_text(&raw, &[]);
         let _ = shunt_ai::extract_response_text(&raw);
     }
+
+    #[test]
+    fn multipart_model_rewrite_preserves_arbitrary_binary_parts(
+        boundary in "[A-Za-z0-9]{6,20}",
+        old_model in "[a-zA-Z0-9._-]{1,24}",
+        new_model in "[a-zA-Z0-9._-]{1,24}",
+        binary_payload in prop::collection::vec(any::<u8>(), 0..512),
+    ) {
+        // Ensure random binary payload does not accidentally contain the boundary delimiter.
+        let delim = format!("--{boundary}");
+        prop_assume!(
+            !binary_payload
+                .windows(delim.len())
+                .any(|w| w == delim.as_bytes())
+        );
+
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(&binary_payload);
+        body.extend_from_slice(
+            format!(
+                "\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{old_model}\r\n--{boundary}--\r\n"
+            )
+            .as_bytes(),
+        );
+
+        let extracted_old = shunt_ai::extract_multipart_text_field(&body, &boundary, "model");
+        prop_assert_eq!(extracted_old.as_deref(), Some(old_model.as_str()));
+
+        if old_model == new_model {
+            prop_assert!(
+                shunt_ai::rewrite_multipart_text_field(&body, &boundary, "model", &new_model)
+                    .is_none()
+            );
+        } else {
+            let rewritten =
+                shunt_ai::rewrite_multipart_text_field(&body, &boundary, "model", &new_model)
+                    .expect("expected rewrite when model differs");
+            let extracted_new =
+                shunt_ai::extract_multipart_text_field(&rewritten, &boundary, "model");
+            prop_assert_eq!(extracted_new.as_deref(), Some(new_model.as_str()));
+            if !binary_payload.is_empty() {
+                prop_assert!(
+                    rewritten
+                        .windows(binary_payload.len())
+                        .any(|w| w == binary_payload.as_slice()),
+                    "binary part corrupted during multipart model rewrite"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cosine_similarity_is_bounded_symmetric_and_self_unit(
+        a in prop::collection::vec(-100.0f32..100.0f32, 1..64),
+        b in prop::collection::vec(-100.0f32..100.0f32, 1..64),
+    ) {
+        let len = a.len().min(b.len());
+        let sa = &a[..len];
+        let sb = &b[..len];
+        let sim_ab = shunt_ai::cosine_similarity(sa, sb);
+        let sim_ba = shunt_ai::cosine_similarity(sb, sa);
+        prop_assert!(sim_ab.is_finite());
+        prop_assert!((-1.0001..=1.0001).contains(&sim_ab));
+        prop_assert!((sim_ab - sim_ba).abs() < 1e-5);
+
+        let norm_sq: f64 = sa.iter().map(|&x| (x as f64) * (x as f64)).sum();
+        if norm_sq > 1e-6 {
+            let self_sim = shunt_ai::cosine_similarity(sa, sa);
+            prop_assert!((self_sim - 1.0).abs() < 1e-4, "self_sim={self_sim}");
+        }
+    }
+
+    #[test]
+    fn multimodal_parsers_and_translators_never_panic(
+        raw in prop::collection::vec(any::<u8>(), 0..512),
+    ) {
+        let s = String::from_utf8_lossy(&raw);
+        let _ = shunt_ai::parse_multipart_boundary(&s);
+        let _ = shunt_ai::extract_multipart_text_field(&raw, "boundary", "model");
+        let _ = shunt_ai::rewrite_multipart_text_field(&raw, "boundary", "model", "gpt-4o");
+        let _ = shunt_ai::openai_to_bedrock_rerank_request(&raw, "amazon.rerank-v1:0", "us-east-1");
+        let _ = shunt_ai::bedrock_to_openai_rerank_response(
+            &raw,
+            shunt_plugin_sdk::StatusCode::OK,
+            "amazon.rerank-v1:0",
+            None,
+        );
+        let _ = shunt_ai::normalize_voyage_rerank_response(
+            &raw,
+            shunt_plugin_sdk::StatusCode::OK,
+            "rerank-2",
+        );
+        let _ = shunt_ai::openai_to_gemini_imagen_request(&raw);
+        let _ = shunt_ai::gemini_imagen_to_openai_response(&raw, shunt_plugin_sdk::StatusCode::OK);
+        let _ = shunt_ai::parse_embedding_vector(&raw);
+        let _ = shunt_ai::extract_query_param(Some(&s), "model");
+    }
 }

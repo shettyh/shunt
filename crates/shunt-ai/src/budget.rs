@@ -14,6 +14,7 @@ use crate::alerts::{
     AiAlertEvent, AiAlertKind, AiAlertSeverity, ensure_alert_bus, push_alert_event,
     push_alert_event_ref,
 };
+use crate::generation::AiRecordedCost;
 use crate::pricing::{ModelPricing, PricingCatalog, nano_usd_to_usd, usd_to_nano_usd};
 use crate::types::{
     AiEndpointKind, AiKeyPolicy, AiRequestMeta, AiUsage, BudgetWindow, DetectedEndpoint,
@@ -582,6 +583,12 @@ impl HttpPlugin for AiBudgetPlugin {
             return HookResult::Ready(Flow::Continue);
         }
 
+        // Pre-attach the interior-mutable cost slot so `ai-usage-tracker` can record attributed
+        // spend into `GET /v1/generation?id=...` records in `on_complete`.
+        if ctx.get_ext::<AiRecordedCost>().is_none() {
+            ctx.insert_ext(AiRecordedCost::default());
+        }
+
         let targets = self.resolve_targets(ctx);
         if targets.is_empty() {
             return HookResult::Ready(Flow::Continue);
@@ -749,6 +756,10 @@ impl HttpPlugin for AiBudgetPlugin {
 
         self.metrics
             .record_cost(&provider, served_model, key_label, team_label, cost_nano);
+
+        if let Some(slot) = ctx.get_ext::<AiRecordedCost>() {
+            slot.set_nano_usd(cost_nano);
+        }
 
         ctx.annotate_float("shunt.ai.cost_usd", nano_usd_to_usd(cost_nano));
 

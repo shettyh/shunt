@@ -3,9 +3,10 @@ use shunt_plugin_sdk::{Clock, StateStore};
 
 use crate::alerts::{AlertStatsSnapshot, AlertStatsTable};
 use crate::audit::{AuditStatsSnapshot, AuditStatsTable};
-use crate::cache::AiCacheTable;
+use crate::cache::{AiCacheTable, SemanticCacheSnapshot, SemanticCacheTable};
 use crate::cloud_auth::{CloudTokenCache, CloudTokenSnapshot};
 use crate::failover::{CooldownSnapshot, FailoverCircuitState};
+use crate::generation::{AiGenerationStore, GenerationStoreSnapshot};
 use crate::guardrails::{GuardrailStatsSnapshot, GuardrailStatsTable};
 use crate::presets::{KeyPoolSnapshot, KeyPoolTable};
 use crate::routing::{LatencyEntrySnapshot, TargetLatencyTable};
@@ -67,6 +68,20 @@ pub struct ScopedCacheSnapshot {
     pub total_bytes: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopedSemanticCacheSnapshot {
+    pub scope: String,
+    #[serde(flatten)]
+    pub entry: SemanticCacheSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopedGenerationStoreSnapshot {
+    pub scope: String,
+    #[serde(flatten)]
+    pub entry: GenerationStoreSnapshot,
+}
+
 /// Complete read-only AI runtime state exposed via the Admin Inspector `/api/status` extension hook.
 #[derive(Debug, Clone, Serialize)]
 pub struct AiRuntimeInspect {
@@ -75,6 +90,8 @@ pub struct AiRuntimeInspect {
     pub cooldowns: Vec<ScopedCooldownSnapshot>,
     pub latency_targets: Vec<ScopedLatencySnapshot>,
     pub caches: Vec<ScopedCacheSnapshot>,
+    pub semantic_caches: Vec<ScopedSemanticCacheSnapshot>,
+    pub generation_stores: Vec<ScopedGenerationStoreSnapshot>,
     pub key_pools: Vec<ScopedKeyPoolSnapshot>,
     pub cloud_tokens: Vec<ScopedCloudTokenSnapshot>,
     pub guardrails: Vec<ScopedGuardrailSnapshot>,
@@ -170,12 +187,30 @@ pub fn inspect_ai_runtime(
         });
     }
 
+    let mut semantic_caches = Vec::new();
+    for (scope, _key, table) in state_store.collect_by_type::<SemanticCacheTable>() {
+        semantic_caches.push(ScopedSemanticCacheSnapshot {
+            scope,
+            entry: table.snapshot(),
+        });
+    }
+
+    let mut generation_stores = Vec::new();
+    for (scope, _key, store) in state_store.collect_by_type::<AiGenerationStore>() {
+        generation_stores.push(ScopedGenerationStoreSnapshot {
+            scope,
+            entry: store.snapshot(),
+        });
+    }
+
     let report = AiRuntimeInspect {
         totals: detailed.totals,
         models: detailed.models,
         cooldowns,
         latency_targets,
         caches,
+        semantic_caches,
+        generation_stores,
         key_pools,
         cloud_tokens,
         guardrails,

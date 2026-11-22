@@ -1,0 +1,107 @@
+# RFC 0016 Example: Multimodal AI Gateway, Realtime WS, Generation Lookup & Streaming/Semantic Cache
+#
+# Run with:
+#   export OPENAI_API_KEY="sk-..."
+#   export COHERE_API_KEY="..."
+#   export GROQ_API_KEY="gsk_..."
+#   export GEMINI_API_KEY="..."
+#   shunt check -c examples/shunt-ai-multimodal-cache.toml
+#   shunt dev   -c examples/shunt-ai-multimodal-cache.toml
+
+[server]
+listen = "127.0.0.1:8080"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:9090"
+
+[[upstreams]]
+name = "openai"
+endpoints = ["https://api.openai.com"]
+
+[[upstreams]]
+name = "cohere"
+endpoints = ["https://api.cohere.com"]
+
+[[upstreams]]
+name = "groq"
+endpoints = ["https://api.groq.com"]
+
+[[upstreams]]
+name = "gemini"
+endpoints = ["https://generativelanguage.googleapis.com"]
+
+[[routes]]
+id = "ai-multimodal"
+path_prefix = "/v1/"
+upstream = "openai"
+# Enable WebSocket upgrades for `GET /v1/realtime?model=...`
+allow_websockets = true
+# Allow multipart audio/image/file uploads up to 25 MiB
+max_body_bytes = 26214400
+
+[[routes.plugins]]
+name = "ai-model-router"
+[routes.plugins.config]
+max_body_bytes = 26214400
+files_targets = [{ provider = "openai", upstream = "openai", capabilities = ["files"] }]
+batches_targets = [{ provider = "openai", upstream = "openai", capabilities = ["batches"] }]
+
+[routes.plugins.config.models]
+smart = [{ provider = "openai", upstream = "openai", model = "gpt-4o", capabilities = ["chat", "streaming", "tools", "vision"] }]
+fim = [{ provider = "openai", upstream = "openai", model = "gpt-3.5-turbo-instruct", capabilities = ["completions", "streaming"] }]
+rerank = [{ provider = "cohere", upstream = "cohere", model = "rerank-v3.5", capabilities = ["rerank"] }]
+moderate = [{ provider = "openai", upstream = "openai", model = "omni-moderation-latest", capabilities = ["moderations"] }]
+imagen = [{ provider = "gemini", upstream = "gemini", model = "imagen-3.0-generate-002", capabilities = ["images"] }]
+tts = [{ provider = "openai", upstream = "openai", model = "tts-1", capabilities = ["audio"] }]
+whisper = [{ provider = "groq", upstream = "groq", model = "whisper-large-v3", capabilities = ["audio"] }]
+realtime = [{ provider = "openai", upstream = "openai", model = "gpt-4o-realtime-preview", capabilities = ["realtime"] }]
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+[routes.plugins.config.providers.openai]
+preset = "openai"
+api_key = "env:OPENAI_API_KEY"
+
+[routes.plugins.config.providers.cohere]
+preset = "cohere"
+api_key = "env:COHERE_API_KEY"
+
+[routes.plugins.config.providers.groq]
+preset = "groq"
+api_key = "env:GROQ_API_KEY"
+
+[routes.plugins.config.providers.gemini]
+preset = "gemini"
+api_key = "env:GEMINI_API_KEY"
+
+[[routes.plugins]]
+name = "ai-cache"
+[routes.plugins.config]
+ttl_secs = 600
+max_entries = 2048
+max_entry_bytes = 1048576
+require_deterministic = true
+# Capture & instantly replay streaming SSE responses (`text/event-stream`)
+cache_streaming = true
+# Coalesce concurrent identical misses into a single upstream call
+singleflight = true
+singleflight_timeout_ms = 30000
+
+# Optional semantic vector cache backed by any OpenAI/Ollama-compatible `/v1/embeddings` endpoint
+[routes.plugins.config.semantic]
+mode = "embedding_http"
+endpoint = "https://api.openai.com/v1/embeddings"
+model = "text-embedding-3-small"
+api_key = "env:OPENAI_API_KEY"
+similarity_threshold = 0.95
+max_entries = 512
+timeout_ms = 2000
+
+[[routes.plugins]]
+name = "ai-usage-tracker"
+[routes.plugins.config]
+# Serve `GET /v1/generation?id=<id>` from bounded reload-persistent memory (zero DB)
+generation_store_capacity = 4096
+serve_generation_endpoint = true
+emit_generation_id_header = true

@@ -9,6 +9,7 @@ use shunt_plugin_sdk::{
 };
 
 use crate::model_router::TargetSpec;
+use crate::multimodal::{extract_realtime_ws_subprotocol_key, strip_realtime_ws_key_subprotocol};
 use crate::types::{
     AiEndpointKind, AiKeyPolicy, AiTarget, BudgetWindow, endpoint_error_response,
     resolve_env_secret,
@@ -72,6 +73,10 @@ struct AiVirtualKeysConfig {
     /// Accept virtual key via `x-api-key: <key>` (Anthropic SDKs, default: true).
     #[serde(default = "default_true")]
     accept_x_api_key: bool,
+    /// Accept virtual key via OpenAI Realtime WebSocket subprotocol
+    /// (`Sec-WebSocket-Protocol: openai-insecure-api-key.<key>`, default: true).
+    #[serde(default = "default_true")]
+    accept_ws_subprotocol: bool,
     /// Optional custom header name to extract the virtual key from (e.g., `"x-shunt-key"`).
     #[serde(default)]
     custom_header: Option<String>,
@@ -86,6 +91,7 @@ impl Default for AiVirtualKeysConfig {
             strip_key_header: true,
             accept_bearer: true,
             accept_x_api_key: true,
+            accept_ws_subprotocol: true,
             custom_header: None,
             keys: Vec::new(),
         }
@@ -118,10 +124,14 @@ impl PluginFactory for AiVirtualKeysFactory {
                 message: "ai-virtual-keys requires at least one entry in `keys`".to_owned(),
             });
         }
-        if !cfg.accept_bearer && !cfg.accept_x_api_key && cfg.custom_header.is_none() {
+        if !cfg.accept_bearer
+            && !cfg.accept_x_api_key
+            && !cfg.accept_ws_subprotocol
+            && cfg.custom_header.is_none()
+        {
             return Err(PluginBuildError::BuildFailed {
                 plugin: self.name().to_owned(),
-                message: "enable at least one key source (`accept_bearer`, `accept_x_api_key`, or `custom_header`)".to_owned(),
+                message: "enable at least one key source (`accept_bearer`, `accept_x_api_key`, `accept_ws_subprotocol`, or `custom_header`)".to_owned(),
             });
         }
 
@@ -247,6 +257,7 @@ impl PluginFactory for AiVirtualKeysFactory {
             strip_key_header: cfg.strip_key_header,
             accept_bearer: cfg.accept_bearer,
             accept_x_api_key: cfg.accept_x_api_key,
+            accept_ws_subprotocol: cfg.accept_ws_subprotocol,
             custom_header,
             keys: compiled,
         }))
@@ -342,12 +353,13 @@ pub struct AiVirtualKeysPlugin {
     strip_key_header: bool,
     accept_bearer: bool,
     accept_x_api_key: bool,
+    accept_ws_subprotocol: bool,
     custom_header: Option<HeaderName>,
     keys: Vec<CompiledVirtualKey>,
 }
 
 impl AiVirtualKeysPlugin {
-    fn extract_presented_key<'a>(&self, req: &'a RequestHead) -> Option<&'a str> {
+    fn extract_presented_key(&self, req: &RequestHead) -> Option<String> {
         if let Some(hdr) = &self.custom_header
             && let Some(val) = req
                 .headers
@@ -356,7 +368,7 @@ impl AiVirtualKeysPlugin {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
         {
-            return Some(val);
+            return Some(val.to_owned());
         }
         if self.accept_bearer
             && let Some(val) = req
@@ -370,7 +382,7 @@ impl AiVirtualKeysPlugin {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
         {
-            return Some(val);
+            return Some(val.to_owned());
         }
         if self.accept_x_api_key
             && let Some(val) = req
@@ -379,6 +391,11 @@ impl AiVirtualKeysPlugin {
                 .and_then(|v| v.to_str().ok())
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
+        {
+            return Some(val.to_owned());
+        }
+        if self.accept_ws_subprotocol
+            && let Some(val) = extract_realtime_ws_subprotocol_key(&req.headers)
         {
             return Some(val);
         }
@@ -430,6 +447,9 @@ impl HttpPlugin for AiVirtualKeysPlugin {
                     }
                     if self.accept_x_api_key {
                         req.headers.remove("x-api-key");
+                    }
+                    if self.accept_ws_subprotocol {
+                        strip_realtime_ws_key_subprotocol(&mut req.headers);
                     }
                     if let Some(hdr) = &self.custom_header {
                         req.headers.remove(hdr);

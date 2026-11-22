@@ -427,6 +427,17 @@ pub fn verify_bundle(
                             ),
                         });
                     }
+                    if target.has_realtime_cap && !route_ir.allow_websockets {
+                        diags.push(VerifyDiagnostic {
+                            rule: "ai.realtime_websockets".to_owned(),
+                            severity: Severity::Warning,
+                            subject: Some(route_ir.id.clone()),
+                            message: format!(
+                                "ai-model-router `{label}` on route `{}` declares `realtime` capability, but `allow_websockets = false`; enable `allow_websockets = true` on the route to proxy WebSocket `/v1/realtime`",
+                                route_ir.id
+                            ),
+                        });
+                    }
                 }
                 if !auto_max && targets.len() > route_ir.max_attempts {
                     diags.push(VerifyDiagnostic {
@@ -655,6 +666,7 @@ fn path_subsumes(earlier: &PathMatch, later: &PathMatch) -> bool {
 struct AiTargetRef {
     upstream: String,
     provider: Option<String>,
+    has_realtime_cap: bool,
 }
 
 fn extract_ai_target_chains(cfg: &Value) -> Vec<(String, Vec<AiTargetRef>)> {
@@ -685,11 +697,13 @@ fn extract_ai_target_chains(cfg: &Value) -> Vec<(String, Vec<AiTargetRef>)> {
         }
     }
 
-    if let Some(defaults) = cfg.get("default_targets").and_then(Value::as_array)
-        && !defaults.is_empty()
-    {
-        let targets = extract_targets_info(defaults);
-        chains.push(("default_targets".to_owned(), targets));
+    for key in ["default_targets", "files_targets", "batches_targets"] {
+        if let Some(arr) = cfg.get(key).and_then(Value::as_array)
+            && !arr.is_empty()
+        {
+            let targets = extract_targets_info(arr);
+            chains.push((key.to_owned(), targets));
+        }
     }
 
     chains
@@ -700,7 +714,15 @@ fn extract_targets_info(arr: &[Value]) -> Vec<AiTargetRef> {
         .filter_map(|t| {
             let upstream = t.get("upstream").and_then(Value::as_str)?.to_owned();
             let provider = t.get("provider").and_then(Value::as_str).map(str::to_owned);
-            Some(AiTargetRef { upstream, provider })
+            let has_realtime_cap = t
+                .get("capabilities")
+                .and_then(Value::as_array)
+                .is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some("realtime")));
+            Some(AiTargetRef {
+                upstream,
+                provider,
+                has_realtime_cap,
+            })
         })
         .collect()
 }

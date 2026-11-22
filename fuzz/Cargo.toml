@@ -101,5 +101,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_multimodal"
+path = "fuzz_targets/fuzz_multimodal.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

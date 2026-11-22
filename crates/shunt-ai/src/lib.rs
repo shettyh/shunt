@@ -26,10 +26,13 @@ pub mod cache;
 pub mod cloud_auth;
 pub mod dialects;
 pub mod failover;
+pub mod generation;
 pub mod guardrails;
 pub mod ingress;
 pub mod inspector;
 pub mod model_router;
+pub mod multimodal;
+pub mod multipart;
 pub mod presets;
 pub mod pricing;
 pub mod provider_adapter;
@@ -61,8 +64,11 @@ pub use aws_sigv4::{AwsSigV4Credentials, SigV4Output, sign_canonical, sign_upstr
 pub use budget::{AiBudgetFactory, AiBudgetPlugin, AiBudgetState, SpendLedgerTable};
 pub use cache::{
     AiCacheFactory, AiCachePending, AiCachePlugin, AiCacheStatus, AiCacheTable,
-    AiTranslatedResponseBody, CacheScope, CachedAiResponse, canonical_json_bytes,
-    compute_cache_key, is_deterministic_request,
+    AiSingleflightTable, AiTranslatedResponseBody, CacheScope, CachedAiResponse,
+    SemanticCacheBackend, SemanticCacheConfig, SemanticCacheHit, SemanticCacheMode,
+    SemanticCacheSnapshot, SemanticCacheTable, SemanticLookupQuery, SemanticLookupResult,
+    canonical_json_bytes, compute_cache_key, cosine_similarity, extract_semantic_prompt_text,
+    is_deterministic_request, parse_embedding_vector,
 };
 pub use cloud_auth::{
     AwsIamAuthConfig, AwsIamMode, AwsStsCredentials, AzureAdAuthConfig, AzureAdMode, CacheLookup,
@@ -84,6 +90,9 @@ pub use dialects::gemini::{
     openai_to_gemini_embeddings_request, openai_to_gemini_request,
 };
 pub use failover::{AiFailoverFactory, AiFailoverPlugin, CooldownSnapshot, FailoverCircuitState};
+pub use generation::{
+    AiGenerationRecord, AiGenerationStore, AiRecordedCost, GenerationStoreSnapshot,
+};
 pub use guardrails::{
     AiGuardrailsFactory, AiGuardrailsPlugin, BuiltinDetector, ExternalGuardrailKind,
     ExternalGuardrailVerdict, GuardrailAction, GuardrailDirection, GuardrailFinding,
@@ -105,11 +114,24 @@ pub use ingress::responses::{
 };
 pub use inspector::{
     AiRuntimeInspect, ScopedAlertSnapshot, ScopedAuditSnapshot, ScopedCacheSnapshot,
-    ScopedCloudTokenSnapshot, ScopedCooldownSnapshot, ScopedGuardrailSnapshot,
-    ScopedKeyPoolSnapshot, ScopedLatencySnapshot, inspect_ai_runtime,
+    ScopedCloudTokenSnapshot, ScopedCooldownSnapshot, ScopedGenerationStoreSnapshot,
+    ScopedGuardrailSnapshot, ScopedKeyPoolSnapshot, ScopedLatencySnapshot,
+    ScopedSemanticCacheSnapshot, inspect_ai_runtime,
 };
 pub use model_router::{
-    AiModelRouterFactory, AiModelRouterPlugin, ModelEntryConfig, ModelRule, TargetSpec,
+    AiModelRouterFactory, AiModelRouterPlugin, ModelEntryConfig, ModelRule, MultipartBoundary,
+    TargetSpec, classify_ai_endpoint,
+};
+pub use multimodal::{
+    RerankRequestContext, bedrock_to_openai_rerank_response, extract_query_param,
+    extract_realtime_ws_subprotocol_key, extract_rerank_context, gemini_imagen_path,
+    gemini_imagen_to_openai_response, normalize_voyage_rerank_response,
+    openai_to_bedrock_rerank_request, openai_to_gemini_imagen_request, rewrite_json_model_field,
+    rewrite_openai_completions_request, rewrite_realtime_uri, rewrite_rerank_request,
+    strip_realtime_ws_key_subprotocol,
+};
+pub use multipart::{
+    extract_multipart_text_field, parse_multipart_boundary, rewrite_multipart_text_field,
 };
 pub use presets::{
     DefaultAuthShape, KeyPoolSnapshot, KeyPoolTable, PresetDefaults, ProviderPreset,
