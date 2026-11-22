@@ -115,9 +115,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-fuzz
         run: cargo install --locked cargo-fuzz
-      - name: Run time-boxed fuzz targets (60s each)
+      - name: Run time-boxed fuzz targets (all targets, 30s each)
         run: |
-          for target in fuzz_sse_parser fuzz_anthropic_translate fuzz_config_parse fuzz_route_match; do
+          for src in fuzz/fuzz_targets/*.rs; do
+            target="$(basename "$src" .rs)"
             echo "==> Fuzzing $target"
-            cargo +nightly fuzz run "$target" -- -max_total_time=60
+            cargo +nightly fuzz run "$target" -- -max_total_time=30
           done

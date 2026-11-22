@@ -408,4 +408,56 @@ proptest! {
             prop_assert!(healthy[chosen]);
         }
     }
+
+    #[test]
+    fn route_match_headers_require_all_configured_pairs_case_insensitively(
+        k1 in "[a-z]{2,8}",
+        v1 in "[a-z0-9_-]{1,12}",
+        k2 in "[a-z]{2,8}",
+        v2 in "[a-z0-9_-]{1,12}",
+        extra_v in "[a-z0-9_-]{1,12}",
+    ) {
+        let h1 = HeaderName::from_bytes(format!("x-hdr-a-{k1}").as_bytes()).unwrap();
+        let h2 = HeaderName::from_bytes(format!("x-hdr-b-{k2}").as_bytes()).unwrap();
+        let rm = shunt_core::RouteMatch::prefix("/v2")
+            .with_header(h1.clone(), v1.clone())
+            .with_header(h2.clone(), v2.clone());
+
+        // Request with both required headers (plus an extra value on h1) must match.
+        let req_ok = http::Request::builder()
+            .uri("/v2/items")
+            .header(h1.as_str().to_ascii_uppercase(), extra_v.as_str())
+            .header(h1.as_str(), v1.as_str())
+            .header(h2.as_str().to_ascii_uppercase(), v2.as_str())
+            .body(())
+            .unwrap();
+        prop_assert!(rm.matches(&req_ok));
+
+        // Missing the second required header must never match.
+        let req_missing = http::Request::builder()
+            .uri("/v2/items")
+            .header(h1.as_str(), v1.as_str())
+            .body(())
+            .unwrap();
+        prop_assert!(!rm.matches(&req_missing));
+
+        // Wrong value on the second header must never match.
+        let wrong_v2 = format!("{v2}-mismatch");
+        let req_wrong = http::Request::builder()
+            .uri("/v2/items")
+            .header(h1.as_str(), v1.as_str())
+            .header(h2.as_str(), wrong_v2.as_str())
+            .body(())
+            .unwrap();
+        prop_assert!(!rm.matches(&req_wrong));
+    }
+
+    #[test]
+    fn x509_der_client_cert_parser_never_panics_on_arbitrary_bytes(
+        raw in prop::collection::vec(any::<u8>(), 0..512),
+    ) {
+        if let Some(info) = shunt_core::parse_client_cert_info(&raw) {
+            prop_assert_eq!(info.sha256_fingerprint.len(), 64);
+        }
+    }
 }
