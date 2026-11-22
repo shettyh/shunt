@@ -10,6 +10,10 @@ use shunt_plugin_sdk::{
 };
 use tracing::{info, warn};
 
+use crate::alerts::{
+    AiAlertEvent, AiAlertKind, AiAlertSeverity, ensure_alert_bus, push_alert_event,
+    push_alert_event_ref,
+};
 use crate::pricing::{ModelPricing, PricingCatalog, nano_usd_to_usd, usd_to_nano_usd};
 use crate::types::{
     AiEndpointKind, AiKeyPolicy, AiRequestMeta, AiUsage, BudgetWindow, DetectedEndpoint,
@@ -399,15 +403,38 @@ impl AiBudgetPlugin {
         endpoint: AiEndpointKind,
         targets: Vec<BudgetTarget>,
         spends: &[u64],
-    ) -> Result<AiBudgetState, BufferedResponse> {
+        key_id: Option<&str>,
+        team: Option<&str>,
+    ) -> Result<(AiBudgetState, Vec<AiAlertEvent>), (BufferedResponse, Vec<AiAlertEvent>)> {
         let mut warning_reason: Option<&'static str> = None;
+        let mut alerts = Vec::new();
 
         for (target, &spent) in targets.iter().zip(spends.iter()) {
             if spent >= target.hard_limit_nano {
+                let limit_usd = nano_usd_to_usd(target.hard_limit_nano);
+                let spent_usd = nano_usd_to_usd(spent);
                 match self.mode {
                     BudgetMode::Hard => {
-                        let limit_usd = nano_usd_to_usd(target.hard_limit_nano);
-                        let spent_usd = nano_usd_to_usd(spent);
+                        alerts.push(AiAlertEvent {
+                            kind: AiAlertKind::BudgetHardExceeded,
+                            severity: AiAlertSeverity::Critical,
+                            dedup_key: format!("hard::{}::{}", target.label, target.window_id),
+                            title: format!("AI spend budget exceeded for {}", target.label),
+                            message: format!(
+                                "Hard spend budget exceeded for `{}` (${spent_usd:.6} / ${limit_usd:.6} USD)",
+                                target.label
+                            ),
+                            subject: Some(target.label.clone()),
+                            provider: None,
+                            model: None,
+                            key_id: key_id.map(str::to_owned),
+                            team: team.map(str::to_owned),
+                            details: serde_json::json!({
+                                "spent_usd": spent_usd,
+                                "limit_usd": limit_usd,
+                                "mode": "hard",
+                            }),
+                        });
                         let mut resp = endpoint_error_response(
                             endpoint,
                             self.reject_status,
@@ -424,40 +451,88 @@ impl AiBudgetPlugin {
                             spent,
                             Some("hard_limit_exceeded"),
                         );
-                        return Err(resp);
+                        return Err((resp, alerts));
                     }
                     BudgetMode::Soft => {
                         warn!(
                             plugin = "ai-budget",
                             subject = %target.label,
-                            spent_usd = nano_usd_to_usd(spent),
-                            limit_usd = nano_usd_to_usd(target.hard_limit_nano),
+                            spent_usd,
+                            limit_usd,
                             "budget hard limit exceeded in soft mode"
                         );
+                        alerts.push(AiAlertEvent {
+                            kind: AiAlertKind::BudgetHardExceeded,
+                            severity: AiAlertSeverity::Warning,
+                            dedup_key: format!("hard_soft::{}::{}", target.label, target.window_id),
+                            title: format!("AI spend budget exceeded (soft mode) for {}", target.label),
+                            message: format!(
+                                "Spend budget exceeded in soft mode for `{}` (${spent_usd:.6} / ${limit_usd:.6} USD)",
+                                target.label
+                            ),
+                            subject: Some(target.label.clone()),
+                            provider: None,
+                            model: None,
+                            key_id: key_id.map(str::to_owned),
+                            team: team.map(str::to_owned),
+                            details: serde_json::json!({
+                                "spent_usd": spent_usd,
+                                "limit_usd": limit_usd,
+                                "mode": "soft",
+                            }),
+                        });
                         warning_reason = Some("hard_limit_exceeded_soft_mode");
                     }
                 }
-            } else if spent >= target.soft_limit_nano && warning_reason.is_none() {
+            } else if spent >= target.soft_limit_nano {
+                let soft_usd = nano_usd_to_usd(target.soft_limit_nano);
+                let limit_usd = nano_usd_to_usd(target.hard_limit_nano);
+                let spent_usd = nano_usd_to_usd(spent);
                 warn!(
                     plugin = "ai-budget",
                     subject = %target.label,
-                    spent_usd = nano_usd_to_usd(spent),
-                    soft_limit_usd = nano_usd_to_usd(target.soft_limit_nano),
-                    limit_usd = nano_usd_to_usd(target.hard_limit_nano),
+                    spent_usd,
+                    soft_limit_usd = soft_usd,
+                    limit_usd,
                     "budget soft warning threshold reached"
                 );
-                warning_reason = Some("soft_limit_reached");
+                alerts.push(AiAlertEvent {
+                    kind: AiAlertKind::BudgetSoftWarning,
+                    severity: AiAlertSeverity::Warning,
+                    dedup_key: format!("soft::{}::{}", target.label, target.window_id),
+                    title: format!("AI spend budget soft limit reached for {}", target.label),
+                    message: format!(
+                        "Spend soft warning threshold reached for `{}` (${spent_usd:.6} / ${limit_usd:.6} USD, soft limit ${soft_usd:.6})",
+                        target.label
+                    ),
+                    subject: Some(target.label.clone()),
+                    provider: None,
+                    model: None,
+                    key_id: key_id.map(str::to_owned),
+                    team: team.map(str::to_owned),
+                    details: serde_json::json!({
+                        "spent_usd": spent_usd,
+                        "soft_limit_usd": soft_usd,
+                        "limit_usd": limit_usd,
+                    }),
+                });
+                if warning_reason.is_none() {
+                    warning_reason = Some("soft_limit_reached");
+                }
             }
         }
 
         let primary_limit_nano = targets.first().map(|t| t.hard_limit_nano);
         let primary_spent_nano = spends.first().copied().unwrap_or(0);
-        Ok(AiBudgetState {
-            targets,
-            primary_limit_nano,
-            primary_spent_nano,
-            warning_reason,
-        })
+        Ok((
+            AiBudgetState {
+                targets,
+                primary_limit_nano,
+                primary_spent_nano,
+                warning_reason,
+            },
+            alerts,
+        ))
     }
 }
 
@@ -512,6 +587,14 @@ impl HttpPlugin for AiBudgetPlugin {
             return HookResult::Ready(Flow::Continue);
         }
 
+        // Pre-attach the per-request alert bus so post-response `on_complete` charges
+        // crossing soft/hard thresholds can also emit alerts without `&mut RequestCtx`.
+        let _ = ensure_alert_bus(ctx);
+        let (key_id, team) = ctx
+            .get_ext::<AiKeyPolicy>()
+            .map(|p| (Some(p.key_id.clone()), p.team.clone()))
+            .unwrap_or((None, None));
+
         if let Some(dist) = &self.distributed {
             let dist = Arc::clone(dist);
             return HookResult::pending(async move {
@@ -539,12 +622,26 @@ impl HttpPlugin for AiBudgetPlugin {
                         }
                     }
                 }
-                match self.evaluate_spends(endpoint, targets, &spends) {
-                    Ok(state) => {
+                match self.evaluate_spends(
+                    endpoint,
+                    targets,
+                    &spends,
+                    key_id.as_deref(),
+                    team.as_deref(),
+                ) {
+                    Ok((state, alerts)) => {
+                        for ev in alerts {
+                            push_alert_event(ctx, ev);
+                        }
                         ctx.insert_ext(state);
                         Flow::Continue
                     }
-                    Err(resp) => Flow::Respond(resp),
+                    Err((resp, alerts)) => {
+                        for ev in alerts {
+                            push_alert_event(ctx, ev);
+                        }
+                        Flow::Respond(resp)
+                    }
                 }
             });
         }
@@ -554,12 +651,26 @@ impl HttpPlugin for AiBudgetPlugin {
             .iter()
             .map(|t| self.ledger.current_spend(&t.local_key, t.window_id))
             .collect();
-        match self.evaluate_spends(endpoint, targets, &spends) {
-            Ok(state) => {
+        match self.evaluate_spends(
+            endpoint,
+            targets,
+            &spends,
+            key_id.as_deref(),
+            team.as_deref(),
+        ) {
+            Ok((state, alerts)) => {
+                for ev in alerts {
+                    push_alert_event(ctx, ev);
+                }
                 ctx.insert_ext(state);
                 HookResult::Ready(Flow::Continue)
             }
-            Err(resp) => HookResult::Ready(Flow::Respond(resp)),
+            Err((resp, alerts)) => {
+                for ev in alerts {
+                    push_alert_event(ctx, ev);
+                }
+                HookResult::Ready(Flow::Respond(resp))
+            }
         }
     }
 
@@ -681,7 +792,63 @@ impl HttpPlugin for AiBudgetPlugin {
         }
 
         for t in &targets {
-            self.ledger.add_spend(&t.local_key, t.window_id, cost_nano);
+            let prev = self.ledger.current_spend(&t.local_key, t.window_id);
+            let after = self.ledger.add_spend(&t.local_key, t.window_id, cost_nano);
+            if prev < t.hard_limit_nano && after >= t.hard_limit_nano {
+                let limit_usd = nano_usd_to_usd(t.hard_limit_nano);
+                let spent_usd = nano_usd_to_usd(after);
+                push_alert_event_ref(
+                    ctx,
+                    AiAlertEvent {
+                        kind: AiAlertKind::BudgetHardExceeded,
+                        severity: AiAlertSeverity::Critical,
+                        dedup_key: format!("hard::{}::{}", t.label, t.window_id),
+                        title: format!("AI spend budget reached hard limit for {}", t.label),
+                        message: format!(
+                            "Spend for `{}` reached hard budget limit (${spent_usd:.6} / ${limit_usd:.6} USD)",
+                            t.label
+                        ),
+                        subject: Some(t.label.clone()),
+                        provider: Some(provider.clone()),
+                        model: Some(served_model.to_owned()),
+                        key_id: policy.map(|p| p.key_id.clone()),
+                        team: policy.and_then(|p| p.team.clone()),
+                        details: serde_json::json!({
+                            "spent_usd": spent_usd,
+                            "limit_usd": limit_usd,
+                            "request_cost_usd": nano_usd_to_usd(cost_nano),
+                        }),
+                    },
+                );
+            } else if prev < t.soft_limit_nano && after >= t.soft_limit_nano {
+                let soft_usd = nano_usd_to_usd(t.soft_limit_nano);
+                let limit_usd = nano_usd_to_usd(t.hard_limit_nano);
+                let spent_usd = nano_usd_to_usd(after);
+                push_alert_event_ref(
+                    ctx,
+                    AiAlertEvent {
+                        kind: AiAlertKind::BudgetSoftWarning,
+                        severity: AiAlertSeverity::Warning,
+                        dedup_key: format!("soft::{}::{}", t.label, t.window_id),
+                        title: format!("AI spend budget soft limit crossed for {}", t.label),
+                        message: format!(
+                            "Spend for `{}` crossed soft limit (${spent_usd:.6} / ${limit_usd:.6} USD, soft limit ${soft_usd:.6})",
+                            t.label
+                        ),
+                        subject: Some(t.label.clone()),
+                        provider: Some(provider.clone()),
+                        model: Some(served_model.to_owned()),
+                        key_id: policy.map(|p| p.key_id.clone()),
+                        team: policy.and_then(|p| p.team.clone()),
+                        details: serde_json::json!({
+                            "spent_usd": spent_usd,
+                            "soft_limit_usd": soft_usd,
+                            "limit_usd": limit_usd,
+                            "request_cost_usd": nano_usd_to_usd(cost_nano),
+                        }),
+                    },
+                );
+            }
         }
         HookResult::Ready(())
     }

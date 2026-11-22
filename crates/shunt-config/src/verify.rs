@@ -306,6 +306,79 @@ pub fn verify_bundle(
                     });
                 }
             }
+
+            let guardrails_pos = route_ir
+                .plugins
+                .iter()
+                .position(|p| p.name == "ai-guardrails");
+            let adapter_pos = route_ir
+                .plugins
+                .iter()
+                .position(|p| p.name == "ai-provider-adapter");
+            let audit_pos = route_ir.plugins.iter().position(|p| p.name == "ai-audit");
+            let usage_pos = route_ir
+                .plugins
+                .iter()
+                .position(|p| p.name == "ai-usage-tracker");
+            let alerts_pos = route_ir.plugins.iter().position(|p| p.name == "ai-alerts");
+
+            if let (Some(g_idx), Some(c_idx)) = (guardrails_pos, cache_pos)
+                && g_idx > c_idx
+            {
+                diags.push(VerifyDiagnostic {
+                    rule: "ai.guardrails_order".to_owned(),
+                    severity: Severity::Warning,
+                    subject: Some(route_ir.id.clone()),
+                    message: format!(
+                        "plugin `ai-guardrails` (index {g_idx}) appears after `ai-cache` (index {c_idx}) on route `{}`; place `ai-guardrails` before `ai-cache` so blocked prompts do not hit cache and redacted prompts are cached safely",
+                        route_ir.id
+                    ),
+                });
+            }
+            if let (Some(a_idx), Some(g_idx)) = (audit_pos, guardrails_pos)
+                && a_idx < g_idx
+            {
+                diags.push(VerifyDiagnostic {
+                    rule: "ai.audit_order".to_owned(),
+                    severity: Severity::Warning,
+                    subject: Some(route_ir.id.clone()),
+                    message: format!(
+                        "plugin `ai-audit` (index {a_idx}) appears before `ai-guardrails` (index {g_idx}) on route `{}`; place `ai-audit` after `ai-guardrails` so audit records capture guardrail verdicts and redacted payloads",
+                        route_ir.id
+                    ),
+                });
+            }
+            if let (Some(a_idx), Some(u_idx)) = (audit_pos, usage_pos)
+                && a_idx < u_idx
+            {
+                diags.push(VerifyDiagnostic {
+                    rule: "ai.audit_order".to_owned(),
+                    severity: Severity::Warning,
+                    subject: Some(route_ir.id.clone()),
+                    message: format!(
+                        "plugin `ai-audit` (index {a_idx}) appears before `ai-usage-tracker` (index {u_idx}) on route `{}`; place `ai-audit` after `ai-usage-tracker` so audit records include final token counts",
+                        route_ir.id
+                    ),
+                });
+            }
+            if let Some(al_idx) = alerts_pos {
+                for producer in ["ai-budget", "ai-failover", "ai-guardrails"] {
+                    if let Some(p_idx) = route_ir.plugins.iter().position(|p| p.name == producer)
+                        && al_idx < p_idx
+                    {
+                        diags.push(VerifyDiagnostic {
+                            rule: "ai.alerts_order".to_owned(),
+                            severity: Severity::Warning,
+                            subject: Some(route_ir.id.clone()),
+                            message: format!(
+                                "plugin `ai-alerts` (index {al_idx}) appears before `{producer}` (index {p_idx}) on route `{}`; place `ai-alerts` after `{producer}` so `on_complete` observes all emitted alert events",
+                                route_ir.id
+                            ),
+                        });
+                    }
+                }
+            }
+            let _ = adapter_pos;
         }
 
         // ai.unknown_upstream, ai.unknown_provider & ai.attempts_insufficient

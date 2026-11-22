@@ -1,12 +1,36 @@
 use serde::Serialize;
 use shunt_plugin_sdk::{Clock, StateStore};
 
+use crate::alerts::{AlertStatsSnapshot, AlertStatsTable};
+use crate::audit::{AuditStatsSnapshot, AuditStatsTable};
 use crate::cache::AiCacheTable;
 use crate::cloud_auth::{CloudTokenCache, CloudTokenSnapshot};
 use crate::failover::{CooldownSnapshot, FailoverCircuitState};
+use crate::guardrails::{GuardrailStatsSnapshot, GuardrailStatsTable};
 use crate::presets::{KeyPoolSnapshot, KeyPoolTable};
 use crate::routing::{LatencyEntrySnapshot, TargetLatencyTable};
 use crate::usage_tracker::{AiMetrics, AiMetricsSnapshot, AiModelBreakdown};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopedGuardrailSnapshot {
+    pub scope: String,
+    #[serde(flatten)]
+    pub entry: GuardrailStatsSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopedAuditSnapshot {
+    pub scope: String,
+    #[serde(flatten)]
+    pub entry: AuditStatsSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopedAlertSnapshot {
+    pub scope: String,
+    #[serde(flatten)]
+    pub entry: AlertStatsSnapshot,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ScopedKeyPoolSnapshot {
@@ -53,6 +77,9 @@ pub struct AiRuntimeInspect {
     pub caches: Vec<ScopedCacheSnapshot>,
     pub key_pools: Vec<ScopedKeyPoolSnapshot>,
     pub cloud_tokens: Vec<ScopedCloudTokenSnapshot>,
+    pub guardrails: Vec<ScopedGuardrailSnapshot>,
+    pub audit_sinks: Vec<ScopedAuditSnapshot>,
+    pub alert_sinks: Vec<ScopedAlertSnapshot>,
 }
 
 /// Collects a point-in-time read-only inspection payload covering AI usage totals,
@@ -119,6 +146,30 @@ pub fn inspect_ai_runtime(
         }
     }
 
+    let mut guardrails = Vec::new();
+    for (scope, _key, table) in state_store.collect_by_type::<GuardrailStatsTable>() {
+        guardrails.push(ScopedGuardrailSnapshot {
+            scope,
+            entry: table.snapshot(),
+        });
+    }
+
+    let mut audit_sinks = Vec::new();
+    for (scope, _key, table) in state_store.collect_by_type::<AuditStatsTable>() {
+        audit_sinks.push(ScopedAuditSnapshot {
+            scope,
+            entry: table.snapshot(),
+        });
+    }
+
+    let mut alert_sinks = Vec::new();
+    for (scope, _key, table) in state_store.collect_by_type::<AlertStatsTable>() {
+        alert_sinks.push(ScopedAlertSnapshot {
+            scope,
+            entry: table.snapshot(),
+        });
+    }
+
     let report = AiRuntimeInspect {
         totals: detailed.totals,
         models: detailed.models,
@@ -127,6 +178,9 @@ pub fn inspect_ai_runtime(
         caches,
         key_pools,
         cloud_tokens,
+        guardrails,
+        audit_sinks,
+        alert_sinks,
     };
 
     serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({}))

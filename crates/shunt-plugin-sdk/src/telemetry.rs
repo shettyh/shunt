@@ -209,6 +209,14 @@ pub enum SpanStatusCode {
     Error = 2,
 }
 
+/// Timed structured event attached to a [`SpanRecord`] (OTLP `Span.Event`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpanEvent {
+    pub name: String,
+    pub time_unix_nanos: u64,
+    pub attributes: BTreeMap<String, SpanValue>,
+}
+
 /// Completed, immutable telemetry span passed to a [`TelemetrySink`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpanRecord {
@@ -223,6 +231,7 @@ pub struct SpanRecord {
     pub status: SpanStatusCode,
     pub status_message: Option<String>,
     pub attributes: BTreeMap<String, SpanValue>,
+    pub events: Vec<SpanEvent>,
 }
 
 impl SpanRecord {
@@ -376,6 +385,7 @@ impl SpanHandle {
             status: SpanStatusCode::Unset,
             status_message: None,
             attributes: BTreeMap::new(),
+            events: Vec::new(),
         };
         Self {
             state: Arc::new(SpanState {
@@ -436,6 +446,22 @@ impl SpanHandle {
         if let Ok(mut guard) = self.state.inner.lock() {
             guard.record.status = status;
             guard.record.status_message = message;
+        }
+    }
+
+    /// Appends a timed structured [`SpanEvent`] to this span.
+    pub fn add_event(
+        &self,
+        name: impl Into<String>,
+        time_unix_nanos: u64,
+        attributes: BTreeMap<String, SpanValue>,
+    ) {
+        if let Ok(mut guard) = self.state.inner.lock() {
+            guard.record.events.push(SpanEvent {
+                name: name.into(),
+                time_unix_nanos,
+                attributes,
+            });
         }
     }
 

@@ -1,10 +1,11 @@
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use http::{Extensions, StatusCode};
 
 use crate::http_types::HookTiming;
-use crate::telemetry::{SpanHandle, TraceAnnotations};
+use crate::telemetry::{SpanHandle, SpanValue, TraceAnnotations, current_unix_nanos};
 
 /// Per-request context threaded through every lifecycle hook.
 ///
@@ -131,6 +132,15 @@ impl RequestCtx {
         }
         if let Some(ann) = self.extensions.get::<TraceAnnotations>() {
             ann.set_bool(key, value);
+        }
+    }
+
+    /// Appends a structured timed event to any active [`SpanHandle`] on this request
+    /// (zero-cost no-op when no sampled span is attached).
+    #[inline]
+    pub fn add_span_event(&self, name: impl Into<String>, attributes: BTreeMap<String, SpanValue>) {
+        if let Some(span) = self.extensions.get::<SpanHandle>() {
+            span.add_event(name, current_unix_nanos(), attributes);
         }
     }
 }

@@ -432,9 +432,8 @@ pub fn encode_otlp_traces_json(config: &OtlpExporterConfig, spans: &[SpanRecord]
     serde_json::to_vec(&payload).unwrap_or_else(|_| b"{}".to_vec())
 }
 
-fn encode_single_span(span: &SpanRecord) -> Value {
-    let attrs: Vec<Value> = span
-        .attributes
+fn encode_attributes(attributes: &BTreeMap<String, SpanValue>) -> Vec<Value> {
+    attributes
         .iter()
         .map(|(k, v)| {
             let val_json = match v {
@@ -445,7 +444,11 @@ fn encode_single_span(span: &SpanRecord) -> Value {
             };
             json!({ "key": k, "value": val_json })
         })
-        .collect();
+        .collect()
+}
+
+fn encode_single_span(span: &SpanRecord) -> Value {
+    let attrs = encode_attributes(&span.attributes);
 
     let mut status_obj = serde_json::Map::new();
     status_obj.insert("code".to_owned(), json!(span.status as u8));
@@ -471,6 +474,20 @@ fn encode_single_span(span: &SpanRecord) -> Value {
         json!(span.end_time_unix_nanos.to_string()),
     );
     obj.insert("attributes".to_owned(), Value::Array(attrs));
+    if !span.events.is_empty() {
+        let events: Vec<Value> = span
+            .events
+            .iter()
+            .map(|ev| {
+                json!({
+                    "timeUnixNano": ev.time_unix_nanos.to_string(),
+                    "name": ev.name,
+                    "attributes": encode_attributes(&ev.attributes),
+                })
+            })
+            .collect();
+        obj.insert("events".to_owned(), Value::Array(events));
+    }
     obj.insert("status".to_owned(), Value::Object(status_obj));
 
     Value::Object(obj)
@@ -511,6 +528,7 @@ mod tests {
             status: SpanStatusCode::Ok,
             status_message: None,
             attributes,
+            events: Vec::new(),
         }
     }
 
@@ -524,7 +542,15 @@ mod tests {
             )]),
             ..Default::default()
         };
-        let span = sample_span("chat gpt-4o");
+        let mut span = sample_span("chat gpt-4o");
+        span.events.push(shunt_plugin_sdk::SpanEvent {
+            name: "gen_ai.content.prompt".to_owned(),
+            time_unix_nanos: 1_700_000_000_010_000_000,
+            attributes: BTreeMap::from([(
+                "gen_ai.prompt".to_owned(),
+                SpanValue::String("Hello [REDACTED:EMAIL]".to_owned()),
+            )]),
+        });
         let bytes = encode_otlp_traces_json(&cfg, std::slice::from_ref(&span));
         let v: Value = serde_json::from_slice(&bytes).expect("valid JSON");
 
@@ -541,6 +567,12 @@ mod tests {
         assert_eq!(s["kind"], 2);
         assert_eq!(s["startTimeUnixNano"], "1700000000000000000");
         assert_eq!(s["status"]["code"], 1);
+        assert_eq!(s["events"][0]["name"], "gen_ai.content.prompt");
+        assert_eq!(s["events"][0]["timeUnixNano"], "1700000000010000000");
+        assert_eq!(
+            s["events"][0]["attributes"][0]["value"]["stringValue"],
+            "Hello [REDACTED:EMAIL]"
+        );
     }
 
     #[tokio::test]

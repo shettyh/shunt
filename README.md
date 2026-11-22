@@ -247,6 +247,7 @@ impl HttpPlugin for PoweredByPlugin {
   - [RFC 0012](rfcs/0012-admin-inspector-ui.md) — Admin Read-Only Inspector UI (`--ui`)
   - [RFC 0013](rfcs/0013-protocol-parity-and-provider-presets.md) — Deep Protocol Parity, Provider Presets & Multi-Key Pools
   - [RFC 0014](rfcs/0014-cloud-iam-and-http-client.md) — Dynamic Cloud IAM Auth & Outbound `HttpClient` Primitive
+  - [RFC 0015](rfcs/0015-guardrails-audit-and-webhooks.md) — Pluggable AI Guardrails (`ai-guardrails`), Redacted Audit Sinks (`ai-audit`) & Alert Webhooks (`ai-alerts`)
 
 ---
 

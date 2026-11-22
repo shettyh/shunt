@@ -763,6 +763,7 @@ fn is_secret_key(key: &str) -> bool {
         "authorization",
         "private_key",
         "credential",
+        "routing_key",
     ];
     PATTERNS.iter().any(|p| lower.contains(p))
 }

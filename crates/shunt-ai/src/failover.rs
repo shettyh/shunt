@@ -10,7 +10,8 @@ use shunt_plugin_sdk::{
 };
 use tracing::{debug, info, warn};
 
-use crate::types::{AiFailoverHistory, AiRequestMeta, FailoverEvent};
+use crate::alerts::{AiAlertEvent, AiAlertKind, AiAlertSeverity, push_alert_event};
+use crate::types::{AiFailoverHistory, AiKeyPolicy, AiRequestMeta, FailoverEvent};
 
 fn default_retry_statuses() -> Vec<u16> {
     vec![429, 500, 502, 503, 504, 529]
@@ -128,9 +129,17 @@ impl FailoverCircuitState {
         guard.get(key).map(|e| e.consecutive_failures).unwrap_or(0)
     }
 
-    pub fn record_failure(&self, key: &str, threshold: usize, cooldown: Duration, now: Duration) {
+    /// Records a failure and returns `true` when this failure activated/extended a cooldown window.
+    pub fn record_failure(
+        &self,
+        key: &str,
+        threshold: usize,
+        cooldown: Duration,
+        now: Duration,
+    ) -> bool {
         let mut guard = self.targets.write().expect("FailoverCircuitState poisoned");
         let entry = guard.entry(key.to_owned()).or_default();
+        let was_cooled = entry.cooldown_until.is_some_and(|until| now < until);
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
         if entry.consecutive_failures >= threshold.max(1) {
             let until = now.saturating_add(cooldown);
@@ -138,7 +147,9 @@ impl FailoverCircuitState {
                 Some(prev) => prev.max(until),
                 None => until,
             });
+            return !was_cooled;
         }
+        false
     }
 
     pub fn record_success(&self, key: &str) {
@@ -377,6 +388,11 @@ impl HttpPlugin for AiFailoverPlugin {
 
         if let Some((Some(target), max_attempts, requested_model)) = active_meta {
             let mut dist_set: Option<(String, Duration)> = None;
+            let mut circuit_alert: Option<AiAlertEvent> = None;
+            let (key_id, team) = ctx
+                .get_ext::<AiKeyPolicy>()
+                .map(|p| (Some(p.key_id.clone()), p.team.clone()))
+                .unwrap_or((None, None));
             if let Some(circuit) = &self.circuit {
                 let retry_after_str = res
                     .headers
@@ -389,12 +405,49 @@ impl HttpPlugin for AiFailoverPlugin {
                     retry_after_str,
                 );
                 let local_key = Self::target_key(&target.upstream, &target.model);
-                circuit.record_failure(&local_key, self.failure_threshold, cd, self.clock.now());
-                if self.distributed.is_some()
-                    && circuit.consecutive_failures(&local_key) >= self.failure_threshold
-                {
+                let newly_opened = circuit.record_failure(
+                    &local_key,
+                    self.failure_threshold,
+                    cd,
+                    self.clock.now(),
+                );
+                let failures = circuit.consecutive_failures(&local_key);
+                if self.distributed.is_some() && failures >= self.failure_threshold {
                     dist_set = Some((self.dist_cooldown_key(&target.upstream, &target.model), cd));
                 }
+                if newly_opened {
+                    circuit_alert = Some(AiAlertEvent {
+                        kind: AiAlertKind::CircuitBreakerOpen,
+                        severity: AiAlertSeverity::Error,
+                        dedup_key: format!("{}::{}", target.provider, target.model),
+                        title: format!(
+                            "AI provider circuit breaker opened ({}/{})",
+                            target.provider, target.model
+                        ),
+                        message: format!(
+                            "Provider `{}` model `{}` entered cooldown for {}ms after {} consecutive failure(s) (HTTP {})",
+                            target.provider,
+                            target.model,
+                            cd.as_millis(),
+                            failures,
+                            status_code
+                        ),
+                        subject: Some(local_key),
+                        provider: Some(target.provider.clone()),
+                        model: Some(target.model.clone()),
+                        key_id: key_id.clone(),
+                        team: team.clone(),
+                        details: serde_json::json!({
+                            "upstream": target.upstream,
+                            "status": status_code,
+                            "consecutive_failures": failures,
+                            "cooldown_ms": cd.as_millis() as u64,
+                        }),
+                    });
+                }
+            }
+            if let Some(ev) = circuit_alert {
+                push_alert_event(ctx, ev);
             }
 
             let event = FailoverEvent {
@@ -426,6 +479,30 @@ impl HttpPlugin for AiFailoverPlugin {
                 );
                 Flow::RetryUpstream
             } else {
+                push_alert_event(
+                    ctx,
+                    AiAlertEvent {
+                        kind: AiAlertKind::FailoverExhausted,
+                        severity: AiAlertSeverity::Critical,
+                        dedup_key: format!("exhausted::{requested_model}"),
+                        title: format!("AI failover chain exhausted for {requested_model}"),
+                        message: format!(
+                            "All {max_attempts} failover attempt(s) for `{requested_model}` failed (last provider `{}` returned HTTP {status_code})",
+                            target.provider
+                        ),
+                        subject: Some(requested_model.clone()),
+                        provider: Some(target.provider.clone()),
+                        model: Some(target.model.clone()),
+                        key_id,
+                        team,
+                        details: serde_json::json!({
+                            "attempts": ctx.attempt,
+                            "max_attempts": max_attempts,
+                            "last_status": status_code,
+                            "last_upstream": target.upstream,
+                        }),
+                    },
+                );
                 Flow::Continue
             };
 
