@@ -1808,4 +1808,257 @@ proptest! {
             let _ = shunt_ai::extract_end_user_from_body(&v);
         }
     }
+
+    #[test]
+    fn generation_store_matches_fifo_reference_model_and_bounds_internal_queues(
+        capacity in 1usize..16,
+        ops in prop::collection::vec((0usize..8, any::<bool>()), 1..250),
+    ) {
+        use std::collections::VecDeque;
+
+        let store = shunt_ai::AiGenerationStore::new();
+        // Pure reference model: FIFO queue of (canonical_id, optional_distinct_alias)
+        let mut model: VecDeque<(String, Option<String>)> = VecDeque::new();
+
+        for (seq, (id_bucket, distinct_alias)) in ops.into_iter().enumerate() {
+            let canonical_id = format!("resp-{id_bucket}");
+            let gw_id = if distinct_alias {
+                format!("gen-{seq}")
+            } else {
+                canonical_id.clone()
+            };
+
+            let rec = shunt_ai::AiGenerationRecord {
+                id: canonical_id.clone(),
+                gateway_id: Some(gw_id.clone()),
+                created_at_ms: seq as u64,
+                endpoint: "chat_completions".to_owned(),
+                model: "smart".to_owned(),
+                served_model: "gpt-4o".to_owned(),
+                provider_name: "openai".to_owned(),
+                streamed: false,
+                status: 200,
+                tokens_prompt: 10,
+                tokens_completion: 5,
+                tokens_cached_read: 0,
+                tokens_cache_write: 0,
+                tokens_reasoning: 0,
+                total_cost: 0.0,
+                latency_ms: 1.0,
+                generation_time_ms: 1.0,
+                finish_reason: None,
+                cache_status: None,
+                key_id: None,
+                team: None,
+            };
+            store.insert(rec, capacity);
+
+            // Mirror insert in reference model (remove prior canonical_id, evict oldest if full, push back).
+            model.retain(|(cid, _)| cid != &canonical_id);
+            while model.len() >= capacity {
+                model.pop_front();
+            }
+            let alias = (gw_id != canonical_id).then_some(gw_id);
+            model.push_back((canonical_id, alias));
+
+            // Structural bounds on ALL internal collections (catches VecDeque / alias leaks!).
+            let (records_len, aliases_len, order_len) = store.internal_counts();
+            prop_assert_eq!(records_len, model.len());
+            prop_assert!(records_len <= capacity);
+            prop_assert!(aliases_len <= records_len);
+            prop_assert!(
+                order_len <= records_len.saturating_mul(2).max(64),
+                "order_len={order_len} exceeded bound for records_len={records_len}"
+            );
+
+            // Every live canonical ID and alias in the reference model must resolve identically.
+            for (cid, alias) in &model {
+                let got = store.get(cid);
+                prop_assert!(got.is_some(), "missing canonical id {cid}");
+                prop_assert_eq!(&got.unwrap().id, cid);
+                if let Some(a) = alias {
+                    let got_alias = store.get(a);
+                    prop_assert!(got_alias.is_some(), "missing alias {a} for {cid}");
+                    prop_assert_eq!(&got_alias.unwrap().id, cid);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ai_cache_table_enforces_entry_byte_and_order_queue_bounds(
+        max_entries in 1usize..16,
+        max_total_bytes in 32usize..512,
+        ops in prop::collection::vec((0u8..3, 0usize..12, 1usize..128, 0u64..2000), 1..250),
+    ) {
+        let table = shunt_ai::AiCacheTable::new();
+        let mut now_ms = 0u64;
+
+        for (kind, key_id, body_len, dt_ms) in ops {
+            now_ms = now_ms.saturating_add(dt_ms);
+            let now = Duration::from_millis(now_ms);
+            let key = format!("k-{key_id}");
+
+            match kind {
+                0 => {
+                    let resp = shunt_ai::CachedAiResponse {
+                        content_type: "application/json".to_owned(),
+                        provider: "openai".to_owned(),
+                        served_model: "gpt-4o".to_owned(),
+                        body: vec![b'x'; body_len],
+                    };
+                    table.insert(
+                        key,
+                        resp,
+                        now,
+                        Duration::from_millis(1500),
+                        max_entries,
+                        max_total_bytes,
+                    );
+                }
+                1 => {
+                    let _ = table.get(&key, now);
+                }
+                _ => {
+                    let _ = table.get(&key, now);
+                }
+            }
+
+            let (map_len, order_len, total_bytes, actual_sum) = table.internal_counts();
+            prop_assert!(map_len <= max_entries, "map_len={map_len} > max_entries={max_entries}");
+            prop_assert!(
+                total_bytes <= max_total_bytes,
+                "total_bytes={total_bytes} > max_total_bytes={max_total_bytes}"
+            );
+            prop_assert_eq!(total_bytes, actual_sum, "byte accounting drifted");
+            prop_assert!(
+                order_len <= map_len.saturating_mul(4).max(64),
+                "order_len={order_len} exceeded bound for map_len={map_len}"
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_cache_table_enforces_max_entries_and_partition_isolation(
+        max_entries in 1usize..12,
+        ops in prop::collection::vec((0usize..4, 0u64..1500, 100u64..2000), 1..120),
+    ) {
+        let table = shunt_ai::SemanticCacheTable::new();
+        let mut now_ms = 0u64;
+
+        for (part_id, dt_ms, ttl_ms) in ops {
+            now_ms = now_ms.saturating_add(dt_ms);
+            let now = Duration::from_millis(now_ms);
+            let part = format!("tenant-{part_id}");
+            let resp = shunt_ai::CachedAiResponse {
+                content_type: "application/json".to_owned(),
+                provider: "openai".to_owned(),
+                served_model: part.clone(),
+                body: b"ok".to_vec(),
+            };
+            table.insert(
+                part.clone(),
+                vec![1.0, 0.0, 0.0],
+                resp,
+                now,
+                Duration::from_millis(ttl_ms),
+                max_entries,
+            );
+            prop_assert!(table.snapshot().entries <= max_entries);
+
+            if let Some(hit) = table.search(&part, &[1.0, 0.0, 0.0], 0.9, now) {
+                // Partition isolation: search in `part` must never return another partition's response.
+                prop_assert_eq!(hit.response.served_model, part);
+            }
+            // Searching an unused partition must always miss.
+            prop_assert!(table.search("tenant-isolated", &[1.0, 0.0, 0.0], 0.5, now).is_none());
+        }
+    }
+
+    #[test]
+    fn alert_dedup_table_enforces_window_and_bounded_cardinality(
+        max_entries in 1usize..16,
+        window_ms in 100u64..5_000,
+        ops in prop::collection::vec((0usize..64, 0u64..1_000), 1..200),
+    ) {
+        let table = shunt_ai::AlertDedupTable::new();
+        let window = Duration::from_millis(window_ms);
+        let mut now_ms = 0u64;
+
+        for (key_id, dt_ms) in ops {
+            now_ms = now_ms.saturating_add(dt_ms);
+            let now = Duration::from_millis(now_ms);
+            let key = format!("alert-{key_id}");
+
+            let sent = table.should_send_bounded(&key, now, window, max_entries);
+            prop_assert!(
+                table.len() <= max_entries,
+                "AlertDedupTable len={} exceeded max_entries={max_entries}",
+                table.len()
+            );
+            // Immediately repeating the same key at the same timestamp must be suppressed.
+            if sent {
+                prop_assert!(!table.should_send_bounded(&key, now, window, max_entries));
+            }
+        }
+    }
+
+    #[test]
+    fn quota_window_table_enforces_cap_and_exact_shard_count_accounting(
+        max_entries in 1usize..20,
+        window_ms in 500u64..5_000,
+        ops in prop::collection::vec((0usize..60, 0u64..1_200, 1u64..50), 1..200),
+    ) {
+        let table = shunt_ai::QuotaWindowTable::new();
+        let mut now_ms = 0u64;
+
+        for (subj_id, dt_ms, est_tokens) in ops {
+            now_ms = now_ms.saturating_add(dt_ms);
+            let subject = format!("key-{subj_id}");
+            let _ = table.try_reserve_for_test(
+                &subject,
+                Some(100),
+                Some(10_000),
+                est_tokens,
+                now_ms,
+                window_ms,
+                max_entries,
+            );
+            let reported = table.len();
+            let actual = table.actual_shard_entry_count();
+            prop_assert_eq!(reported, actual, "entry_count atomic counter drifted from shard sum");
+            prop_assert!(
+                reported <= max_entries,
+                "QuotaWindowTable len={reported} exceeded max_entries={max_entries}"
+            );
+        }
+    }
+
+    #[test]
+    fn spend_ledger_table_enforces_bounded_cardinality_under_high_key_churn(
+        max_entries in 1usize..16,
+        ops in prop::collection::vec((0u8..3, 0usize..64, 1u64..5, 0u64..500), 1..200),
+    ) {
+        let ledger = shunt_ai::SpendLedgerTable::with_max_entries(max_entries);
+
+        for (kind, key_id, window_id, delta) in ops {
+            let key = format!("user:{key_id}");
+            match kind {
+                0 => {
+                    let _ = ledger.add_spend(&key, window_id, delta);
+                }
+                1 => {
+                    let _ = ledger.adjust_spend(&key, window_id, -(delta as i64));
+                }
+                _ => {
+                    let _ = ledger.try_reserve_spend(&key, window_id, delta, 10_000, true);
+                }
+            }
+            prop_assert!(
+                ledger.len() <= max_entries,
+                "SpendLedgerTable len={} exceeded max_entries={max_entries}",
+                ledger.len()
+            );
+        }
+    }
 }

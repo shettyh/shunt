@@ -182,6 +182,13 @@ impl AiGenerationStore {
             capacity: guard.capacity,
         }
     }
+
+    /// Returns internal `(records_len, aliases_len, order_len)` for structural invariant tests.
+    #[doc(hidden)]
+    pub fn internal_counts(&self) -> (usize, usize, usize) {
+        let guard = self.inner.read().expect("AiGenerationStore poisoned");
+        (guard.records.len(), guard.aliases.len(), guard.order.len())
+    }
 }
 
 #[cfg(test)]

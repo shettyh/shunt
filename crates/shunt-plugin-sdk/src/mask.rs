@@ -146,14 +146,21 @@ mod tests {
 
     #[test]
     fn mask_operations() {
-        let m = HookMask::ON_REQUEST_HEADERS | HookMask::RESPONSE_BODY_STREAM;
+        let m = HookMask::ON_REQUEST_HEADERS
+            | HookMask::ON_RESPONSE_BODY_INSPECTED
+            | HookMask::RESPONSE_BODY_STREAM;
         assert!(!m.is_empty());
         assert!(m.contains(HookMask::ON_REQUEST_HEADERS));
+        assert!(m.contains(HookMask::ON_RESPONSE_BODY_INSPECTED));
         assert!(m.contains(HookMask::RESPONSE_BODY_STREAM));
         assert!(!m.contains(HookMask::REQUEST_BODY_BUFFERED));
         assert_eq!(
             m.flag_names(),
-            vec!["on_request_headers", "response_body_stream"]
+            vec![
+                "on_request_headers",
+                "on_response_body_inspected",
+                "response_body_stream"
+            ]
         );
         assert_eq!(HookMask::EMPTY.to_string(), "EMPTY");
     }

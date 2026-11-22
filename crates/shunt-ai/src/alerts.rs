@@ -182,7 +182,10 @@ pub fn compute_hmac_sha256_hex(secret: &[u8], payload: &[u8]) -> String {
     encode_hex_lower(tag.as_ref())
 }
 
-/// Reload-persistent deduplication window table stored in `StateStore`.
+/// Default maximum number of deduplication keys retained in [`AlertDedupTable`].
+pub const DEFAULT_MAX_DEDUP_ENTRIES: usize = 16_384;
+
+/// Reload-persistent, bounded-cardinality deduplication window table stored in `StateStore`.
 #[derive(Debug, Default)]
 pub struct AlertDedupTable {
     last_sent: RwLock<HashMap<String, Duration>>,
@@ -193,10 +196,33 @@ impl AlertDedupTable {
         Self::default()
     }
 
+    pub fn len(&self) -> usize {
+        self.last_sent
+            .read()
+            .expect("AlertDedupTable poisoned")
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Returns `true` if `key` is outside its `window` (recording `now` as the new send time),
     /// or `false` if this alert should be suppressed as a duplicate.
     pub fn should_send(&self, key: &str, now: Duration, window: Duration) -> bool {
-        if window.is_zero() {
+        self.should_send_bounded(key, now, window, DEFAULT_MAX_DEDUP_ENTRIES)
+    }
+
+    /// Bounded variant of [`Self::should_send`] enforcing at most `max_entries` active keys,
+    /// pruning expired windows first and evicting the oldest entry if still full.
+    pub fn should_send_bounded(
+        &self,
+        key: &str,
+        now: Duration,
+        window: Duration,
+        max_entries: usize,
+    ) -> bool {
+        if window.is_zero() || max_entries == 0 {
             return true;
         }
         {
@@ -212,6 +238,19 @@ impl AlertDedupTable {
             && now.saturating_sub(prev) < window
         {
             return false;
+        }
+        if !guard.contains_key(key) && guard.len() >= max_entries {
+            guard.retain(|_, ts| now.saturating_sub(*ts) < window);
+            while guard.len() >= max_entries {
+                let Some(oldest_key) = guard
+                    .iter()
+                    .min_by_key(|(_, ts)| **ts)
+                    .map(|(k, _)| k.clone())
+                else {
+                    break;
+                };
+                guard.remove(&oldest_key);
+            }
         }
         guard.insert(key.to_owned(), now);
         true
