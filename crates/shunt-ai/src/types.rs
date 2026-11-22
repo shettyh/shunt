@@ -36,6 +36,7 @@ impl ProviderDialect {
             ProviderDialect::OpenAiCompatible
                 | ProviderDialect::AzureOpenAi
                 | ProviderDialect::Gemini
+                | ProviderDialect::Bedrock
         )
     }
 }
@@ -315,6 +316,12 @@ impl fmt::Display for AiCapability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DetectedEndpoint(pub AiEndpointKind);
 
+/// Marker inserted into `RequestCtx::extensions` by `ai-provider-adapter` when triggering an
+/// intra-provider multi-key rotation retry (`Flow::RetryUpstream`) so `ai-model-router` keeps
+/// the active target fixed instead of advancing to a fallback provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntraProviderKeyRetry;
+
 /// A single resolved named-provider/upstream/model candidate in a request's fallback chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiTarget {
@@ -327,6 +334,10 @@ pub struct AiTarget {
     pub capabilities: Vec<AiCapability>,
     /// Relative traffic weight used by [`RoutingStrategy::Weighted`] (`>= 1`).
     pub weight: u32,
+    /// Optional per-target default JSON parameters applied only when absent/null in the request.
+    pub default_params: BTreeMap<String, serde_json::Value>,
+    /// Optional per-target JSON parameter overrides injected unconditionally before translation.
+    pub override_params: BTreeMap<String, serde_json::Value>,
 }
 
 impl AiTarget {
@@ -351,6 +362,8 @@ pub struct AiRequestMeta {
     pub routing_strategy: RoutingStrategy,
     pub targets: Vec<AiTarget>,
     pub active_target_index: usize,
+    /// Monotonic count of target selections (excluding intra-provider key rotation retries).
+    pub target_step: usize,
     pub max_attempts: usize,
 }
 
@@ -385,6 +398,7 @@ impl AiRequestMeta {
             routing_strategy,
             targets,
             active_target_index: 0,
+            target_step: 0,
             max_attempts,
         }
     }
@@ -401,7 +415,22 @@ impl AiRequestMeta {
         }
         let idx = attempt.saturating_sub(1) % self.targets.len();
         self.active_target_index = idx;
+        self.target_step = attempt;
         self.targets.get(idx)
+    }
+
+    /// Advances to the next target in `targets` (wrapping around), or keeps the current target
+    /// when `keep_current` is `true` (used for intra-provider multi-key rotation retries).
+    pub fn select_next_target(&mut self, keep_current: bool) -> Option<&AiTarget> {
+        if self.targets.is_empty() {
+            return None;
+        }
+        if !keep_current {
+            let idx = self.target_step % self.targets.len();
+            self.active_target_index = idx;
+            self.target_step = self.target_step.saturating_add(1);
+        }
+        self.targets.get(self.active_target_index)
     }
 }
 
@@ -429,7 +458,9 @@ pub struct AiUsage {
     pub served_model: Option<String>,
     pub prompt_tokens: Option<u64>,
     pub cached_prompt_tokens: Option<u64>,
+    pub cache_creation_prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub first_token_at: Option<Instant>,
     pub chunk_count: u64,
@@ -467,7 +498,9 @@ pub struct AiUsageReport {
     pub failover_events: Vec<FailoverEvent>,
     pub prompt_tokens: Option<u64>,
     pub cached_prompt_tokens: Option<u64>,
+    pub cache_creation_prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub ttft: Option<Duration>,
     pub total_duration: Duration,

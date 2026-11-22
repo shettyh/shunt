@@ -17,8 +17,8 @@ use crate::routing::{
 use crate::tokens::estimate_request_tokens;
 use crate::types::{
     AiCapability, AiEndpointKind, AiFailoverHistory, AiKeyPolicy, AiRequestMeta, AiTarget, AiUsage,
-    DetectedEndpoint, RoutingStrategy, endpoint_error_response, openai_error_response,
-    percent_decode, wildcard_match,
+    DetectedEndpoint, IntraProviderKeyRetry, RoutingStrategy, endpoint_error_response,
+    openai_error_response, percent_decode, wildcard_match,
 };
 
 const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
@@ -53,6 +53,12 @@ pub struct TargetSpec {
     /// Relative traffic weight used by `strategy = "weighted"` (default: `1`, must be `>= 1`).
     #[serde(default = "default_weight")]
     pub weight: u32,
+    /// Optional per-target default JSON parameters applied when absent/null in the client body.
+    #[serde(default)]
+    pub default_params: BTreeMap<String, Value>,
+    /// Optional per-target JSON parameter overrides injected unconditionally before translation.
+    #[serde(default)]
+    pub override_params: BTreeMap<String, Value>,
 }
 
 impl TargetSpec {
@@ -67,6 +73,8 @@ impl TargetSpec {
             endpoint_override: self.endpoint_override.clone(),
             capabilities: self.capabilities.clone(),
             weight: self.weight.max(1),
+            default_params: self.default_params.clone(),
+            override_params: self.override_params.clone(),
         }
     }
 }
@@ -880,9 +888,10 @@ impl HttpPlugin for AiModelRouterPlugin {
         ctx: &'a mut RequestCtx,
         selection: &'a mut UpstreamSelection,
     ) -> HookResult<'a, Flow> {
+        let keep_current = ctx.remove_ext::<IntraProviderKeyRetry>().is_some();
         if let Some(meta) = ctx.get_ext_mut::<AiRequestMeta>() {
             meta.max_attempts = selection.max_attempts;
-            if let Some(target) = meta.select_for_attempt(selection.attempt) {
+            if let Some(target) = meta.select_next_target(keep_current) {
                 selection.upstream = target.upstream.clone();
                 selection.endpoint_override = target.endpoint_override.clone();
             }
@@ -996,6 +1005,8 @@ mod tests {
                 endpoint_override: None,
                 capabilities: Vec::new(),
                 weight: 1,
+                default_params: BTreeMap::new(),
+                override_params: BTreeMap::new(),
             }]),
         );
         models.insert(
@@ -1009,6 +1020,8 @@ mod tests {
                     endpoint_override: None,
                     capabilities: Vec::new(),
                     weight: 5,
+                    default_params: BTreeMap::new(),
+                    override_params: BTreeMap::new(),
                 }],
             },
         );
@@ -1022,6 +1035,8 @@ mod tests {
                 endpoint_override: None,
                 capabilities: Vec::new(),
                 weight: 1,
+                default_params: BTreeMap::new(),
+                override_params: BTreeMap::new(),
             }],
         }];
         let exposed = vec!["claude-3-5-sonnet-20241022".to_owned(), "smart".to_owned()];

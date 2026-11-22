@@ -15,6 +15,7 @@ use shunt_plugin_sdk::{Bytes, StatusCode};
 
 use crate::ingress::write_named_sse_json;
 use crate::sse::{SseEvent, SseParser};
+use crate::translate::budget_to_reasoning_effort;
 use crate::types::map_status_to_anthropic_error_type;
 
 /// Rewrites `"model"` in an Anthropic `/v1/messages` JSON request body for native passthrough
@@ -61,10 +62,13 @@ pub fn anthropic_to_openai_request(body: &[u8], target_model: &str) -> Result<Ve
     if let Some(sys) = obj.get("system") {
         let sys_text = extract_anthropic_system_text(sys);
         if !sys_text.is_empty() {
-            openai_messages.push(json!({
-                "role": "system",
-                "content": sys_text,
-            }));
+            let mut sys_msg = Map::new();
+            sys_msg.insert("role".to_owned(), Value::String("system".to_owned()));
+            sys_msg.insert("content".to_owned(), Value::String(sys_text));
+            if let Some(cc) = extract_anthropic_system_cache_control(sys) {
+                sys_msg.insert("cache_control".to_owned(), cc);
+            }
+            openai_messages.push(Value::Object(sys_msg));
         }
     }
 
@@ -135,10 +139,13 @@ pub fn anthropic_to_openai_request(body: &[u8], target_model: &str) -> Result<Ve
                     .cloned()
                     .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
                 func.insert("parameters".to_owned(), params);
-                Some(json!({
-                    "type": "function",
-                    "function": Value::Object(func),
-                }))
+                let mut tool_obj = Map::new();
+                tool_obj.insert("type".to_owned(), Value::String("function".to_owned()));
+                tool_obj.insert("function".to_owned(), Value::Object(func));
+                if let Some(cc) = t.get("cache_control").filter(|v| !v.is_null()) {
+                    tool_obj.insert("cache_control".to_owned(), cc.clone());
+                }
+                Some(Value::Object(tool_obj))
             })
             .collect();
         if !converted.is_empty() {
@@ -177,6 +184,51 @@ pub fn anthropic_to_openai_request(body: &[u8], target_model: &str) -> Result<Ve
         }
     }
 
+    // Extended thinking -> canonical `thinking` + derived `reasoning_effort`.
+    if let Some(thinking) = obj.get("thinking").and_then(Value::as_object) {
+        out.insert("thinking".to_owned(), Value::Object(thinking.clone()));
+        match thinking.get("type").and_then(Value::as_str) {
+            Some("enabled") => {
+                let budget = thinking
+                    .get("budget_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(4_096);
+                out.insert(
+                    "reasoning_effort".to_owned(),
+                    Value::String(budget_to_reasoning_effort(budget).to_owned()),
+                );
+            }
+            Some("disabled") => {
+                out.insert(
+                    "reasoning_effort".to_owned(),
+                    Value::String("none".to_owned()),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // Structured outputs (`output_config.format` -> canonical `response_format`).
+    if let Some(fmt) = obj
+        .get("output_config")
+        .and_then(|oc| oc.get("format"))
+        .and_then(Value::as_object)
+        && fmt.get("type").and_then(Value::as_str) == Some("json_schema")
+        && let Some(schema) = fmt.get("schema")
+    {
+        out.insert(
+            "response_format".to_owned(),
+            json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "output",
+                    "schema": schema,
+                    "strict": true,
+                }
+            }),
+        );
+    }
+
     if let Some(user_id) = obj
         .get("metadata")
         .and_then(|m| m.get("user_id"))
@@ -187,6 +239,17 @@ pub fn anthropic_to_openai_request(body: &[u8], target_model: &str) -> Result<Ve
 
     serde_json::to_vec(&Value::Object(out))
         .map_err(|e| format!("failed to serialize canonical OpenAI request: {e}"))
+}
+
+fn extract_anthropic_system_cache_control(sys: &Value) -> Option<Value> {
+    if let Value::Array(blocks) = sys {
+        for b in blocks {
+            if let Some(cc) = b.get("cache_control").filter(|v| !v.is_null()) {
+                return Some(cc.clone());
+            }
+        }
+    }
+    None
 }
 
 fn extract_anthropic_system_text(sys: &Value) -> String {
@@ -252,7 +315,13 @@ fn convert_anthropic_user_message(content: Option<&Value>, out: &mut Vec<Value>)
                     }
                     Some("text") => {
                         if let Some(t) = block.get("text").and_then(Value::as_str) {
-                            user_parts.push(json!({ "type": "text", "text": t }));
+                            let mut part = Map::new();
+                            part.insert("type".to_owned(), Value::String("text".to_owned()));
+                            part.insert("text".to_owned(), Value::String(t.to_owned()));
+                            if let Some(cc) = block.get("cache_control").filter(|v| !v.is_null()) {
+                                part.insert("cache_control".to_owned(), cc.clone());
+                            }
+                            user_parts.push(Value::Object(part));
                         }
                     }
                     Some("image") => {
@@ -299,6 +368,7 @@ fn flush_user_parts(parts: &mut Vec<Value>, out: &mut Vec<Value>) {
     }
     if parts.len() == 1
         && parts[0].get("type").and_then(Value::as_str) == Some("text")
+        && parts[0].get("cache_control").is_none()
         && let Some(text) = parts[0].get("text").and_then(Value::as_str)
     {
         out.push(json!({ "role": "user", "content": text }));
@@ -436,6 +506,18 @@ pub fn openai_to_anthropic_response(
     let mut has_tool_calls = false;
 
     if let Some(msg) = message {
+        if let Some(reasoning) = msg
+            .get("reasoning_content")
+            .or_else(|| msg.get("reasoning"))
+            .and_then(Value::as_str)
+            && !reasoning.is_empty()
+        {
+            content_blocks.push(json!({
+                "type": "thinking",
+                "thinking": reasoning,
+            }));
+        }
+
         if let Some(text) = msg.get("content").and_then(Value::as_str)
             && !text.is_empty()
         {
@@ -494,19 +576,60 @@ pub fn openai_to_anthropic_response(
             "end_turn"
         });
 
-    let input_tokens = val
-        .get("usage")
+    let usage_in = val.get("usage");
+    let raw_prompt_tokens = usage_in
         .and_then(|u| u.get("prompt_tokens").or_else(|| u.get("input_tokens")))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let output_tokens = val
-        .get("usage")
+    let cache_read_tokens = usage_in
+        .and_then(|u| {
+            u.get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .or_else(|| u.get("cache_read_input_tokens"))
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(0);
+    let cache_creation_tokens = usage_in
+        .and_then(|u| {
+            u.get("prompt_tokens_details")
+                .and_then(|d| d.get("cache_creation_tokens"))
+                .or_else(|| u.get("cache_creation_input_tokens"))
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(0);
+    // In Anthropic Messages usage, `input_tokens` excludes cached read/write tokens.
+    let input_tokens = raw_prompt_tokens
+        .saturating_sub(cache_read_tokens)
+        .saturating_sub(cache_creation_tokens);
+    let output_tokens = usage_in
         .and_then(|u| {
             u.get("completion_tokens")
                 .or_else(|| u.get("output_tokens"))
         })
         .and_then(Value::as_u64)
         .unwrap_or(0);
+
+    let mut usage_out = Map::new();
+    usage_out.insert(
+        "input_tokens".to_owned(),
+        Value::Number(input_tokens.into()),
+    );
+    usage_out.insert(
+        "output_tokens".to_owned(),
+        Value::Number(output_tokens.into()),
+    );
+    if cache_read_tokens > 0 {
+        usage_out.insert(
+            "cache_read_input_tokens".to_owned(),
+            Value::Number(cache_read_tokens.into()),
+        );
+    }
+    if cache_creation_tokens > 0 {
+        usage_out.insert(
+            "cache_creation_input_tokens".to_owned(),
+            Value::Number(cache_creation_tokens.into()),
+        );
+    }
 
     let anth_resp = json!({
         "id": id,
@@ -516,10 +639,7 @@ pub fn openai_to_anthropic_response(
         "content": content_blocks,
         "stop_reason": stop_reason,
         "stop_sequence": Value::Null,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        }
+        "usage": Value::Object(usage_out),
     });
 
     serde_json::to_vec(&anth_resp)
@@ -528,6 +648,9 @@ pub fn openai_to_anthropic_response(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActiveBlock {
+    Thinking {
+        block_index: usize,
+    },
     Text {
         block_index: usize,
     },
@@ -554,6 +677,8 @@ pub struct OpenAiToAnthropicSseTranslator {
     has_tool_calls: bool,
     stop_reason: Option<&'static str>,
     input_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
     output_tokens: u64,
 }
 
@@ -571,6 +696,8 @@ impl OpenAiToAnthropicSseTranslator {
             has_tool_calls: false,
             stop_reason: None,
             input_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
             output_tokens: 0,
         }
     }
@@ -660,12 +787,30 @@ impl OpenAiToAnthropicSseTranslator {
         }
 
         if let Some(u) = payload.get("usage").and_then(Value::as_object) {
+            if let Some(cr) = u
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .or_else(|| u.get("cache_read_input_tokens"))
+                .and_then(Value::as_u64)
+            {
+                self.cache_read_tokens = cr;
+            }
+            if let Some(cw) = u
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cache_creation_tokens"))
+                .or_else(|| u.get("cache_creation_input_tokens"))
+                .and_then(Value::as_u64)
+            {
+                self.cache_creation_tokens = cw;
+            }
             if let Some(p) = u
                 .get("prompt_tokens")
                 .or_else(|| u.get("input_tokens"))
                 .and_then(Value::as_u64)
             {
-                self.input_tokens = p;
+                self.input_tokens = p
+                    .saturating_sub(self.cache_read_tokens)
+                    .saturating_sub(self.cache_creation_tokens);
             }
             if let Some(c) = u
                 .get("completion_tokens")
@@ -682,6 +827,27 @@ impl OpenAiToAnthropicSseTranslator {
             && let Some(choice) = choices.first()
         {
             if let Some(delta) = choice.get("delta") {
+                if let Some(reasoning) = delta
+                    .get("reasoning_content")
+                    .or_else(|| delta.get("reasoning"))
+                    .and_then(Value::as_str)
+                    && !reasoning.is_empty()
+                {
+                    let block_idx = self.ensure_thinking_block(out);
+                    write_named_sse_json(
+                        out,
+                        "content_block_delta",
+                        &json!({
+                            "type": "content_block_delta",
+                            "index": block_idx,
+                            "delta": {
+                                "type": "thinking_delta",
+                                "thinking": reasoning,
+                            }
+                        }),
+                    );
+                }
+
                 if let Some(text) = delta.get("content").and_then(Value::as_str)
                     && !text.is_empty()
                 {
@@ -804,6 +970,29 @@ impl OpenAiToAnthropicSseTranslator {
         );
     }
 
+    fn ensure_thinking_block(&mut self, out: &mut Vec<u8>) -> usize {
+        if let Some(ActiveBlock::Thinking { block_index }) = self.active_block {
+            return block_index;
+        }
+        self.close_active_block(out);
+        let idx = self.next_block_index;
+        self.next_block_index += 1;
+        self.active_block = Some(ActiveBlock::Thinking { block_index: idx });
+        write_named_sse_json(
+            out,
+            "content_block_start",
+            &json!({
+                "type": "content_block_start",
+                "index": idx,
+                "content_block": {
+                    "type": "thinking",
+                    "thinking": "",
+                }
+            }),
+        );
+        idx
+    }
+
     fn ensure_text_block(&mut self, out: &mut Vec<u8>) -> usize {
         if let Some(ActiveBlock::Text { block_index }) = self.active_block {
             return block_index;
@@ -830,9 +1019,9 @@ impl OpenAiToAnthropicSseTranslator {
     fn close_active_block(&mut self, out: &mut Vec<u8>) {
         if let Some(active) = self.active_block.take() {
             let idx = match active {
-                ActiveBlock::Text { block_index } | ActiveBlock::Tool { block_index, .. } => {
-                    block_index
-                }
+                ActiveBlock::Thinking { block_index }
+                | ActiveBlock::Text { block_index }
+                | ActiveBlock::Tool { block_index, .. } => block_index,
             };
             write_named_sse_json(
                 out,
@@ -858,6 +1047,28 @@ impl OpenAiToAnthropicSseTranslator {
             "end_turn"
         });
 
+        let mut usage_out = Map::new();
+        usage_out.insert(
+            "input_tokens".to_owned(),
+            Value::Number(self.input_tokens.into()),
+        );
+        usage_out.insert(
+            "output_tokens".to_owned(),
+            Value::Number(self.output_tokens.into()),
+        );
+        if self.cache_read_tokens > 0 {
+            usage_out.insert(
+                "cache_read_input_tokens".to_owned(),
+                Value::Number(self.cache_read_tokens.into()),
+            );
+        }
+        if self.cache_creation_tokens > 0 {
+            usage_out.insert(
+                "cache_creation_input_tokens".to_owned(),
+                Value::Number(self.cache_creation_tokens.into()),
+            );
+        }
+
         write_named_sse_json(
             out,
             "message_delta",
@@ -867,10 +1078,7 @@ impl OpenAiToAnthropicSseTranslator {
                     "stop_reason": stop_reason,
                     "stop_sequence": Value::Null,
                 },
-                "usage": {
-                    "input_tokens": self.input_tokens,
-                    "output_tokens": self.output_tokens,
-                }
+                "usage": Value::Object(usage_out),
             }),
         );
         write_named_sse_json(out, "message_stop", &json!({ "type": "message_stop" }));

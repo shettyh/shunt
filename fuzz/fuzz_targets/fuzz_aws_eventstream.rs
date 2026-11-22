@@ -5,11 +5,19 @@ use libfuzzer_sys::fuzz_target;
 use shunt_ai::aws_eventstream::AwsEventStreamDecoder;
 use shunt_ai::dialects::bedrock::{
     BedrockStreamTranslator, bedrock_converse_to_openai_response,
-    openai_to_bedrock_converse_request,
+    bedrock_embeddings_to_openai_response, openai_to_bedrock_converse_request,
+    openai_to_bedrock_embeddings_request,
 };
 
 fuzz_target!(|data: &[u8]| {
     let _ = openai_to_bedrock_converse_request(data);
+    let _ = openai_to_bedrock_embeddings_request(data, "amazon.titan-embed-text-v2:0");
+    let _ = openai_to_bedrock_embeddings_request(data, "cohere.embed-english-v3");
+    let _ = bedrock_embeddings_to_openai_response(
+        data,
+        StatusCode::OK,
+        "amazon.titan-embed-text-v2:0",
+    );
     let _ = bedrock_converse_to_openai_response(
         data,
         StatusCode::OK,

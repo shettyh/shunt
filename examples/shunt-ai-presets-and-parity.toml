@@ -1,0 +1,139 @@
+# Shunt AI Gateway — RFC 0013 Deep Protocol Parity, Provider Presets & Multi-Key Pools
+#
+# Run:
+#   GROQ_API_KEY=... DEEPSEEK_API_KEY=... OPENAI_KEY_1=... OPENAI_KEY_2=... \
+#   ANTHROPIC_API_KEY=... GCP_ACCESS_TOKEN=... \
+#   shunt run -c examples/shunt-ai-presets-and-parity.toml
+
+[server]
+listen = "127.0.0.1:8080"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:9090"
+
+[[plugins]]
+name = "metrics"
+
+[[upstreams]]
+name = "openai"
+endpoints = ["https://api.openai.com"]
+
+[[upstreams]]
+name = "anthropic"
+endpoints = ["https://api.anthropic.com"]
+
+[[upstreams]]
+name = "groq"
+endpoints = ["https://api.groq.com"]
+
+[[upstreams]]
+name = "deepseek"
+endpoints = ["https://api.deepseek.com"]
+
+[[upstreams]]
+name = "vertex_claude"
+endpoints = ["https://us-east5-aiplatform.googleapis.com"]
+
+[[upstreams]]
+name = "bedrock"
+endpoints = ["https://bedrock-runtime.us-east-1.amazonaws.com"]
+
+[[routes]]
+id = "ai_gateway"
+path_prefix = "/v1"
+methods = ["GET", "POST"]
+upstream = "openai"
+max_body_bytes = 2097152
+response_headers_timeout_ms = 60000
+idle_body_timeout_ms = 30000
+
+[[routes.plugins]]
+name = "ai-model-router"
+[routes.plugins.config]
+exposed_models = ["smart", "fast-groq", "reasoner", "vertex-claude", "titan-embed", "byok-openai"]
+
+[routes.plugins.config.models]
+"smart" = [
+  { provider = "openai_pool", upstream = "openai", model = "gpt-4o", default_params = { temperature = 0.2 } },
+  { provider = "anthropic", upstream = "anthropic", model = "claude-sonnet-4-20250514" }
+]
+"fast-groq" = [
+  { provider = "groq", upstream = "groq", model = "llama-3.3-70b-versatile" }
+]
+"reasoner" = [
+  { provider = "deepseek", upstream = "deepseek", model = "deepseek-reasoner" },
+  { provider = "anthropic", upstream = "anthropic", model = "claude-sonnet-4-20250514", override_params = { reasoning_effort = "high" } }
+]
+"vertex-claude" = [
+  { provider = "vertex_claude", upstream = "vertex_claude", model = "claude-sonnet-4@20250514" }
+]
+"titan-embed" = [
+  { provider = "bedrock", upstream = "bedrock", model = "amazon.titan-embed-text-v2:0" }
+]
+"byok-openai" = [
+  { provider = "openai_byok", upstream = "openai", model = "gpt-4o-mini" }
+]
+
+[[routes.plugins]]
+name = "ai-budget"
+[routes.plugins.config]
+window = "daily"
+mode = "soft"
+use_builtin_pricing = true
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+[routes.plugins.config]
+response_headers = true
+
+# Multi-key OpenAI pool with automatic 429 rotation + drop_params
+[routes.plugins.config.providers.openai_pool]
+preset = "openai"
+api_keys = ["env:OPENAI_KEY_1", "env:OPENAI_KEY_2"]
+key_cooldown_ms = 30000
+drop_params = true
+
+# Ergonomic built-in presets with single api_key shorthand
+[routes.plugins.config.providers.groq]
+preset = "groq"
+api_key = "env:GROQ_API_KEY"
+drop_params = true
+
+[routes.plugins.config.providers.deepseek]
+preset = "deepseek"
+api_key = "env:DEEPSEEK_API_KEY"
+
+[routes.plugins.config.providers.anthropic]
+preset = "anthropic"
+api_key = "env:ANTHROPIC_API_KEY"
+drop_params = true
+
+# Claude on Google Cloud Vertex AI
+[routes.plugins.config.providers.vertex_claude]
+preset = "anthropic"
+vertex_project = "my-gcp-project"
+vertex_location = "us-east5"
+api_key = "env:GCP_ACCESS_TOKEN"
+
+# AWS Bedrock (Converse + Titan/Cohere Embeddings)
+[routes.plugins.config.providers.bedrock]
+preset = "bedrock"
+region = "us-east-1"
+auth = { type = "aws_sigv4", access_key_id = "env:AWS_ACCESS_KEY_ID", secret_access_key = "env:AWS_SECRET_ACCESS_KEY" }
+
+# Client BYOK passthrough
+[routes.plugins.config.providers.openai_byok]
+preset = "openai"
+auth = { type = "client_passthrough" }
+
+[[routes.plugins]]
+name = "ai-failover"
+[routes.plugins.config]
+cooldown_ms = 30000
+respect_retry_after = true
+
+[[routes.plugins]]
+name = "ai-usage-tracker"
+[routes.plugins.config]
+log_usage = true

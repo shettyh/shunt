@@ -1,25 +1,30 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Deserialize;
+use serde_json::Value;
 use shunt_plugin_sdk::{
-    BuildContext, Bytes, Flow, HeaderName, HeaderValue, HookMask, HookResult, HttpPlugin,
-    PluginBuildError, PluginConfig, PluginFactory, RequestCtx, ResponseHead, StatusCode,
-    StreamFlow, UpstreamRequest, Uri, header,
+    BuildContext, Bytes, Clock, Flow, HeaderName, HeaderValue, HookMask, HookResult, HttpPlugin,
+    PluginBuildError, PluginConfig, PluginFactory, RequestCtx, ResponseHead, RouteDecision,
+    StatusCode, StreamFlow, UpstreamRequest, Uri, header,
 };
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::aws_sigv4::{AwsSigV4Credentials, sign_upstream_request};
 use crate::cache::{AiCachePending, AiTranslatedResponseBody};
 use crate::dialects::bedrock::{
     BedrockStreamTranslator, bedrock_converse_path, bedrock_converse_to_openai_response,
-    openai_to_bedrock_converse_request,
+    bedrock_embeddings_to_openai_response, bedrock_invoke_path,
+    openai_to_bedrock_converse_request_for_model, openai_to_bedrock_embeddings_request,
 };
 use crate::dialects::gemini::{
     GeminiSseTranslator, gemini_chat_path, gemini_embeddings_path,
     gemini_to_openai_embeddings_response, gemini_to_openai_response,
     openai_to_gemini_embeddings_request, openai_to_gemini_request,
 };
+use crate::failover::compute_cooldown;
 use crate::ingress::anthropic::{
     OpenAiToAnthropicSseTranslator, anthropic_to_openai_request, openai_to_anthropic_response,
     rewrite_anthropic_request,
@@ -28,12 +33,16 @@ use crate::ingress::responses::{
     ChatToResponsesSseTranslator, chat_to_responses_response, responses_to_chat_request,
     rewrite_openai_responses_request,
 };
+use crate::presets::{
+    DefaultAuthShape, KeyPoolTable, ProviderPreset, default_auth_shape_for_dialect,
+};
 use crate::translate::{
-    AnthropicSseTranslator, anthropic_to_openai_response, openai_to_anthropic_request,
-    rewrite_openai_embeddings_request, rewrite_openai_request,
+    AnthropicSseTranslator, DropParamsConfig, adapt_anthropic_body_for_vertex,
+    anthropic_to_openai_response, apply_request_param_transforms, openai_to_anthropic_request,
+    rewrite_openai_embeddings_request, rewrite_openai_request, vertex_anthropic_path,
 };
 use crate::types::{
-    AiEndpointKind, AiRequestMeta, ProviderDialect, endpoint_error_response,
+    AiEndpointKind, AiRequestMeta, IntraProviderKeyRetry, ProviderDialect, endpoint_error_response,
     percent_encode_path_segment, resolve_env_secret,
 };
 
@@ -45,29 +54,41 @@ const DEFAULT_ANTHROPIC_MAX_TOKENS: u64 = 4096;
 const DEFAULT_AZURE_API_VERSION: &str = "2024-10-21";
 const DEFAULT_BEDROCK_SERVICE: &str = "bedrock";
 const DEFAULT_MAX_NON_STREAM_RESPONSE_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
-
-fn default_true() -> bool {
-    true
-}
+const DEFAULT_KEY_COOLDOWN_MS: u64 = 30_000;
+const MAX_KEY_POOL_AUTO_ATTEMPTS: usize = 16;
 
 fn default_auth_none() -> ProviderAuthConfig {
     ProviderAuthConfig::None
 }
 
+fn default_key_cooldown_ms() -> u64 {
+    DEFAULT_KEY_COOLDOWN_MS
+}
+
+fn default_key_rotate_statuses() -> Vec<u16> {
+    vec![429, 401, 403]
+}
+
 /// Authentication mechanism attached to an upstream provider instance.
 ///
-/// Every secret field (`api_key`, `secret_access_key`, `session_token`) uses canonical
+/// Every secret field (`api_key`, `api_keys`, `secret_access_key`, `session_token`) uses canonical
 /// redaction-matched names so `GET /snapshot` redacts all credentials automatically.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProviderAuthConfig {
     None,
     Bearer {
-        api_key: String,
+        #[serde(default)]
+        api_key: Option<String>,
+        #[serde(default)]
+        api_keys: Vec<String>,
     },
     Header {
         header: String,
-        api_key: String,
+        #[serde(default)]
+        api_key: Option<String>,
+        #[serde(default)]
+        api_keys: Vec<String>,
         #[serde(default)]
         prefix: Option<String>,
     },
@@ -80,15 +101,49 @@ pub enum ProviderAuthConfig {
         #[serde(default)]
         service: Option<String>,
     },
+    /// Client BYOK passthrough: extracts the caller's API key from the incoming request
+    /// (optional `source_header`, or standard `x-api-key` / `x-goog-api-key` / `api-key` /
+    /// `Authorization: Bearer ...`) and injects it into the upstream provider's expected auth header.
+    #[serde(rename = "client_passthrough")]
+    ClientPassthrough {
+        #[serde(default)]
+        source_header: Option<String>,
+        #[serde(default)]
+        header: Option<String>,
+        #[serde(default)]
+        prefix: Option<String>,
+    },
 }
 
 /// Declarative configuration for a single named provider instance in `providers.<name>`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderInstanceConfig {
-    pub dialect: ProviderDialect,
+    /// Optional built-in provider preset (`openai`, `anthropic`, `gemini`, `azure_openai`,
+    /// `bedrock`, `groq`, `deepseek`, `fireworks`, `together`, `mistral`, `cohere`, `xai`,
+    /// `openrouter`, `ollama`, `vllm`) supplying canonical dialect, paths, and auth header shape.
+    #[serde(default)]
+    pub preset: Option<ProviderPreset>,
+    /// Wire dialect spoken by this provider (optional when `preset` is specified).
+    #[serde(default)]
+    pub dialect: Option<ProviderDialect>,
     #[serde(default = "default_auth_none")]
     pub auth: ProviderAuthConfig,
+    /// Ergonomic single-key shorthand using the preset/dialect's default auth header.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Ergonomic multi-key pool shorthand using the preset/dialect's default auth header,
+    /// rotating keys round-robin with automatic `429`/`401`/`403` cooldowns.
+    #[serde(default)]
+    pub api_keys: Vec<String>,
+    /// Cooldown duration (ms) applied to a pooled upstream API key after a rotatable error
+    /// (default: `30_000`).
+    #[serde(default = "default_key_cooldown_ms")]
+    pub key_cooldown_ms: u64,
+    /// Upstream HTTP status codes that cool down the active pooled key and trigger immediate
+    /// intra-provider key rotation (default: `[429, 401, 403]`).
+    #[serde(default = "default_key_rotate_statuses")]
+    pub key_rotate_statuses: Vec<u16>,
     /// Override chat completions path (used by `openai_compatible` and `anthropic`).
     #[serde(default)]
     pub chat_path: Option<String>,
@@ -101,16 +156,18 @@ pub struct ProviderInstanceConfig {
     /// `/v1/responses` transparently translates through Chat Completions.
     #[serde(default)]
     pub responses_path: Option<String>,
-    /// OpenAI-compatible: inject `stream_options.include_usage = true` on streaming chat (default: true).
-    #[serde(default = "default_true")]
-    pub include_stream_usage: bool,
+    /// OpenAI-compatible: inject `stream_options.include_usage = true` on streaming chat
+    /// (default: `true`, or preset default e.g. `false` for `mistral`).
+    #[serde(default)]
+    pub include_stream_usage: Option<bool>,
     /// OpenAI-compatible: optional `OpenAI-Organization` header.
     #[serde(default)]
     pub organization: Option<String>,
     /// OpenAI-compatible: optional `OpenAI-Project` header.
     #[serde(default)]
     pub project: Option<String>,
-    /// Anthropic: `anthropic-version` header (default: `"2023-06-01"`).
+    /// Anthropic: `anthropic-version` header (default: `"2023-06-01"`, or `"vertex-2023-10-16"`
+    /// in the JSON body when `vertex_project` & `vertex_location` are set).
     #[serde(default)]
     pub anthropic_version: Option<String>,
     /// Anthropic: fallback `max_tokens` when client omits it (default: `4096`).
@@ -119,15 +176,26 @@ pub struct ProviderInstanceConfig {
     /// Azure OpenAI: `?api-version=` query value (default: `"2024-10-21"`).
     #[serde(default)]
     pub api_version: Option<String>,
-    /// Google Gemini Vertex AI: GCP project ID (requires `vertex_location`).
+    /// Google Cloud Vertex AI project ID (used by `gemini` and Claude-on-Vertex `anthropic`;
+    /// requires `vertex_location`).
     #[serde(default)]
     pub vertex_project: Option<String>,
-    /// Google Gemini Vertex AI: GCP location (e.g., `"us-central1"`, requires `vertex_project`).
+    /// Google Cloud Vertex AI location (e.g., `"us-central1"` or `"us-east5"`; requires `vertex_project`).
     #[serde(default)]
     pub vertex_location: Option<String>,
     /// AWS Bedrock region (e.g., `"us-east-1"`, required for `aws_sigv4`).
     #[serde(default)]
     pub region: Option<String>,
+    /// LiteLLM-style parameter dropping: `true` strips unsupported cross-dialect params, or
+    /// pass an explicit list of top-level keys to strip (default: `false`).
+    #[serde(default)]
+    pub drop_params: DropParamsConfig,
+    /// Per-provider default JSON request parameters applied when absent/null in the client body.
+    #[serde(default)]
+    pub default_params: BTreeMap<String, Value>,
+    /// Per-provider JSON request parameter overrides injected unconditionally before translation.
+    #[serde(default)]
+    pub override_params: BTreeMap<String, Value>,
     /// Arbitrary extra static headers attached on upstream requests.
     #[serde(default)]
     pub extra_headers: HashMap<String, String>,
@@ -138,7 +206,7 @@ pub struct ProviderInstanceConfig {
 struct AiProviderAdapterConfig {
     /// Named provider instances (e.g. `providers.openai`, `providers.ollama`, `providers.bedrock`).
     providers: HashMap<String, ProviderInstanceConfig>,
-    /// Attach `x-shunt-provider`, `x-shunt-model`, and `x-shunt-attempt` response headers.
+    /// Attach `x-shunt-provider`, `x-shunt-model`, `x-shunt-attempt` (and `x-shunt-key-index` for pools).
     response_headers: bool,
     /// Safety cap when buffering non-streaming JSON responses for translation.
     max_non_stream_response_bytes: usize,
@@ -157,12 +225,29 @@ impl Default for AiProviderAdapterConfig {
 enum CompiledAuth {
     None,
     StaticHeader(HeaderName, HeaderValue),
+    HeaderPool(HeaderName, Vec<HeaderValue>),
     AwsSigV4(AwsSigV4Credentials),
+    ClientPassthrough {
+        source_header: Option<HeaderName>,
+        target_header: HeaderName,
+        target_prefix: Option<String>,
+    },
+}
+
+impl CompiledAuth {
+    fn pool_len(&self) -> usize {
+        match self {
+            CompiledAuth::HeaderPool(_, vals) => vals.len(),
+            _ => 1,
+        }
+    }
 }
 
 struct CompiledProvider {
     dialect: ProviderDialect,
     auth: CompiledAuth,
+    key_cooldown: Duration,
+    key_rotate_statuses: HashSet<u16>,
     chat_path: Uri,
     embeddings_path: Uri,
     responses_path: Option<Uri>,
@@ -170,10 +255,39 @@ struct CompiledProvider {
     organization: Option<HeaderValue>,
     project: Option<HeaderValue>,
     anthropic_version: HeaderValue,
+    anthropic_version_raw: String,
     default_max_tokens: u64,
     api_version: String,
     vertex: Option<(String, String)>,
+    drop_params: DropParamsConfig,
+    default_params: BTreeMap<String, Value>,
+    override_params: BTreeMap<String, Value>,
     extra_headers: Vec<(HeaderName, HeaderValue)>,
+}
+
+/// Active pooled key selected for the ongoing upstream attempt.
+#[derive(Debug, Clone)]
+struct ActiveProviderKey {
+    provider: String,
+    key_index: usize,
+    pool_len: usize,
+}
+
+/// Tracks key indices already attempted on the current provider during this request.
+#[derive(Debug, Clone)]
+struct TriedProviderKeys {
+    provider: String,
+    tried: Vec<usize>,
+}
+
+/// Cached caller BYOK credential for retries (Debug implementation intentionally redacts value).
+#[derive(Clone)]
+struct ClientByokCredential(String);
+
+impl fmt::Debug for ClientByokCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ClientByokCredential([REDACTED])")
+    }
 }
 
 /// Target client ingress response format.
@@ -247,6 +361,7 @@ enum UpstreamJsonKind {
     Gemini,
     GeminiEmbeddings,
     Bedrock,
+    BedrockEmbeddings,
 }
 
 impl UpstreamJsonKind {
@@ -257,6 +372,7 @@ impl UpstreamJsonKind {
             UpstreamJsonKind::Gemini => "Gemini",
             UpstreamJsonKind::GeminiEmbeddings => "Gemini embeddings",
             UpstreamJsonKind::Bedrock => "Bedrock",
+            UpstreamJsonKind::BedrockEmbeddings => "Bedrock embeddings",
         }
     }
 }
@@ -292,7 +408,7 @@ impl PluginFactory for AiProviderAdapterFactory {
     fn build(
         &self,
         config: &PluginConfig,
-        _ctx: &BuildContext,
+        ctx: &BuildContext,
     ) -> Result<Arc<dyn HttpPlugin>, PluginBuildError> {
         let cfg: AiProviderAdapterConfig = config.deserialize(self.name())?;
 
@@ -304,6 +420,7 @@ impl PluginFactory for AiProviderAdapterFactory {
         }
 
         let mut compiled = HashMap::with_capacity(cfg.providers.len());
+        let mut has_key_pools = false;
         for (name, pcfg) in cfg.providers {
             if name.trim().is_empty() {
                 return Err(PluginBuildError::BuildFailed {
@@ -312,14 +429,97 @@ impl PluginFactory for AiProviderAdapterFactory {
                 });
             }
             let cp = compile_provider(self.name(), &name, pcfg)?;
+            if cp.auth.pool_len() > 1 {
+                has_key_pools = true;
+            }
             compiled.insert(name, cp);
         }
+
+        let key_pools = if has_key_pools {
+            Some(
+                ctx.state_handle()
+                    .get_or_init("ai_key_pools", KeyPoolTable::default),
+            )
+        } else {
+            None
+        };
 
         Ok(Arc::new(AiProviderAdapterPlugin {
             providers: compiled,
             response_headers: cfg.response_headers,
             max_non_stream_response_bytes: cfg.max_non_stream_response_bytes.max(1024),
+            has_key_pools,
+            clock: ctx.clock(),
+            key_pools,
         }))
+    }
+}
+
+fn compile_key_list(
+    plugin: &str,
+    field_prefix: &str,
+    single: Option<String>,
+    many: Vec<String>,
+) -> Result<Vec<String>, PluginBuildError> {
+    if single.is_some() && !many.is_empty() {
+        return Err(PluginBuildError::BuildFailed {
+            plugin: plugin.to_owned(),
+            message: format!("`{field_prefix}` cannot specify both `api_key` and `api_keys`"),
+        });
+    }
+    let raw_keys: Vec<String> = match single {
+        Some(k) => vec![k],
+        None => many,
+    };
+    if raw_keys.is_empty() {
+        return Err(PluginBuildError::BuildFailed {
+            plugin: plugin.to_owned(),
+            message: format!("`{field_prefix}` requires `api_key` or a non-empty `api_keys` list"),
+        });
+    }
+    let mut resolved = Vec::with_capacity(raw_keys.len());
+    for (idx, raw) in raw_keys.into_iter().enumerate() {
+        let secret = resolve_env_secret(&raw).map_err(|msg| PluginBuildError::BuildFailed {
+            plugin: plugin.to_owned(),
+            message: format!("{field_prefix}[{idx}]: {msg}"),
+        })?;
+        if secret.trim().is_empty() {
+            return Err(PluginBuildError::BuildFailed {
+                plugin: plugin.to_owned(),
+                message: format!("{field_prefix}[{idx}] resolved to an empty key"),
+            });
+        }
+        resolved.push(secret);
+    }
+    Ok(resolved)
+}
+
+fn compile_header_auth(
+    plugin: &str,
+    field_prefix: &str,
+    header_name: HeaderName,
+    prefix: Option<&str>,
+    secrets: Vec<String>,
+) -> Result<CompiledAuth, PluginBuildError> {
+    let mut values = Vec::with_capacity(secrets.len());
+    for secret in secrets {
+        let full = match prefix {
+            Some(p) => format!("{p}{secret}"),
+            None => secret,
+        };
+        let hv = HeaderValue::from_str(&full).map_err(|e| PluginBuildError::BuildFailed {
+            plugin: plugin.to_owned(),
+            message: format!("invalid {field_prefix} header value: {e}"),
+        })?;
+        values.push(hv);
+    }
+    if values.len() == 1 {
+        Ok(CompiledAuth::StaticHeader(
+            header_name,
+            values.into_iter().next().unwrap(),
+        ))
+    } else {
+        Ok(CompiledAuth::HeaderPool(header_name, values))
     }
 }
 
@@ -329,6 +529,18 @@ fn compile_provider(
     cfg: ProviderInstanceConfig,
 ) -> Result<CompiledProvider, PluginBuildError> {
     let prefix = format!("providers.{provider_name}");
+    let preset_defaults = cfg.preset.map(ProviderPreset::defaults);
+
+    let dialect = match (cfg.dialect, preset_defaults) {
+        (Some(d), _) => d,
+        (None, Some(pd)) => pd.dialect,
+        (None, None) => {
+            return Err(PluginBuildError::BuildFailed {
+                plugin: plugin.to_owned(),
+                message: format!("`{prefix}` must specify either `dialect` or `preset`"),
+            });
+        }
+    };
 
     if cfg.vertex_project.is_some() != cfg.vertex_location.is_some() {
         return Err(PluginBuildError::BuildFailed {
@@ -353,80 +565,113 @@ fn compile_provider(
         _ => None,
     };
 
-    let auth = match cfg.auth {
-        ProviderAuthConfig::None => CompiledAuth::None,
-        ProviderAuthConfig::Bearer { api_key } => {
-            let secret =
-                resolve_env_secret(&api_key).map_err(|msg| PluginBuildError::BuildFailed {
-                    plugin: plugin.to_owned(),
-                    message: format!("{prefix}.auth.api_key: {msg}"),
+    let has_shorthand_keys = cfg.api_key.is_some() || !cfg.api_keys.is_empty();
+    let has_explicit_auth = !matches!(cfg.auth, ProviderAuthConfig::None);
+    if has_shorthand_keys && has_explicit_auth {
+        return Err(PluginBuildError::BuildFailed {
+            plugin: plugin.to_owned(),
+            message: format!(
+                "`{prefix}` cannot combine top-level `api_key`/`api_keys` with explicit `auth`"
+            ),
+        });
+    }
+
+    let default_shape = if vertex.is_some() {
+        default_auth_shape_for_dialect(dialect, true)
+    } else if let Some(pd) = preset_defaults {
+        pd.default_auth
+    } else {
+        default_auth_shape_for_dialect(dialect, false)
+    };
+
+    let auth = if has_shorthand_keys {
+        let secrets = compile_key_list(
+            plugin,
+            &format!("{prefix}.api_key"),
+            cfg.api_key,
+            cfg.api_keys,
+        )?;
+        let effective_shape = match default_shape {
+            DefaultAuthShape::None => DefaultAuthShape::Bearer,
+            other => other,
+        };
+        let header_name = effective_shape
+            .header_name()
+            .unwrap_or(header::AUTHORIZATION);
+        compile_header_auth(
+            plugin,
+            &format!("{prefix}.api_key"),
+            header_name,
+            effective_shape.prefix(),
+            secrets,
+        )?
+    } else {
+        match cfg.auth {
+            ProviderAuthConfig::None => CompiledAuth::None,
+            ProviderAuthConfig::Bearer { api_key, api_keys } => {
+                let secrets =
+                    compile_key_list(plugin, &format!("{prefix}.auth"), api_key, api_keys)?;
+                compile_header_auth(
+                    plugin,
+                    &format!("{prefix}.auth"),
+                    header::AUTHORIZATION,
+                    Some("Bearer "),
+                    secrets,
+                )?
+            }
+            ProviderAuthConfig::Header {
+                header: header_name,
+                api_key,
+                api_keys,
+                prefix: val_prefix,
+            } => {
+                let hn = HeaderName::from_bytes(header_name.as_bytes()).map_err(|e| {
+                    PluginBuildError::BuildFailed {
+                        plugin: plugin.to_owned(),
+                        message: format!("invalid {prefix}.auth.header `{header_name}`: {e}"),
+                    }
                 })?;
-            let val = HeaderValue::from_str(&format!("Bearer {secret}")).map_err(|e| {
-                PluginBuildError::BuildFailed {
-                    plugin: plugin.to_owned(),
-                    message: format!("invalid {prefix}.auth.api_key header value: {e}"),
-                }
-            })?;
-            CompiledAuth::StaticHeader(header::AUTHORIZATION, val)
-        }
-        ProviderAuthConfig::Header {
-            header: header_name,
-            api_key,
-            prefix: val_prefix,
-        } => {
-            let hn = HeaderName::from_bytes(header_name.as_bytes()).map_err(|e| {
-                PluginBuildError::BuildFailed {
-                    plugin: plugin.to_owned(),
-                    message: format!("invalid {prefix}.auth.header `{header_name}`: {e}"),
-                }
-            })?;
-            let secret =
-                resolve_env_secret(&api_key).map_err(|msg| PluginBuildError::BuildFailed {
-                    plugin: plugin.to_owned(),
-                    message: format!("{prefix}.auth.api_key: {msg}"),
+                let secrets =
+                    compile_key_list(plugin, &format!("{prefix}.auth"), api_key, api_keys)?;
+                compile_header_auth(
+                    plugin,
+                    &format!("{prefix}.auth"),
+                    hn,
+                    val_prefix.as_deref(),
+                    secrets,
+                )?
+            }
+            ProviderAuthConfig::AwsSigv4 {
+                access_key_id,
+                secret_access_key,
+                session_token,
+                service,
+            } => {
+                let region = cfg
+                    .region
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|r| !r.is_empty())
+                    .ok_or_else(|| PluginBuildError::BuildFailed {
+                        plugin: plugin.to_owned(),
+                        message: format!(
+                            "`{prefix}.region` is required when using `auth.type = \"aws_sigv4\"`"
+                        ),
+                    })?
+                    .to_owned();
+                let ak = resolve_env_secret(&access_key_id).map_err(|msg| {
+                    PluginBuildError::BuildFailed {
+                        plugin: plugin.to_owned(),
+                        message: format!("{prefix}.auth.access_key_id: {msg}"),
+                    }
                 })?;
-            let full = match val_prefix {
-                Some(p) => format!("{p}{secret}"),
-                None => secret,
-            };
-            let hv = HeaderValue::from_str(&full).map_err(|e| PluginBuildError::BuildFailed {
-                plugin: plugin.to_owned(),
-                message: format!("invalid {prefix}.auth.api_key header value: {e}"),
-            })?;
-            CompiledAuth::StaticHeader(hn, hv)
-        }
-        ProviderAuthConfig::AwsSigv4 {
-            access_key_id,
-            secret_access_key,
-            session_token,
-            service,
-        } => {
-            let region = cfg
-                .region
-                .as_deref()
-                .map(str::trim)
-                .filter(|r| !r.is_empty())
-                .ok_or_else(|| PluginBuildError::BuildFailed {
-                    plugin: plugin.to_owned(),
-                    message: format!(
-                        "`{prefix}.region` is required when using `auth.type = \"aws_sigv4\"`"
-                    ),
-                })?
-                .to_owned();
-            let ak = resolve_env_secret(&access_key_id).map_err(|msg| {
-                PluginBuildError::BuildFailed {
-                    plugin: plugin.to_owned(),
-                    message: format!("{prefix}.auth.access_key_id: {msg}"),
-                }
-            })?;
-            let sk = resolve_env_secret(&secret_access_key).map_err(|msg| {
-                PluginBuildError::BuildFailed {
-                    plugin: plugin.to_owned(),
-                    message: format!("{prefix}.auth.secret_access_key: {msg}"),
-                }
-            })?;
-            let st =
-                match session_token {
+                let sk = resolve_env_secret(&secret_access_key).map_err(|msg| {
+                    PluginBuildError::BuildFailed {
+                        plugin: plugin.to_owned(),
+                        message: format!("{prefix}.auth.secret_access_key: {msg}"),
+                    }
+                })?;
+                let st = match session_token {
                     Some(raw) => Some(resolve_env_secret(&raw).map_err(|msg| {
                         PluginBuildError::BuildFailed {
                             plugin: plugin.to_owned(),
@@ -435,20 +680,64 @@ fn compile_provider(
                     })?),
                     None => None,
                 };
-            CompiledAuth::AwsSigV4(AwsSigV4Credentials {
-                access_key_id: ak,
-                secret_access_key: sk,
-                session_token: st,
-                region,
-                service: service.unwrap_or_else(|| DEFAULT_BEDROCK_SERVICE.to_owned()),
-            })
+                CompiledAuth::AwsSigV4(AwsSigV4Credentials {
+                    access_key_id: ak,
+                    secret_access_key: sk,
+                    session_token: st,
+                    region,
+                    service: service.unwrap_or_else(|| DEFAULT_BEDROCK_SERVICE.to_owned()),
+                })
+            }
+            ProviderAuthConfig::ClientPassthrough {
+                source_header,
+                header: target_header_raw,
+                prefix: target_prefix_raw,
+            } => {
+                let source_hn = match source_header {
+                    Some(raw) => Some(HeaderName::from_bytes(raw.as_bytes()).map_err(|e| {
+                        PluginBuildError::BuildFailed {
+                            plugin: plugin.to_owned(),
+                            message: format!("invalid {prefix}.auth.source_header `{raw}`: {e}"),
+                        }
+                    })?),
+                    None => None,
+                };
+                let (target_header, target_prefix) = match target_header_raw {
+                    Some(raw) => {
+                        let hn = HeaderName::from_bytes(raw.as_bytes()).map_err(|e| {
+                            PluginBuildError::BuildFailed {
+                                plugin: plugin.to_owned(),
+                                message: format!("invalid {prefix}.auth.header `{raw}`: {e}"),
+                            }
+                        })?;
+                        (hn, target_prefix_raw)
+                    }
+                    None => {
+                        let effective = match default_shape {
+                            DefaultAuthShape::None => DefaultAuthShape::Bearer,
+                            other => other,
+                        };
+                        (
+                            effective.header_name().unwrap_or(header::AUTHORIZATION),
+                            target_prefix_raw.or_else(|| effective.prefix().map(str::to_owned)),
+                        )
+                    }
+                };
+                CompiledAuth::ClientPassthrough {
+                    source_header: source_hn,
+                    target_header,
+                    target_prefix,
+                }
+            }
         }
     };
 
-    let default_chat_path = match cfg.dialect {
-        ProviderDialect::Anthropic => DEFAULT_ANTHROPIC_PATH,
-        _ => DEFAULT_OPENAI_CHAT_PATH,
-    };
+    let default_chat_path = preset_defaults
+        .map(|pd| pd.chat_path)
+        .unwrap_or(match dialect {
+            ProviderDialect::Anthropic => DEFAULT_ANTHROPIC_PATH,
+            _ => DEFAULT_OPENAI_CHAT_PATH,
+        });
     let raw_chat_path = cfg.chat_path.as_deref().unwrap_or(default_chat_path);
     let chat_path: Uri = raw_chat_path
         .parse()
@@ -457,10 +746,10 @@ fn compile_provider(
             message: format!("invalid {prefix}.chat_path `{raw_chat_path}`: {e}"),
         })?;
 
-    let raw_emb_path = cfg
-        .embeddings_path
-        .as_deref()
+    let default_emb_path = preset_defaults
+        .map(|pd| pd.embeddings_path)
         .unwrap_or(DEFAULT_OPENAI_EMBEDDINGS_PATH);
+    let raw_emb_path = cfg.embeddings_path.as_deref().unwrap_or(default_emb_path);
     let embeddings_path: Uri = raw_emb_path
         .parse()
         .map_err(|e| PluginBuildError::BuildFailed {
@@ -468,13 +757,23 @@ fn compile_provider(
             message: format!("invalid {prefix}.embeddings_path `{raw_emb_path}`: {e}"),
         })?;
 
-    let responses_path: Option<Uri> = match cfg.responses_path.as_deref() {
+    let raw_responses_path = cfg
+        .responses_path
+        .as_deref()
+        .or_else(|| preset_defaults.and_then(|pd| pd.responses_path));
+    let responses_path: Option<Uri> = match raw_responses_path {
         Some(raw) => Some(raw.parse().map_err(|e| PluginBuildError::BuildFailed {
             plugin: plugin.to_owned(),
             message: format!("invalid {prefix}.responses_path `{raw}`: {e}"),
         })?),
         None => None,
     };
+
+    let include_stream_usage = cfg.include_stream_usage.unwrap_or_else(|| {
+        preset_defaults
+            .map(|pd| pd.include_stream_usage)
+            .unwrap_or(true)
+    });
 
     let organization = parse_optional_header(
         plugin,
@@ -497,15 +796,18 @@ fn compile_provider(
     let extra_headers = compile_extra_headers(plugin, &cfg.extra_headers)?;
 
     Ok(CompiledProvider {
-        dialect: cfg.dialect,
+        dialect,
         auth,
+        key_cooldown: Duration::from_millis(cfg.key_cooldown_ms),
+        key_rotate_statuses: cfg.key_rotate_statuses.into_iter().collect(),
         chat_path,
         embeddings_path,
         responses_path,
-        include_stream_usage: cfg.include_stream_usage,
+        include_stream_usage,
         organization,
         project,
         anthropic_version,
+        anthropic_version_raw: raw_anth_ver.to_owned(),
         default_max_tokens: cfg
             .default_max_tokens
             .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS)
@@ -514,6 +816,9 @@ fn compile_provider(
             .api_version
             .unwrap_or_else(|| DEFAULT_AZURE_API_VERSION.to_owned()),
         vertex,
+        drop_params: cfg.drop_params,
+        default_params: cfg.default_params,
+        override_params: cfg.override_params,
         extra_headers,
     })
 }
@@ -554,13 +859,56 @@ fn compile_extra_headers(
     Ok(out)
 }
 
-/// Adapts canonical OpenAI `/v1/chat/completions` and `/v1/embeddings` requests & responses
-/// across arbitrary named provider instances (`openai_compatible`, `anthropic`, `azure_openai`,
-/// `gemini`, `bedrock`).
+fn extract_client_byok_secret(
+    headers: &shunt_plugin_sdk::HeaderMap,
+    source_header: Option<&HeaderName>,
+) -> Option<String> {
+    let extract_val = |hn: &HeaderName| -> Option<String> {
+        let raw = headers.get(hn)?.to_str().ok()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        if *hn == header::AUTHORIZATION
+            && let Some(rest) = raw
+                .strip_prefix("Bearer ")
+                .or_else(|| raw.strip_prefix("bearer "))
+        {
+            let trimmed = rest.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
+            }
+        }
+        Some(raw.to_owned())
+    };
+
+    if let Some(src) = source_header {
+        return extract_val(src);
+    }
+
+    for name in [
+        HeaderName::from_static("x-api-key"),
+        HeaderName::from_static("x-goog-api-key"),
+        HeaderName::from_static("api-key"),
+        header::AUTHORIZATION,
+    ] {
+        if let Some(s) = extract_val(&name) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// Adapts canonical OpenAI `/v1/chat/completions`, `/v1/messages`, `/v1/responses`, and
+/// `/v1/embeddings` requests & responses across named provider instances (`openai_compatible`,
+/// `anthropic` direct & Claude-on-Vertex, `azure_openai`, `gemini` AI Studio & Vertex,
+/// `bedrock` Converse & Embeddings), with built-in provider presets, multi-key pools, and BYOK.
 pub struct AiProviderAdapterPlugin {
     providers: HashMap<String, CompiledProvider>,
     response_headers: bool,
     max_non_stream_response_bytes: usize,
+    has_key_pools: bool,
+    clock: Arc<dyn Clock>,
+    key_pools: Option<Arc<KeyPoolTable>>,
 }
 
 impl HttpPlugin for AiProviderAdapterPlugin {
@@ -569,9 +917,37 @@ impl HttpPlugin for AiProviderAdapterPlugin {
     }
 
     fn hook_mask(&self) -> HookMask {
-        HookMask::ON_UPSTREAM_REQUEST
+        let mut mask = HookMask::ON_UPSTREAM_REQUEST
             | HookMask::ON_RESPONSE_HEADERS
-            | HookMask::RESPONSE_BODY_STREAM
+            | HookMask::RESPONSE_BODY_STREAM;
+        if self.has_key_pools {
+            mask |= HookMask::ON_ROUTE;
+        }
+        mask
+    }
+
+    fn on_route<'a>(
+        &'a self,
+        ctx: &'a mut RequestCtx,
+        decision: &'a mut RouteDecision,
+    ) -> HookResult<'a, Flow> {
+        if self.has_key_pools
+            && let Some(meta) = ctx.get_ext::<AiRequestMeta>()
+        {
+            let needed: usize = meta
+                .targets
+                .iter()
+                .map(|t| {
+                    self.providers
+                        .get(&t.provider)
+                        .map(|p| p.auth.pool_len())
+                        .unwrap_or(1)
+                })
+                .sum::<usize>()
+                .clamp(1, MAX_KEY_POOL_AUTO_ATTEMPTS);
+            decision.max_attempts = decision.max_attempts.max(needed);
+        }
+        HookResult::Ready(Flow::Continue)
     }
 
     fn on_upstream_request<'a>(
@@ -579,8 +955,9 @@ impl HttpPlugin for AiProviderAdapterPlugin {
         ctx: &'a mut RequestCtx,
         req: &'a mut UpstreamRequest,
     ) -> HookResult<'a, Flow> {
-        // Reset any previous attempt's response translation state.
+        // Reset any previous attempt's response translation state and active key marker.
         ctx.remove_ext::<AdapterResponseState>();
+        ctx.remove_ext::<ActiveProviderKey>();
 
         let Some((target, endpoint, stream_requested)) = ctx
             .get_ext::<AiRequestMeta>()
@@ -603,6 +980,55 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             return HookResult::Ready(Flow::Respond(resp));
         };
 
+        // Capture caller BYOK secret BEFORE stripping downstream credentials.
+        let byok_header: Option<(HeaderName, HeaderValue)> =
+            if let CompiledAuth::ClientPassthrough {
+                ref source_header,
+                ref target_header,
+                ref target_prefix,
+            } = provider.auth
+            {
+                let secret = ctx
+                    .get_ext::<ClientByokCredential>()
+                    .map(|c| c.0.clone())
+                    .or_else(|| extract_client_byok_secret(&req.headers, source_header.as_ref()));
+                let Some(secret) = secret else {
+                    let resp = endpoint_error_response(
+                        endpoint,
+                        StatusCode::UNAUTHORIZED,
+                        "authentication_error",
+                        Some("missing_provider_api_key"),
+                        &format!(
+                            "Provider `{}` requires a client API key (BYOK passthrough)",
+                            target.provider
+                        ),
+                    );
+                    return HookResult::Ready(Flow::Respond(resp));
+                };
+                ctx.insert_ext(ClientByokCredential(secret.clone()));
+                let full = match target_prefix {
+                    Some(p) => format!("{p}{secret}"),
+                    None => secret,
+                };
+                match HeaderValue::from_str(&full) {
+                    Ok(hv) => Some((target_header.clone(), hv)),
+                    Err(_) => {
+                        let resp = endpoint_error_response(
+                            endpoint,
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request_error",
+                            Some("invalid_provider_api_key"),
+                            "Client API key contains invalid HTTP header characters",
+                        );
+                        return HookResult::Ready(Flow::Respond(resp));
+                    }
+                }
+            } else {
+                None
+            };
+
+        let is_vertex_anthropic =
+            provider.dialect == ProviderDialect::Anthropic && provider.vertex.is_some();
         let is_native_anthropic = endpoint == AiEndpointKind::AnthropicMessages
             && provider.dialect == ProviderDialect::Anthropic;
         let is_native_responses = endpoint == AiEndpointKind::OpenAiResponses
@@ -612,8 +1038,8 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             )
             && provider.responses_path.is_some();
 
-        // Preserve client `anthropic-version` / `anthropic-beta` only on native Anthropic passthrough.
-        let client_anthropic_version = if is_native_anthropic {
+        // Preserve client `anthropic-version` / `anthropic-beta` only on direct native Anthropic passthrough.
+        let client_anthropic_version = if is_native_anthropic && !is_vertex_anthropic {
             req.headers
                 .get(HeaderName::from_static("anthropic-version"))
                 .cloned()
@@ -633,7 +1059,7 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             .remove(HeaderName::from_static("x-amz-security-token"));
         req.headers
             .remove(HeaderName::from_static("x-amz-content-sha256"));
-        if !is_native_anthropic {
+        if !is_native_anthropic || is_vertex_anthropic {
             req.headers
                 .remove(HeaderName::from_static("anthropic-version"));
             req.headers
@@ -648,25 +1074,121 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             HeaderValue::from_static("application/json"),
         );
 
-        // Apply static auth headers upfront (SigV4 signing happens after path/body translation).
-        if let CompiledAuth::StaticHeader(ref name, ref val) = provider.auth {
-            req.headers.insert(name.clone(), val.clone());
+        // Apply static, pooled, or BYOK auth headers upfront (SigV4 signing happens after path/body translation).
+        match &provider.auth {
+            CompiledAuth::None | CompiledAuth::AwsSigV4(_) => {}
+            CompiledAuth::StaticHeader(name, val) => {
+                req.headers.insert(name.clone(), val.clone());
+            }
+            CompiledAuth::HeaderPool(name, pool) => {
+                let tried_same_provider = match ctx.get_ext::<TriedProviderKeys>() {
+                    Some(t) if t.provider == target.provider => t.tried.clone(),
+                    _ => Vec::new(),
+                };
+                let now = self.clock.now();
+                let key_index = self
+                    .key_pools
+                    .as_ref()
+                    .map(|kp| {
+                        kp.select_key(&target.provider, pool.len(), now, &tried_same_provider)
+                    })
+                    .unwrap_or(0);
+                let mut next_tried = tried_same_provider;
+                if !next_tried.contains(&key_index) {
+                    next_tried.push(key_index);
+                }
+                ctx.insert_ext(TriedProviderKeys {
+                    provider: target.provider.clone(),
+                    tried: next_tried,
+                });
+                ctx.insert_ext(ActiveProviderKey {
+                    provider: target.provider.clone(),
+                    key_index,
+                    pool_len: pool.len(),
+                });
+                req.headers.insert(name.clone(), pool[key_index].clone());
+            }
+            CompiledAuth::ClientPassthrough { .. } => {
+                if let Some((hn, hv)) = byok_header {
+                    req.headers.insert(hn, hv);
+                }
+            }
         }
         for (k, v) in &provider.extra_headers {
             req.headers.insert(k.clone(), v.clone());
         }
 
-        // Fast path 1: Native Anthropic `/v1/messages` -> Anthropic upstream (zero schema loss).
+        // Fast path 1: Native Anthropic `/v1/messages` -> Anthropic or Claude-on-Vertex upstream.
         if is_native_anthropic {
+            if let Some((ref proj, ref loc)) = provider.vertex {
+                let path_str = vertex_anthropic_path(proj, loc, &target.model, stream_requested);
+                match path_str.parse::<Uri>() {
+                    Ok(uri) => req.uri = uri,
+                    Err(e) => {
+                        return HookResult::Ready(bad_request_translation(
+                            endpoint,
+                            &format!("invalid Vertex Anthropic URI `{path_str}`: {e}"),
+                        ));
+                    }
+                }
+                if let Some(body) = &req.body {
+                    let normalized = match apply_request_param_transforms(
+                        body,
+                        &provider.default_params,
+                        &target.default_params,
+                        &provider.override_params,
+                        &target.override_params,
+                        &provider.drop_params,
+                        provider.dialect,
+                        &target.model,
+                    ) {
+                        Ok(Some(v)) => Bytes::from(v),
+                        Ok(None) => body.clone(),
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
+                    };
+                    match adapt_anthropic_body_for_vertex(
+                        &normalized,
+                        Some(&provider.anthropic_version_raw),
+                    ) {
+                        Ok(adapted) => req.body = Some(Bytes::from(adapted)),
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
+                    }
+                }
+                return finalize_sigv4_if_needed(endpoint, provider, req);
+            }
+
             req.uri = provider.chat_path.clone();
             req.headers.insert(
                 HeaderName::from_static("anthropic-version"),
                 client_anthropic_version.unwrap_or_else(|| provider.anthropic_version.clone()),
             );
             if let Some(body) = &req.body {
-                match rewrite_anthropic_request(body, &target.model) {
+                let working = match apply_request_param_transforms(
+                    body,
+                    &provider.default_params,
+                    &target.default_params,
+                    &provider.override_params,
+                    &target.override_params,
+                    &provider.drop_params,
+                    provider.dialect,
+                    &target.model,
+                ) {
+                    Ok(Some(v)) => Some(Bytes::from(v)),
+                    Ok(None) => None,
+                    Err(err) => return HookResult::Ready(bad_request_translation(endpoint, &err)),
+                };
+                let src = working.as_ref().unwrap_or(body);
+                match rewrite_anthropic_request(src, &target.model) {
                     Ok(Some(rewritten)) => req.body = Some(Bytes::from(rewritten)),
-                    Ok(None) => {}
+                    Ok(None) => {
+                        if let Some(w) = working {
+                            req.body = Some(w);
+                        }
+                    }
                     Err(err) => return HookResult::Ready(bad_request_translation(endpoint, &err)),
                 }
             }
@@ -687,9 +1209,28 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             }
             req.uri = provider.responses_path.clone().unwrap();
             if let Some(body) = &req.body {
-                match rewrite_openai_responses_request(body, &target.model) {
+                let working = match apply_request_param_transforms(
+                    body,
+                    &provider.default_params,
+                    &target.default_params,
+                    &provider.override_params,
+                    &target.override_params,
+                    &provider.drop_params,
+                    provider.dialect,
+                    &target.model,
+                ) {
+                    Ok(Some(v)) => Some(Bytes::from(v)),
+                    Ok(None) => None,
+                    Err(err) => return HookResult::Ready(bad_request_translation(endpoint, &err)),
+                };
+                let src = working.as_ref().unwrap_or(body);
+                match rewrite_openai_responses_request(src, &target.model) {
                     Ok(Some(rewritten)) => req.body = Some(Bytes::from(rewritten)),
-                    Ok(None) => {}
+                    Ok(None) => {
+                        if let Some(w) = working {
+                            req.body = Some(w);
+                        }
+                    }
                     Err(err) => return HookResult::Ready(bad_request_translation(endpoint, &err)),
                 }
             }
@@ -697,8 +1238,8 @@ impl HttpPlugin for AiProviderAdapterPlugin {
         }
 
         // Hub-and-spoke ingress normalization: translate non-Chat conversational requests into
-        // canonical OpenAI Chat Completions JSON once before dispatching to any upstream dialect.
-        let canonical_body: Option<Bytes> = match (endpoint, req.body.as_ref()) {
+        // canonical OpenAI Chat Completions JSON once before applying overrides & dialect dispatch.
+        let mut canonical_body: Option<Bytes> = match (endpoint, req.body.as_ref()) {
             (AiEndpointKind::AnthropicMessages, Some(raw)) => {
                 match anthropic_to_openai_request(raw, &target.model) {
                     Ok(v) => Some(Bytes::from(v)),
@@ -713,6 +1254,24 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             }
             (_, opt) => opt.cloned(),
         };
+
+        // Apply provider/target default_params, override_params, and drop_params.
+        if let Some(body) = &canonical_body {
+            match apply_request_param_transforms(
+                body,
+                &provider.default_params,
+                &target.default_params,
+                &provider.override_params,
+                &target.override_params,
+                &provider.drop_params,
+                provider.dialect,
+                &target.model,
+            ) {
+                Ok(Some(transformed)) => canonical_body = Some(Bytes::from(transformed)),
+                Ok(None) => {}
+                Err(err) => return HookResult::Ready(bad_request_translation(endpoint, &err)),
+            }
+        }
 
         match provider.dialect {
             ProviderDialect::OpenAiCompatible => {
@@ -817,22 +1376,49 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                     return HookResult::Ready(Flow::Respond(resp));
                 }
 
-                req.uri = provider.chat_path.clone();
-                req.headers.insert(
-                    HeaderName::from_static("anthropic-version"),
-                    provider.anthropic_version.clone(),
-                );
+                if let Some((ref proj, ref loc)) = provider.vertex {
+                    let path_str =
+                        vertex_anthropic_path(proj, loc, &target.model, stream_requested);
+                    match path_str.parse::<Uri>() {
+                        Ok(uri) => req.uri = uri,
+                        Err(e) => {
+                            return HookResult::Ready(bad_request_translation(
+                                endpoint,
+                                &format!("invalid Vertex Anthropic URI `{path_str}`: {e}"),
+                            ));
+                        }
+                    }
+                } else {
+                    req.uri = provider.chat_path.clone();
+                    req.headers.insert(
+                        HeaderName::from_static("anthropic-version"),
+                        provider.anthropic_version.clone(),
+                    );
+                }
 
                 if let Some(body) = &canonical_body {
-                    match openai_to_anthropic_request(
+                    let translated = match openai_to_anthropic_request(
                         body,
                         &target.model,
                         provider.default_max_tokens,
                     ) {
-                        Ok(translated) => req.body = Some(Bytes::from(translated)),
+                        Ok(t) => t,
                         Err(err) => {
                             return HookResult::Ready(bad_request_translation(endpoint, &err));
                         }
+                    };
+                    if provider.vertex.is_some() {
+                        match adapt_anthropic_body_for_vertex(
+                            &translated,
+                            Some(&provider.anthropic_version_raw),
+                        ) {
+                            Ok(adapted) => req.body = Some(Bytes::from(adapted)),
+                            Err(err) => {
+                                return HookResult::Ready(bad_request_translation(endpoint, &err));
+                            }
+                        }
+                    } else {
+                        req.body = Some(Bytes::from(translated));
                     }
                 }
             }
@@ -899,17 +1485,31 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             }
             ProviderDialect::Bedrock => {
                 if endpoint == AiEndpointKind::Embeddings {
-                    let resp = endpoint_error_response(
-                        endpoint,
-                        StatusCode::NOT_IMPLEMENTED,
-                        "not_implemented_error",
-                        Some("unsupported_endpoint"),
-                        &format!(
-                            "Provider `{}` (dialect `bedrock`) does not yet support `/v1/embeddings`",
-                            target.provider
-                        ),
-                    );
-                    return HookResult::Ready(Flow::Respond(resp));
+                    let Some(body) = &canonical_body else {
+                        return HookResult::Ready(bad_request_translation(
+                            endpoint,
+                            "missing embeddings request body",
+                        ));
+                    };
+                    let translated = match openai_to_bedrock_embeddings_request(body, &target.model)
+                    {
+                        Ok(t) => t,
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
+                    };
+                    let path_str = bedrock_invoke_path(&target.model);
+                    match path_str.parse::<Uri>() {
+                        Ok(uri) => req.uri = uri,
+                        Err(e) => {
+                            return HookResult::Ready(bad_request_translation(
+                                endpoint,
+                                &format!("invalid Bedrock embeddings URI `{path_str}`: {e}"),
+                            ));
+                        }
+                    }
+                    req.body = Some(Bytes::from(translated));
+                    return finalize_sigv4_if_needed(endpoint, provider, req);
                 }
 
                 let path_str = bedrock_converse_path(&target.model, stream_requested);
@@ -924,7 +1524,7 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                 }
 
                 if let Some(body) = &canonical_body {
-                    match openai_to_bedrock_converse_request(body) {
+                    match openai_to_bedrock_converse_request_for_model(body, &target.model) {
                         Ok(translated) => req.body = Some(Bytes::from(translated)),
                         Err(err) => {
                             return HookResult::Ready(bad_request_translation(endpoint, &err));
@@ -942,12 +1542,73 @@ impl HttpPlugin for AiProviderAdapterPlugin {
         ctx: &'a mut RequestCtx,
         res: &'a mut ResponseHead,
     ) -> HookResult<'a, Flow> {
-        let Some((target, endpoint, stream_requested)) = ctx
-            .get_ext::<AiRequestMeta>()
-            .and_then(|m| m.active_target().map(|t| (t.clone(), m.endpoint, m.stream)))
+        let Some((target, endpoint, stream_requested, max_attempts)) =
+            ctx.get_ext::<AiRequestMeta>().and_then(|m| {
+                m.active_target()
+                    .map(|t| (t.clone(), m.endpoint, m.stream, m.max_attempts))
+            })
         else {
             return HookResult::Ready(Flow::Continue);
         };
+
+        let Some(provider) = self.providers.get(&target.provider) else {
+            ctx.insert_ext(AdapterResponseState::Passthrough);
+            return HookResult::Ready(Flow::Continue);
+        };
+
+        // Multi-key pool health tracking & intra-provider key rotation on rotatable errors.
+        if let Some(active_key) = ctx.get_ext::<ActiveProviderKey>().cloned()
+            && active_key.pool_len > 1
+            && let Some(key_pools) = &self.key_pools
+        {
+            let status_code = res.status.as_u16();
+            if provider.key_rotate_statuses.contains(&status_code) {
+                let retry_after_str = res
+                    .headers
+                    .get(header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok());
+                let max_cd = provider.key_cooldown.max(Duration::from_secs(300));
+                let cd = compute_cooldown(provider.key_cooldown, max_cd, true, retry_after_str);
+                let now = self.clock.now();
+                key_pools.record_cooldown(
+                    &active_key.provider,
+                    active_key.pool_len,
+                    active_key.key_index,
+                    cd,
+                    now,
+                );
+                let tried = ctx
+                    .get_ext::<TriedProviderKeys>()
+                    .filter(|t| t.provider == active_key.provider)
+                    .map(|t| t.tried.clone())
+                    .unwrap_or_default();
+                if ctx.attempt < max_attempts
+                    && key_pools.has_untried_healthy_key(
+                        &active_key.provider,
+                        active_key.pool_len,
+                        now,
+                        &tried,
+                    )
+                {
+                    info!(
+                        request_id = ctx.request_id,
+                        provider = %active_key.provider,
+                        key_index = active_key.key_index,
+                        status = status_code,
+                        attempt = ctx.attempt,
+                        "ai-provider-adapter rotating pooled API key after retryable status"
+                    );
+                    ctx.insert_ext(IntraProviderKeyRetry);
+                    return HookResult::Ready(Flow::RetryUpstream);
+                }
+            } else if res.status.is_success() {
+                key_pools.record_success(
+                    &active_key.provider,
+                    active_key.pool_len,
+                    active_key.key_index,
+                );
+            }
+        }
 
         if self.response_headers {
             if let Ok(val) = HeaderValue::from_str(&target.provider) {
@@ -962,12 +1623,14 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                 res.headers
                     .insert(HeaderName::from_static("x-shunt-attempt"), val);
             }
+            if let Some(active_key) = ctx.get_ext::<ActiveProviderKey>()
+                && active_key.pool_len > 1
+                && let Ok(val) = HeaderValue::from_str(&active_key.key_index.to_string())
+            {
+                res.headers
+                    .insert(HeaderName::from_static("x-shunt-key-index"), val);
+            }
         }
-
-        let Some(provider) = self.providers.get(&target.provider) else {
-            ctx.insert_ext(AdapterResponseState::Passthrough);
-            return HookResult::Ready(Flow::Continue);
-        };
 
         // Native same-protocol passthrough fast paths (zero translation overhead).
         let is_native_passthrough = match (endpoint, provider.dialect) {
@@ -994,14 +1657,24 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             .map(str::to_ascii_lowercase)
             .unwrap_or_default();
 
-        // Special-case Gemini embeddings JSON (always non-streaming).
-        if provider.dialect == ProviderDialect::Gemini && endpoint == AiEndpointKind::Embeddings {
+        // Special-case Gemini & Bedrock embeddings JSON (always non-streaming).
+        if endpoint == AiEndpointKind::Embeddings
+            && matches!(
+                provider.dialect,
+                ProviderDialect::Gemini | ProviderDialect::Bedrock
+            )
+        {
             res.headers.insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/json"),
             );
+            let upstream = if provider.dialect == ProviderDialect::Bedrock {
+                UpstreamJsonKind::BedrockEmbeddings
+            } else {
+                UpstreamJsonKind::GeminiEmbeddings
+            };
             ctx.insert_ext(AdapterResponseState::BufferedJson {
-                upstream: UpstreamJsonKind::GeminiEmbeddings,
+                upstream,
                 ingress: IngressResponseFormat::OpenAiChat,
                 status: res.status,
                 fallback_model: target.model,
@@ -1149,6 +1822,13 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                                 resp_status,
                                 fallback_model,
                             )?,
+                            UpstreamJsonKind::BedrockEmbeddings => {
+                                return bedrock_embeddings_to_openai_response(
+                                    buf,
+                                    resp_status,
+                                    fallback_model,
+                                );
+                            }
                         };
 
                         match ingress_fmt {

@@ -154,6 +154,42 @@ impl AiMetrics {
                 ))
                 .or_insert(0) += completion;
         }
+        if let Some(cached_read) = report.cached_prompt_tokens
+            && cached_read > 0
+        {
+            *data
+                .tokens_total
+                .entry((
+                    report.provider.clone(),
+                    report.served_model.clone(),
+                    "cache_read",
+                ))
+                .or_insert(0) += cached_read;
+        }
+        if let Some(cache_write) = report.cache_creation_prompt_tokens
+            && cache_write > 0
+        {
+            *data
+                .tokens_total
+                .entry((
+                    report.provider.clone(),
+                    report.served_model.clone(),
+                    "cache_write",
+                ))
+                .or_insert(0) += cache_write;
+        }
+        if let Some(reasoning) = report.reasoning_tokens
+            && reasoning > 0
+        {
+            *data
+                .tokens_total
+                .entry((
+                    report.provider.clone(),
+                    report.served_model.clone(),
+                    "reasoning",
+                ))
+                .or_insert(0) += reasoning;
+        }
 
         for ev in &report.failover_events {
             *data
@@ -805,7 +841,9 @@ impl HttpPlugin for AiUsageTrackerPlugin {
 
         let prompt_tokens = usage.and_then(|u| u.prompt_tokens);
         let cached_prompt_tokens = usage.and_then(|u| u.cached_prompt_tokens);
+        let cache_creation_prompt_tokens = usage.and_then(|u| u.cache_creation_prompt_tokens);
         let completion_tokens = usage.and_then(|u| u.completion_tokens);
+        let reasoning_tokens = usage.and_then(|u| u.reasoning_tokens);
         let total_tokens = usage.and_then(AiUsage::effective_total_tokens);
         let key_policy = ctx.get_ext::<AiKeyPolicy>();
         let key_id = key_policy.map(|p| p.key_id.clone());
@@ -832,7 +870,9 @@ impl HttpPlugin for AiUsageTrackerPlugin {
             failover_events,
             prompt_tokens,
             cached_prompt_tokens,
+            cache_creation_prompt_tokens,
             completion_tokens,
+            reasoning_tokens,
             total_tokens,
             ttft,
             total_duration: summary.total_duration,
@@ -863,6 +903,18 @@ impl HttpPlugin for AiUsageTrackerPlugin {
                 ctx.annotate_int(
                     "gen_ai.usage.cache_read.input_tokens",
                     cached.min(i64::MAX as u64) as i64,
+                );
+            }
+            if let Some(cache_write) = report.cache_creation_prompt_tokens {
+                ctx.annotate_int(
+                    "gen_ai.usage.cache_creation.input_tokens",
+                    cache_write.min(i64::MAX as u64) as i64,
+                );
+            }
+            if let Some(reasoning) = report.reasoning_tokens {
+                ctx.annotate_int(
+                    "gen_ai.usage.reasoning_tokens",
+                    reasoning.min(i64::MAX as u64) as i64,
                 );
             }
             ctx.annotate_bool("shunt.ai.stream", report.stream);
@@ -940,12 +992,21 @@ fn inspect_sse_event_data(data: &str, usage: &mut AiUsage) {
 }
 
 fn contains_first_token(val: &Value) -> bool {
-    // OpenAI streaming chunk: choices[0].delta.content (non-empty) or tool_calls
+    // OpenAI streaming chunk: choices[0].delta.content / reasoning_content (non-empty) or tool_calls
     if let Some(choices) = val.get("choices").and_then(Value::as_array) {
         for ch in choices {
             if let Some(delta) = ch.get("delta") {
                 if delta
                     .get("content")
+                    .and_then(Value::as_str)
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
+                if delta
+                    .get("reasoning_content")
+                    .or_else(|| delta.get("reasoning"))
                     .and_then(Value::as_str)
                     .map(|s| !s.is_empty())
                     .unwrap_or(false)
@@ -993,6 +1054,7 @@ fn contains_first_token(val: &Value) -> bool {
         Some(
             "content_block_delta"
                 | "response.output_text.delta"
+                | "response.reasoning_summary_text.delta"
                 | "response.function_call_arguments.delta"
         )
     )
@@ -1021,32 +1083,10 @@ fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {
 
     // Top-level `usage` (OpenAI chat/responses/embeddings, Anthropic non-stream/message_delta, Bedrock Converse)
     if let Some(u) = val.get("usage").and_then(Value::as_object) {
-        if let Some(p) = u.get("prompt_tokens").and_then(Value::as_u64) {
-            usage.prompt_tokens = Some(p);
-        }
-        if let Some(c) = u.get("completion_tokens").and_then(Value::as_u64) {
-            usage.completion_tokens = Some(c);
-        }
-        if let Some(t) = u.get("total_tokens").and_then(Value::as_u64) {
-            usage.total_tokens = Some(t);
-        }
-        if let Some(i) = u.get("input_tokens").and_then(Value::as_u64) {
-            usage.prompt_tokens = Some(i);
-        }
-        if let Some(o) = u.get("output_tokens").and_then(Value::as_u64) {
-            usage.completion_tokens = Some(o);
-        }
-        // Bedrock Converse camelCase usage keys
-        if let Some(i) = u.get("inputTokens").and_then(Value::as_u64) {
-            usage.prompt_tokens = Some(i);
-        }
-        if let Some(o) = u.get("outputTokens").and_then(Value::as_u64) {
-            usage.completion_tokens = Some(o);
-        }
-        if let Some(t) = u.get("totalTokens").and_then(Value::as_u64) {
-            usage.total_tokens = Some(t);
-        }
-        // Cached prompt tokens (OpenAI prompt_tokens_details / input_tokens_details, Anthropic, Bedrock)
+        let mut cache_read_opt: Option<u64> = None;
+        let mut cache_write_opt: Option<u64> = None;
+
+        // Cached prompt read tokens
         if let Some(cached) = u
             .get("prompt_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
@@ -1060,6 +1100,72 @@ fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {
             .or_else(|| u.get("cacheReadInputTokens").and_then(Value::as_u64))
         {
             usage.cached_prompt_tokens = Some(cached);
+            cache_read_opt = Some(cached);
+        }
+
+        // Cached prompt write (creation) tokens
+        if let Some(written) = u
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cache_creation_tokens"))
+            .and_then(Value::as_u64)
+            .or_else(|| u.get("cache_creation_input_tokens").and_then(Value::as_u64))
+            .or_else(|| u.get("cacheWriteInputTokens").and_then(Value::as_u64))
+        {
+            usage.cache_creation_prompt_tokens = Some(written);
+            cache_write_opt = Some(written);
+        }
+
+        // Reasoning tokens
+        if let Some(reasoning) = u
+            .get("completion_tokens_details")
+            .and_then(|d| d.get("reasoning_tokens"))
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                u.get("output_tokens_details")
+                    .and_then(|d| d.get("reasoning_tokens"))
+                    .and_then(Value::as_u64)
+            })
+        {
+            usage.reasoning_tokens = Some(reasoning);
+        }
+
+        if let Some(p) = u.get("prompt_tokens").and_then(Value::as_u64) {
+            usage.prompt_tokens = Some(p);
+        }
+        if let Some(c) = u.get("completion_tokens").and_then(Value::as_u64) {
+            usage.completion_tokens = Some(c);
+        }
+        if let Some(t) = u.get("total_tokens").and_then(Value::as_u64) {
+            usage.total_tokens = Some(t);
+        }
+        if let Some(i) = u.get("input_tokens").and_then(Value::as_u64) {
+            // Native Anthropic Messages reports `input_tokens` excluding cache read/write tokens,
+            // whereas OpenAI Responses reports `input_tokens` inclusively (with `input_tokens_details`).
+            let is_anthropic_additive = u.contains_key("cache_read_input_tokens")
+                || u.contains_key("cache_creation_input_tokens");
+            let total_in = if is_anthropic_additive {
+                i.saturating_add(cache_read_opt.unwrap_or(0))
+                    .saturating_add(cache_write_opt.unwrap_or(0))
+            } else {
+                i
+            };
+            usage.prompt_tokens = Some(total_in);
+        }
+        if let Some(o) = u.get("output_tokens").and_then(Value::as_u64) {
+            usage.completion_tokens = Some(o);
+        }
+        // Bedrock Converse camelCase usage keys
+        if let Some(i) = u.get("inputTokens").and_then(Value::as_u64) {
+            let total_in = i
+                .saturating_add(cache_read_opt.unwrap_or(0))
+                .saturating_add(cache_write_opt.unwrap_or(0));
+            usage.prompt_tokens = Some(total_in);
+        }
+        if let Some(o) = u.get("outputTokens").and_then(Value::as_u64) {
+            usage.completion_tokens = Some(o);
+        }
+        if let Some(t) = u.get("totalTokens").and_then(Value::as_u64) {
+            usage.total_tokens = Some(t);
         }
     }
 
@@ -1085,32 +1191,51 @@ fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {
         {
             usage.cached_prompt_tokens = Some(cached);
         }
+        if let Some(reasoning) = u
+            .get("output_tokens_details")
+            .and_then(|d| d.get("reasoning_tokens"))
+            .and_then(Value::as_u64)
+        {
+            usage.reasoning_tokens = Some(reasoning);
+        }
     }
 
-    // Anthropic `message_start`: message.usage.{input_tokens, output_tokens, cache_read_input_tokens}
+    // Anthropic `message_start`: message.usage.{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens}
     if let Some(u) = val
         .get("message")
         .and_then(|m| m.get("usage"))
         .and_then(Value::as_object)
     {
+        let cached = u.get("cache_read_input_tokens").and_then(Value::as_u64);
+        let written = u.get("cache_creation_input_tokens").and_then(Value::as_u64);
+        if let Some(c) = cached {
+            usage.cached_prompt_tokens = Some(c);
+        }
+        if let Some(w) = written {
+            usage.cache_creation_prompt_tokens = Some(w);
+        }
         if let Some(i) = u.get("input_tokens").and_then(Value::as_u64) {
-            usage.prompt_tokens = Some(i);
+            usage.prompt_tokens = Some(
+                i.saturating_add(cached.unwrap_or(0))
+                    .saturating_add(written.unwrap_or(0)),
+            );
         }
         if let Some(o) = u.get("output_tokens").and_then(Value::as_u64) {
             usage.completion_tokens = Some(o);
         }
-        if let Some(cached) = u.get("cache_read_input_tokens").and_then(Value::as_u64) {
-            usage.cached_prompt_tokens = Some(cached);
-        }
     }
 
-    // Google Gemini `usageMetadata.{promptTokenCount, candidatesTokenCount, totalTokenCount, cachedContentTokenCount}`
+    // Google Gemini `usageMetadata.{promptTokenCount, candidatesTokenCount, thoughtsTokenCount, totalTokenCount, cachedContentTokenCount}`
     if let Some(u) = val.get("usageMetadata").and_then(Value::as_object) {
         if let Some(p) = u.get("promptTokenCount").and_then(Value::as_u64) {
             usage.prompt_tokens = Some(p);
         }
+        let thoughts = u.get("thoughtsTokenCount").and_then(Value::as_u64);
+        if let Some(r) = thoughts {
+            usage.reasoning_tokens = Some(r);
+        }
         if let Some(c) = u.get("candidatesTokenCount").and_then(Value::as_u64) {
-            usage.completion_tokens = Some(c);
+            usage.completion_tokens = Some(c.saturating_add(thoughts.unwrap_or(0)));
         }
         if let Some(t) = u.get("totalTokenCount").and_then(Value::as_u64) {
             usage.total_tokens = Some(t);

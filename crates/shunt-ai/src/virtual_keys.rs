@@ -217,6 +217,8 @@ impl PluginFactory for AiVirtualKeysFactory {
                         endpoint_override: s.endpoint_override,
                         capabilities: s.capabilities,
                         weight: s.weight.max(1),
+                        default_params: s.default_params,
+                        override_params: s.override_params,
                     })
                     .collect();
                 overrides.insert(model_pat, targets);

@@ -1,0 +1,375 @@
+[spec]
+name = "rfc0013-protocol-parity-and-presets"
+config_inline = """
+[server]
+listen = "127.0.0.1:0"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+[[plugins]]
+name = "metrics"
+
+[[upstreams]]
+name = "groq_up"
+endpoints = ["http://127.0.0.1:18101"]
+
+[[upstreams]]
+name = "openai_up"
+endpoints = ["http://127.0.0.1:18102"]
+
+[[upstreams]]
+name = "anthropic_up"
+endpoints = ["http://127.0.0.1:18103"]
+
+[[upstreams]]
+name = "gemini_up"
+endpoints = ["http://127.0.0.1:18104"]
+
+[[upstreams]]
+name = "vertex_claude_up"
+endpoints = ["http://127.0.0.1:18105"]
+
+[[upstreams]]
+name = "bedrock_up"
+endpoints = ["http://127.0.0.1:18106"]
+
+[[routes]]
+id = "ai_parity"
+path_prefix = "/v1"
+methods = ["GET", "POST"]
+upstream = "openai_up"
+max_body_bytes = 1048576
+
+[[routes.plugins]]
+name = "ai-model-router"
+[routes.plugins.config]
+[routes.plugins.config.models]
+"groq-fast" = [
+  { provider = "groq", upstream = "groq_up", model = "llama-3.3-70b-versatile", default_params = { temperature = 0.25 }, override_params = { max_tokens = 256 } }
+]
+"o3-norm" = [
+  { provider = "openai_norm", upstream = "openai_up", model = "o3-mini" }
+]
+"claude-reason" = [
+  { provider = "anthropic", upstream = "anthropic_up", model = "claude-sonnet-4-20250514" }
+]
+"gemini-reason" = [
+  { provider = "gemini", upstream = "gemini_up", model = "gemini-2.5-pro" }
+]
+"vertex-claude" = [
+  { provider = "vertex_claude", upstream = "vertex_claude_up", model = "claude-sonnet-4@20250514" }
+]
+"bedrock-claude" = [
+  { provider = "bedrock", upstream = "bedrock_up", model = "anthropic.claude-sonnet-4-20250514-v1:0" }
+]
+"bedrock-titan" = [
+  { provider = "bedrock", upstream = "bedrock_up", model = "amazon.titan-embed-text-v2:0" }
+]
+"bedrock-cohere" = [
+  { provider = "bedrock", upstream = "bedrock_up", model = "cohere.embed-english-v3" }
+]
+"pooled-smart" = [
+  { provider = "openai_pool", upstream = "openai_up", model = "gpt-4o" },
+  { provider = "anthropic", upstream = "anthropic_up", model = "claude-sonnet-4-20250514" }
+]
+"byok-openai" = [
+  { provider = "openai_byok", upstream = "openai_up", model = "gpt-4o-mini" }
+]
+
+[[routes.plugins]]
+name = "ai-budget"
+[routes.plugins.config]
+window = "daily"
+mode = "soft"
+use_builtin_pricing = true
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+[routes.plugins.config]
+response_headers = true
+
+[routes.plugins.config.providers.groq]
+preset = "groq"
+api_key = "env:SPEC_GROQ_KEY"
+drop_params = ["custom_unsupported_param"]
+
+[routes.plugins.config.providers.openai_norm]
+preset = "openai"
+api_key = "env:SPEC_OPENAI_NORM_KEY"
+drop_params = true
+
+[routes.plugins.config.providers.anthropic]
+preset = "anthropic"
+api_key = "env:SPEC_ANTHROPIC_KEY"
+drop_params = true
+
+[routes.plugins.config.providers.gemini]
+preset = "gemini"
+api_key = "env:SPEC_GEMINI_KEY"
+
+[routes.plugins.config.providers.vertex_claude]
+preset = "anthropic"
+vertex_project = "shunt-proj"
+vertex_location = "us-east5"
+api_key = "env:SPEC_VERTEX_TOKEN"
+
+[routes.plugins.config.providers.bedrock]
+preset = "bedrock"
+region = "us-east-1"
+auth = { type = "aws_sigv4", access_key_id = "env:SPEC_AWS_KEY", secret_access_key = "env:SPEC_AWS_SECRET" }
+
+[routes.plugins.config.providers.openai_pool]
+preset = "openai"
+api_keys = ["env:SPEC_POOL_KEY_0", "env:SPEC_POOL_KEY_1"]
+key_cooldown_ms = 10000
+
+[routes.plugins.config.providers.openai_byok]
+preset = "openai"
+auth = { type = "client_passthrough" }
+
+[[routes.plugins]]
+name = "ai-failover"
+[routes.plugins.config]
+cooldown_ms = 5000
+
+[[routes.plugins]]
+name = "ai-usage-tracker"
+[routes.plugins.config]
+log_usage = false
+"""
+
+[env]
+SPEC_GROQ_KEY = "gsk-spec-secret"
+SPEC_OPENAI_NORM_KEY = "sk-norm-secret"
+SPEC_ANTHROPIC_KEY = "sk-ant-spec-secret"
+SPEC_GEMINI_KEY = "AIza-spec-secret"
+SPEC_VERTEX_TOKEN = "ya29.vertex-secret"
+SPEC_AWS_KEY = "AKIASPEC123"
+SPEC_AWS_SECRET = "aws-secret-spec"
+SPEC_POOL_KEY_0 = "sk-pool-key-zero"
+SPEC_POOL_KEY_1 = "sk-pool-key-one"
+
+[[mocks]]
+name = "groq_ok"
+upstream = "groq_up"
+status = 200
+json = { id = "chatcmpl-groq-1", object = "chat.completion", model = "llama-3.3-70b-versatile", choices = [{ index = 0, message = { role = "assistant", content = "groq-ok" }, finish_reason = "stop" }], usage = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 } }
+
+[[mocks]]
+name = "openai_o3_ok"
+upstream = "openai_up"
+status = 200
+json = { id = "chatcmpl-o3-1", object = "chat.completion", model = "o3-mini", choices = [{ index = 0, message = { role = "assistant", content = "o3-ok" }, finish_reason = "stop" }], usage = { prompt_tokens = 20, completion_tokens = 40, total_tokens = 60, completion_tokens_details = { reasoning_tokens = 25 } } }
+
+[[mocks]]
+name = "anthropic_think_cache_ok"
+upstream = "anthropic_up"
+status = 200
+json = { id = "msg_think_1", type = "message", role = "assistant", model = "claude-sonnet-4-20250514", content = [{ type = "thinking", thinking = "Checking math..." }, { type = "text", text = "{\"answer\":42}" }], stop_reason = "end_turn", usage = { input_tokens = 100000, cache_read_input_tokens = 100000, cache_creation_input_tokens = 50000, output_tokens = 1000 } }
+
+[[mocks]]
+name = "gemini_think_ok"
+upstream = "gemini_up"
+status = 200
+json = { responseId = "gem_r1", modelVersion = "gemini-2.5-pro", candidates = [{ content = { role = "model", parts = [{ text = "Thinking deeply", thought = true }, { text = "Final answer" }] }, finishReason = "STOP" }], usageMetadata = { promptTokenCount = 40, cachedContentTokenCount = 10, candidatesTokenCount = 15, thoughtsTokenCount = 35, totalTokenCount = 90 } }
+
+[[mocks]]
+name = "gemini_think_sse"
+upstream = "gemini_up"
+status = 200
+sse_raw = [
+  "data: {\"responseId\":\"gem_s1\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Step A\",\"thought\":true}]}}]}\n\n",
+  "data: {\"responseId\":\"gem_s1\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Done!\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":20,\"candidatesTokenCount\":5,\"thoughtsTokenCount\":12,\"totalTokenCount\":37}}\n\n"
+]
+
+[[mocks]]
+name = "vertex_claude_ok"
+upstream = "vertex_claude_up"
+status = 200
+json = { id = "msg_vtx_1", type = "message", role = "assistant", model = "claude-sonnet-4@20250514", content = [{ type = "text", text = "hello from vertex claude" }], stop_reason = "end_turn", usage = { input_tokens = 12, output_tokens = 6 } }
+
+[[mocks]]
+name = "bedrock_converse_ok"
+upstream = "bedrock_up"
+status = 200
+json = { output = { message = { role = "assistant", content = [{ reasoningContent = { reasoningText = { text = "Bedrock thought" } } }, { text = "{\"status\":\"ok\"}" }] } }, stopReason = "end_turn", usage = { inputTokens = 50, cacheReadInputTokens = 200, cacheWriteInputTokens = 100, outputTokens = 20 } }
+
+[[mocks]]
+name = "bedrock_titan_embed_ok"
+upstream = "bedrock_up"
+status = 200
+json = { embedding = [0.1, 0.2, 0.3], inputTextTokenCount = 4 }
+
+[[mocks]]
+name = "bedrock_cohere_embed_ok"
+upstream = "bedrock_up"
+status = 200
+json = { embeddings = { float = [[0.5, 0.6], [0.7, 0.8]] } }
+
+[[mocks]]
+name = "openai_pool_seq"
+upstream = "openai_up"
+sequence = [
+  { status = 429, headers = { "retry-after" = "10" }, json = { error = { message = "rate limited key 0", type = "rate_limit_error" } } },
+  { status = 200, json = { id = "chatcmpl-p1", object = "chat.completion", model = "gpt-4o", choices = [{ index = 0, message = { role = "assistant", content = "served-by-key-1" }, finish_reason = "stop" }], usage = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 } } },
+  { status = 200, json = { id = "chatcmpl-p2", object = "chat.completion", model = "gpt-4o", choices = [{ index = 0, message = { role = "assistant", content = "still-key-1-while-cooled" }, finish_reason = "stop" }], usage = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 } } },
+  { status = 200, json = { id = "chatcmpl-p3", object = "chat.completion", model = "gpt-4o", choices = [{ index = 0, message = { role = "assistant", content = "key-0-recovered" }, finish_reason = "stop" }], usage = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 } } }
+]
+
+[[mocks]]
+name = "openai_pool_all_429"
+upstream = "openai_up"
+status = 429
+json = { error = { message = "all keys rate limited", type = "rate_limit_error" } }
+
+[[mocks]]
+name = "openai_byok_ok"
+upstream = "openai_up"
+status = 200
+json = { id = "chatcmpl-byok", object = "chat.completion", model = "gpt-4o-mini", choices = [{ index = 0, message = { role = "assistant", content = "byok-ok" }, finish_reason = "stop" }], usage = { prompt_tokens = 5, completion_tokens = 3, total_tokens = 8 } }
+
+# ---------------------------------------------------------------------------
+# Case 1: Built-in presets (Groq path + auth), default/override_params & drop_params
+# ---------------------------------------------------------------------------
+[[cases]]
+name = "presets_param_overrides_and_drop_params"
+use_mocks = ["groq_ok", "openai_o3_ok"]
+
+[[cases.steps]]
+name = "groq_preset_path_defaults_overrides_and_explicit_drop"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "groq-fast", max_tokens = 999, custom_unsupported_param = "strip-me", messages = [{ role = "user", content = "hi" }] } }
+expect = { status = 200, json_path = { "/choices/0/message/content" = "groq-ok" }, upstream_calls = [
+  { upstream = "groq_up", count = 1, path = "/openai/v1/chat/completions", headers = { authorization = "Bearer gsk-spec-secret" }, json_path = { "/model" = "llama-3.3-70b-versatile", "/temperature" = 0.25, "/max_tokens" = 256 } }
+] }
+
+[[cases.steps]]
+name = "openai_reasoning_model_drop_params_normalizes_max_tokens_and_temp"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "o3-norm", max_tokens = 500, temperature = 0.8, top_k = 50, messages = [{ role = "user", content = "reason" }] } }
+expect = { status = 200, json_path = { "/choices/0/message/content" = "o3-ok" }, upstream_calls = [
+  { upstream = "openai_up", count = 1, path = "/v1/chat/completions", headers = { authorization = "Bearer sk-norm-secret" }, json_path = { "/max_completion_tokens" = 500 } }
+], metrics_delta = { "shunt_ai_tokens_total{provider=\"openai_norm\",model=\"o3-mini\",kind=\"reasoning\"}" = 25 } }
+
+# ---------------------------------------------------------------------------
+# Case 2: Reasoning, json_schema, cache_control, cache_write & tiered >200k cost
+# ---------------------------------------------------------------------------
+[[cases]]
+name = "anthropic_reasoning_json_schema_cache_write_and_tiered_pricing"
+use_mocks = ["anthropic_think_cache_ok"]
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "claude-reason", reasoning_effort = "medium", temperature = 0.6, response_format = { type = "json_schema", json_schema = { name = "ans", schema = { type = "object", properties = { answer = { type = "integer" } } } } }, messages = [{ role = "system", content = "System", cache_control = { type = "ephemeral" } }, { role = "user", content = "6*7?" }] } }
+expect = { status = 200, json_path = { "/choices/0/message/reasoning_content" = "Checking math...", "/choices/0/message/content" = "{\"answer\":42}", "/usage/prompt_tokens" = 250000, "/usage/prompt_tokens_details/cached_tokens" = 100000, "/usage/prompt_tokens_details/cache_creation_tokens" = 50000 }, upstream_calls = [
+  { upstream = "anthropic_up", count = 1, path = "/v1/messages", headers = { "x-api-key" = "sk-ant-spec-secret" }, json_path = { "/thinking/type" = "enabled", "/thinking/budget_tokens" = 4096, "/output_config/format/type" = "json_schema", "/system/0/cache_control/type" = "ephemeral" } }
+], metrics_delta = { "shunt_ai_tokens_total{provider=\"anthropic\",model=\"claude-sonnet-4-20250514\",kind=\"cache_read\"}" = 100000, "shunt_ai_tokens_total{provider=\"anthropic\",model=\"claude-sonnet-4-20250514\",kind=\"cache_write\"}" = 50000 } }
+
+# ---------------------------------------------------------------------------
+# Case 3: Gemini thinkingConfig + Anthropic /v1/messages ingress <-> Gemini thinking SSE
+# ---------------------------------------------------------------------------
+[[cases]]
+name = "gemini_reasoning_and_anthropic_ingress_thinking_translation"
+use_mocks = ["gemini_think_ok"]
+request = { method = "POST", path = "/v1/messages", json = { model = "gemini-reason", max_tokens = 2048, thinking = { type = "enabled", budget_tokens = 2048 }, messages = [{ role = "user", content = "Think about it" }] } }
+expect = { status = 200, json_path = { "/content/0/type" = "thinking", "/content/0/thinking" = "Thinking deeply", "/content/1/type" = "text", "/content/1/text" = "Final answer" }, upstream_calls = [
+  { upstream = "gemini_up", count = 1, headers = { "x-goog-api-key" = "AIza-spec-secret" }, json_path = { "/generationConfig/thinkingConfig/thinkingBudget" = 2048, "/generationConfig/thinkingConfig/includeThoughts" = true } }
+] }
+
+[[cases]]
+name = "anthropic_ingress_streaming_thinking_deltas_from_gemini"
+use_mocks = ["gemini_think_sse"]
+request = { method = "POST", path = "/v1/messages", json = { model = "gemini-reason", max_tokens = 2048, stream = true, thinking = { type = "enabled", budget_tokens = 1024 }, messages = [{ role = "user", content = "Stream thought" }] } }
+expect = { status = 200, sse_contains_text = "thinking_delta" }
+
+# ---------------------------------------------------------------------------
+# Case 4: Claude on Google Cloud Vertex AI (rawPredict + body anthropic_version)
+# ---------------------------------------------------------------------------
+[[cases]]
+name = "claude_on_vertex_ai_raw_predict"
+use_mocks = ["vertex_claude_ok"]
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "vertex-claude", messages = [{ role = "user", content = "hi vertex" }] } }
+expect = { status = 200, json_path = { "/choices/0/message/content" = "hello from vertex claude" }, upstream_calls = [
+  { upstream = "vertex_claude_up", count = 1, path = "/v1/projects/shunt-proj/locations/us-east5/publishers/anthropic/models/claude-sonnet-4%4020250514:rawPredict", headers = { authorization = "Bearer ya29.vertex-secret" }, json_path = { "/anthropic_version" = "vertex-2023-10-16" } }
+] }
+
+# ---------------------------------------------------------------------------
+# Case 5: Bedrock cachePoint, json_schema, reasoningContent & Titan/Cohere Embeddings
+# ---------------------------------------------------------------------------
+[[cases]]
+name = "bedrock_converse_parity_and_embeddings"
+use_mocks = ["bedrock_converse_ok"]
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "bedrock-claude", reasoning_effort = "low", response_format = { type = "json_schema", json_schema = { name = "status_obj", schema = { type = "object", properties = { status = { type = "string" } } } } }, messages = [{ role = "system", content = "Be strict", cache_control = { type = "ephemeral" } }, { role = "user", content = "Check" }] } }
+expect = { status = 200, json_path = { "/choices/0/message/reasoning_content" = "Bedrock thought", "/choices/0/message/content" = "{\"status\":\"ok\"}", "/usage/prompt_tokens" = 350, "/usage/prompt_tokens_details/cached_tokens" = 200, "/usage/prompt_tokens_details/cache_creation_tokens" = 100 }, upstream_calls = [
+  { upstream = "bedrock_up", count = 1, path = "/model/anthropic.claude-sonnet-4-20250514-v1%3A0/converse", headers_contains = { authorization = "AWS4-HMAC-SHA256" }, json_path = { "/system/1/cachePoint/type" = "default", "/outputConfig/textFormat/type" = "json_schema", "/additionalModelRequestFields/thinking/budget_tokens" = 1024 } }
+] }
+
+[[cases]]
+name = "bedrock_titan_embeddings"
+use_mocks = ["bedrock_titan_embed_ok"]
+request = { method = "POST", path = "/v1/embeddings", json = { model = "bedrock-titan", input = "hello bedrock", dimensions = 256 } }
+expect = { status = 200, json_path = { "/object" = "list", "/data/0/embedding/2" = 0.3, "/usage/prompt_tokens" = 4 }, upstream_calls = [
+  { upstream = "bedrock_up", count = 1, path = "/model/amazon.titan-embed-text-v2%3A0/invoke", json_path = { "/inputText" = "hello bedrock", "/dimensions" = 256 } }
+] }
+
+[[cases]]
+name = "bedrock_cohere_batch_embeddings"
+use_mocks = ["bedrock_cohere_embed_ok"]
+request = { method = "POST", path = "/v1/embeddings", json = { model = "bedrock-cohere", input = ["alpha", "beta"] } }
+expect = { status = 200, json_path = { "/object" = "list", "/data/1/embedding/1" = 0.8 }, upstream_calls = [
+  { upstream = "bedrock_up", count = 1, path = "/model/cohere.embed-english-v3/invoke", json_path = { "/texts/0" = "alpha", "/texts/1" = "beta" } }
+] }
+
+# ---------------------------------------------------------------------------
+# Case 6: Multi-key pool 429 rotation, ManualClock recovery & fallback when exhausted
+# ---------------------------------------------------------------------------
+[[cases]]
+name = "multi_key_pool_429_rotation_and_clock_recovery"
+use_mocks = ["openai_pool_seq"]
+
+[[cases.steps]]
+name = "key_0_429_rotates_immediately_to_key_1"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "pooled-smart", messages = [{ role = "user", content = "req1" }] } }
+expect = { status = 200, headers = { "x-shunt-provider" = "openai_pool", "x-shunt-key-index" = "1", "x-shunt-attempt" = "2" }, json_path = { "/choices/0/message/content" = "served-by-key-1" }, snapshot_redacts = ["sk-pool-key-zero", "sk-pool-key-one"], upstream_calls = [
+  { upstream = "openai_up", count = 2, headers = { authorization = "Bearer sk-pool-key-one" } }
+] }
+
+[[cases.steps]]
+name = "next_request_skips_cooled_key_0"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "pooled-smart", messages = [{ role = "user", content = "req2" }] } }
+expect = { status = 200, headers = { "x-shunt-key-index" = "1", "x-shunt-attempt" = "1" }, json_path = { "/choices/0/message/content" = "still-key-1-while-cooled" }, upstream_calls = [
+  { upstream = "openai_up", count = 3, headers = { authorization = "Bearer sk-pool-key-one" } }
+] }
+
+[[cases.steps]]
+name = "key_0_recovers_after_cooldown_window"
+advance_clock_ms = 11000
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "pooled-smart", messages = [{ role = "user", content = "req3" }] } }
+expect = { status = 200, headers = { "x-shunt-key-index" = "0" }, json_path = { "/choices/0/message/content" = "key-0-recovered" }, upstream_calls = [
+  { upstream = "openai_up", count = 4, headers = { authorization = "Bearer sk-pool-key-zero" } }
+] }
+
+[[cases]]
+name = "multi_key_pool_exhaustion_fails_over_to_secondary_provider"
+use_mocks = ["openai_pool_all_429", "anthropic_think_cache_ok"]
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "pooled-smart", messages = [{ role = "user", content = "exhaust pool" }] } }
+expect = { status = 200, headers = { "x-shunt-provider" = "anthropic", "x-shunt-attempt" = "3" }, upstream_calls = [
+  { upstream = "openai_up", count = 2 },
+  { upstream = "anthropic_up", count = 1 }
+] }
+
+# ---------------------------------------------------------------------------
+# Case 7: Client BYOK passthrough auth
+# ---------------------------------------------------------------------------
+[[cases]]
+name = "client_byok_passthrough_auth"
+use_mocks = ["openai_byok_ok"]
+
+[[cases.steps]]
+name = "missing_client_key_returns_401"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "byok-openai", messages = [{ role = "user", content = "no key" }] } }
+expect = { status = 401, json_path = { "/error/code" = "missing_provider_api_key" } }
+
+[[cases.steps]]
+name = "client_key_forwarded_to_upstream"
+request = { method = "POST", path = "/v1/chat/completions", headers = { authorization = "Bearer sk-caller-own-key" }, json = { model = "byok-openai", messages = [{ role = "user", content = "with key" }] } }
+expect = { status = 200, json_path = { "/choices/0/message/content" = "byok-ok" }, upstream_calls = [
+  { upstream = "openai_up", count = 1, headers = { authorization = "Bearer sk-caller-own-key" } }
+] }

@@ -1135,6 +1135,8 @@ proptest! {
                 endpoint_override: None,
                 capabilities: Vec::new(),
                 weight: w,
+                default_params: std::collections::BTreeMap::new(),
+                override_params: std::collections::BTreeMap::new(),
             })
             .collect();
         let total_w: usize = weights.iter().map(|&w| w as usize).sum();
@@ -1176,6 +1178,8 @@ proptest! {
                 endpoint_override: None,
                 capabilities: Vec::new(),
                 weight: 1,
+                default_params: std::collections::BTreeMap::new(),
+                override_params: std::collections::BTreeMap::new(),
             });
         }
         let cat = shunt_ai::PricingCatalog::new(overrides, false, None).unwrap();
@@ -1294,5 +1298,96 @@ proptest! {
                 table.total_bytes()
             );
         }
+    }
+
+    #[test]
+    fn pricing_cache_write_and_tiered_invariants(
+        base_in in 0.0f64..100.0,
+        base_out in 0.0f64..200.0,
+        read_frac in 0.0f64..1.0,
+        write_mult in 1.0f64..2.0,
+        long_mult in 1.0f64..3.0,
+        prompt_tokens in 0u64..500_000,
+        cached_read in 0u64..600_000,
+        cache_write in 0u64..600_000,
+        completion_tokens in 0u64..50_000,
+    ) {
+        let read_rate = base_in * read_frac;
+        let write_rate = base_in * write_mult;
+        let pricing = shunt_ai::ModelPricing::new(base_in, base_out, Some(read_rate))
+            .with_cache_write(write_rate)
+            .with_long_context_tier(
+                200_000,
+                base_in * long_mult,
+                base_out * long_mult,
+                Some(read_rate * long_mult),
+                Some(write_rate * long_mult),
+            );
+        let cost = pricing.cost_nano_usd_detailed(
+            prompt_tokens,
+            cached_read,
+            cache_write,
+            completion_tokens,
+        );
+        prop_assert!(cost <= i64::MAX as u64);
+        // With cache_write >= base_in and cached_read == 0, cost >= no-cache-write cost.
+        let cost_write = pricing.cost_nano_usd_detailed(prompt_tokens, 0, cache_write, completion_tokens);
+        let cost_plain = pricing.cost_nano_usd_detailed(prompt_tokens, 0, 0, completion_tokens);
+        prop_assert!(cost_write >= cost_plain);
+        // Above threshold, tiered cost >= non-tiered cost for identical token counts.
+        if prompt_tokens > 200_000 {
+            let flat = shunt_ai::ModelPricing::new(base_in, base_out, Some(read_rate))
+                .with_cache_write(write_rate);
+            let flat_cost = flat.cost_nano_usd_detailed(
+                prompt_tokens,
+                cached_read,
+                cache_write,
+                completion_tokens,
+            );
+            prop_assert!(cost >= flat_cost);
+        }
+    }
+
+    #[test]
+    fn key_pool_selects_valid_index_and_skips_cooled_keys(
+        pool_len in 2usize..8,
+        cooled_idx in 0usize..8,
+        cooldown_ms in 100u64..10_000,
+        step_ms in 0u64..15_000,
+    ) {
+        let cooled = cooled_idx % pool_len;
+        let table = shunt_ai::KeyPoolTable::default();
+        let t0 = Duration::from_secs(1);
+        table.record_cooldown("p", pool_len, cooled, Duration::from_millis(cooldown_ms), t0);
+
+        // Before cooldown expires, cooled key is never selected while healthy keys exist.
+        for _ in 0..(pool_len * 2) {
+            let picked = table.select_key("p", pool_len, t0, &[]);
+            prop_assert!(picked < pool_len);
+            prop_assert_ne!(picked, cooled);
+        }
+
+        // At any later timestamp, selection is always in bounds.
+        let t1 = t0 + Duration::from_millis(step_ms);
+        let picked_later = table.select_key("p", pool_len, t1, &[]);
+        prop_assert!(picked_later < pool_len);
+        if step_ms >= cooldown_ms {
+            // Once expired, snapshot reports 0 cooled down keys.
+            let snaps = table.snapshot_pools(t1);
+            prop_assert_eq!(snaps[0].cooled_down_keys, 0);
+            prop_assert_eq!(snaps[0].healthy_keys, pool_len);
+        }
+    }
+
+    #[test]
+    fn bedrock_embeddings_and_vertex_never_panic(raw in prop::collection::vec(any::<u8>(), 0..512)) {
+        let _ = shunt_ai::openai_to_bedrock_embeddings_request(&raw, "amazon.titan-embed-text-v2:0");
+        let _ = shunt_ai::openai_to_bedrock_embeddings_request(&raw, "cohere.embed-english-v3");
+        let _ = shunt_ai::bedrock_embeddings_to_openai_response(
+            &raw,
+            http::StatusCode::OK,
+            "amazon.titan-embed-text-v2:0",
+        );
+        let _ = shunt_ai::adapt_anthropic_body_for_vertex(&raw, Some("vertex-2023-10-16"));
     }
 }

@@ -511,6 +511,8 @@ mod tests {
             endpoint_override: None,
             capabilities: Vec::new(),
             weight,
+            default_params: std::collections::BTreeMap::new(),
+            override_params: std::collections::BTreeMap::new(),
         }
     }
 

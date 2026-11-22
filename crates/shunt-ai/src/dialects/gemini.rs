@@ -11,6 +11,7 @@ use crate::dialects::{
     write_sse_json,
 };
 use crate::sse::{SseEvent, SseParser};
+use crate::translate::resolve_thinking_budget;
 use crate::types::percent_encode_path_segment;
 
 /// Builds the upstream URI path (and query) for a Gemini chat request.
@@ -229,6 +230,22 @@ pub fn openai_to_gemini_request(body: &[u8]) -> Result<Vec<u8>, String> {
                 }
             }
             _ => {}
+        }
+    }
+    if let Some(thinking_intent) = resolve_thinking_budget(obj) {
+        match thinking_intent {
+            Some(budget) => {
+                gen_cfg.insert(
+                    "thinkingConfig".to_owned(),
+                    json!({
+                        "thinkingBudget": budget,
+                        "includeThoughts": true,
+                    }),
+                );
+            }
+            None => {
+                gen_cfg.insert("thinkingConfig".to_owned(), json!({ "thinkingBudget": 0 }));
+            }
         }
     }
     if !gen_cfg.is_empty() {
@@ -455,6 +472,7 @@ pub fn gemini_to_openai_response(
         .and_then(|c| c.first());
 
     let mut text_parts: Vec<&str> = Vec::new();
+    let mut thought_parts: Vec<&str> = Vec::new();
     let mut tool_calls: Vec<Value> = Vec::new();
 
     if let Some(parts) = candidate
@@ -463,8 +481,18 @@ pub fn gemini_to_openai_response(
         .and_then(Value::as_array)
     {
         for (idx, part) in parts.iter().enumerate() {
+            let is_thought = part
+                .get("thought")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             if let Some(t) = part.get("text").and_then(Value::as_str) {
-                text_parts.push(t);
+                if is_thought {
+                    if !t.is_empty() {
+                        thought_parts.push(t);
+                    }
+                } else {
+                    text_parts.push(t);
+                }
             }
             if let Some(fc) = part.get("functionCall").and_then(Value::as_object) {
                 let name = fc.get("name").and_then(Value::as_str).unwrap_or("");
@@ -504,6 +532,12 @@ pub fn gemini_to_openai_response(
     } else {
         message.insert("content".to_owned(), Value::String(text_parts.join("")));
     }
+    if !thought_parts.is_empty() {
+        message.insert(
+            "reasoning_content".to_owned(),
+            Value::String(thought_parts.join("")),
+        );
+    }
     if !tool_calls.is_empty() {
         message.insert("tool_calls".to_owned(), Value::Array(tool_calls));
     }
@@ -513,14 +547,49 @@ pub fn gemini_to_openai_response(
         .and_then(|u| u.get("promptTokenCount"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let cached_tokens = usage_meta
+        .and_then(|u| u.get("cachedContentTokenCount"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let thoughts_tokens = usage_meta
+        .and_then(|u| u.get("thoughtsTokenCount"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let completion_tokens = usage_meta
         .and_then(|u| u.get("candidatesTokenCount"))
         .and_then(Value::as_u64)
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .saturating_add(thoughts_tokens);
     let total_tokens = usage_meta
         .and_then(|u| u.get("totalTokenCount"))
         .and_then(Value::as_u64)
         .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens));
+
+    let mut usage_obj = Map::new();
+    usage_obj.insert(
+        "prompt_tokens".to_owned(),
+        Value::Number(prompt_tokens.into()),
+    );
+    usage_obj.insert(
+        "completion_tokens".to_owned(),
+        Value::Number(completion_tokens.into()),
+    );
+    usage_obj.insert(
+        "total_tokens".to_owned(),
+        Value::Number(total_tokens.into()),
+    );
+    if cached_tokens > 0 {
+        usage_obj.insert(
+            "prompt_tokens_details".to_owned(),
+            json!({ "cached_tokens": cached_tokens }),
+        );
+    }
+    if thoughts_tokens > 0 {
+        usage_obj.insert(
+            "completion_tokens_details".to_owned(),
+            json!({ "reasoning_tokens": thoughts_tokens }),
+        );
+    }
 
     let openai_resp = json!({
         "id": id,
@@ -532,11 +601,7 @@ pub fn gemini_to_openai_response(
             "message": Value::Object(message),
             "finish_reason": finish_reason,
         }],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-        }
+        "usage": Value::Object(usage_obj),
     });
 
     serde_json::to_vec(&openai_resp)
@@ -581,7 +646,9 @@ pub struct GeminiSseTranslator {
     next_tool_call_index: usize,
     final_finish_reason: Option<&'static str>,
     prompt_tokens: Option<u64>,
+    cached_tokens: Option<u64>,
     completion_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
     total_tokens: Option<u64>,
     done_emitted: bool,
 }
@@ -598,7 +665,9 @@ impl GeminiSseTranslator {
             next_tool_call_index: 0,
             final_finish_reason: None,
             prompt_tokens: None,
+            cached_tokens: None,
             completion_tokens: None,
+            reasoning_tokens: None,
             total_tokens: None,
             done_emitted: false,
         }
@@ -644,22 +713,38 @@ impl GeminiSseTranslator {
 
             if self.prompt_tokens.is_some()
                 || self.completion_tokens.is_some()
+                || self.reasoning_tokens.is_some()
                 || self.total_tokens.is_some()
             {
                 let p = self.prompt_tokens.unwrap_or(0);
-                let c = self.completion_tokens.unwrap_or(0);
+                let r = self.reasoning_tokens.unwrap_or(0);
+                let c = self.completion_tokens.unwrap_or(0).saturating_add(r);
                 let t = self.total_tokens.unwrap_or_else(|| p.saturating_add(c));
+                let mut usage_obj = Map::new();
+                usage_obj.insert("prompt_tokens".to_owned(), Value::Number(p.into()));
+                usage_obj.insert("completion_tokens".to_owned(), Value::Number(c.into()));
+                usage_obj.insert("total_tokens".to_owned(), Value::Number(t.into()));
+                if let Some(cached) = self.cached_tokens
+                    && cached > 0
+                {
+                    usage_obj.insert(
+                        "prompt_tokens_details".to_owned(),
+                        json!({ "cached_tokens": cached }),
+                    );
+                }
+                if r > 0 {
+                    usage_obj.insert(
+                        "completion_tokens_details".to_owned(),
+                        json!({ "reasoning_tokens": r }),
+                    );
+                }
                 emit_openai_chunk(
                     &mut out,
                     &self.id,
                     self.created,
                     &self.model,
                     json!([]),
-                    Some(json!({
-                        "prompt_tokens": p,
-                        "completion_tokens": c,
-                        "total_tokens": t,
-                    })),
+                    Some(Value::Object(usage_obj)),
                 );
             }
 
@@ -698,8 +783,14 @@ impl GeminiSseTranslator {
             if let Some(p) = u.get("promptTokenCount").and_then(Value::as_u64) {
                 self.prompt_tokens = Some(p);
             }
+            if let Some(cached) = u.get("cachedContentTokenCount").and_then(Value::as_u64) {
+                self.cached_tokens = Some(cached);
+            }
             if let Some(c) = u.get("candidatesTokenCount").and_then(Value::as_u64) {
                 self.completion_tokens = Some(c);
+            }
+            if let Some(r) = u.get("thoughtsTokenCount").and_then(Value::as_u64) {
+                self.reasoning_tokens = Some(r);
             }
             if let Some(t) = u.get("totalTokenCount").and_then(Value::as_u64) {
                 self.total_tokens = Some(t);
@@ -736,9 +827,18 @@ impl GeminiSseTranslator {
             .and_then(Value::as_array)
         {
             for part in parts {
+                let is_thought = part
+                    .get("thought")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 if let Some(text) = part.get("text").and_then(Value::as_str)
                     && !text.is_empty()
                 {
+                    let delta = if is_thought {
+                        json!({ "reasoning_content": text })
+                    } else {
+                        json!({ "content": text })
+                    };
                     emit_openai_chunk(
                         out,
                         &self.id,
@@ -746,7 +846,7 @@ impl GeminiSseTranslator {
                         &self.model,
                         json!([{
                             "index": 0,
-                            "delta": { "content": text },
+                            "delta": delta,
                             "finish_reason": Value::Null,
                         }]),
                         None,
@@ -1095,5 +1195,64 @@ mod tests {
         assert_eq!(resp["object"], "list");
         assert_eq!(resp["data"][0]["index"], 0);
         assert_eq!(resp["data"][1]["embedding"][1], 0.4);
+    }
+
+    #[test]
+    fn translates_gemini_reasoning_request_and_thought_parts() {
+        let req = json!({
+            "model": "gemini-2.5-pro",
+            "reasoning_effort": "medium",
+            "messages": [{ "role": "user", "content": "Prove it." }]
+        });
+        let out_bytes = openai_to_gemini_request(&serde_json::to_vec(&req).unwrap()).unwrap();
+        let out: Value = serde_json::from_slice(&out_bytes).unwrap();
+        assert_eq!(
+            out["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            4096
+        );
+        assert_eq!(
+            out["generationConfig"]["thinkingConfig"]["includeThoughts"],
+            true
+        );
+
+        let gem_resp = json!({
+            "responseId": "gem_t1",
+            "modelVersion": "gemini-2.5-pro",
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        { "text": "Let me think...", "thought": true },
+                        { "text": "QED." }
+                    ]
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 50,
+                "cachedContentTokenCount": 20,
+                "candidatesTokenCount": 10,
+                "thoughtsTokenCount": 30,
+                "totalTokenCount": 90
+            }
+        });
+        let oa_bytes = gemini_to_openai_response(
+            &serde_json::to_vec(&gem_resp).unwrap(),
+            StatusCode::OK,
+            "gemini-2.5-pro",
+        )
+        .unwrap();
+        let oa: Value = serde_json::from_slice(&oa_bytes).unwrap();
+        assert_eq!(
+            oa["choices"][0]["message"]["reasoning_content"],
+            "Let me think..."
+        );
+        assert_eq!(oa["choices"][0]["message"]["content"], "QED.");
+        assert_eq!(oa["usage"]["completion_tokens"], 40);
+        assert_eq!(
+            oa["usage"]["completion_tokens_details"]["reasoning_tokens"],
+            30
+        );
+        assert_eq!(oa["usage"]["prompt_tokens_details"]["cached_tokens"], 20);
     }
 }

@@ -1,10 +1,342 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use shunt_plugin_sdk::{Bytes, StatusCode};
 
 use crate::sse::{SseEvent, SseParser};
+use crate::types::{ProviderDialect, percent_encode_path_segment};
+
+/// Parameter-dropping policy for `ai-provider-adapter` (LiteLLM-style `drop_params`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum DropParamsConfig {
+    /// When `true`, strips known unsupported cross-dialect parameters automatically.
+    Bool(bool),
+    /// Explicit list of top-level JSON parameter names to strip before forwarding/translation.
+    List(Vec<String>),
+}
+
+impl Default for DropParamsConfig {
+    fn default() -> Self {
+        Self::Bool(false)
+    }
+}
+
+impl DropParamsConfig {
+    pub fn is_disabled(&self) -> bool {
+        match self {
+            DropParamsConfig::Bool(b) => !*b,
+            DropParamsConfig::List(keys) => keys.is_empty(),
+        }
+    }
+}
+
+/// Maps OpenAI-style `reasoning_effort` strings to canonical thinking token budgets.
+pub fn reasoning_effort_to_budget(effort: &str) -> Option<u64> {
+    match effort.trim().to_ascii_lowercase().as_str() {
+        "none" | "disabled" | "off" => None,
+        "minimal" | "low" => Some(1_024),
+        "medium" => Some(4_096),
+        "high" => Some(16_384),
+        "xhigh" | "max" => Some(32_768),
+        _ => Some(4_096),
+    }
+}
+
+/// Maps an explicit thinking token budget to an OpenAI-style `reasoning_effort` tier.
+pub const fn budget_to_reasoning_effort(budget: u64) -> &'static str {
+    if budget == 0 {
+        "none"
+    } else if budget <= 2_048 {
+        "low"
+    } else if budget <= 10_000 {
+        "medium"
+    } else {
+        "high"
+    }
+}
+
+/// Extracts unified thinking/reasoning intent from a canonical Chat Completions JSON object.
+///
+/// - `None`: caller did not specify reasoning/thinking.
+/// - `Some(None)`: caller explicitly disabled reasoning (`reasoning_effort = "none"` or `thinking.type = "disabled"`).
+/// - `Some(Some(budget_tokens))`: caller enabled reasoning with resolved token budget.
+pub(crate) fn resolve_thinking_budget(obj: &Map<String, Value>) -> Option<Option<u64>> {
+    if let Some(thinking) = obj.get("thinking").and_then(Value::as_object) {
+        match thinking.get("type").and_then(Value::as_str) {
+            Some("disabled") => return Some(None),
+            Some("enabled") => {
+                let budget = thinking
+                    .get("budget_tokens")
+                    .and_then(Value::as_u64)
+                    .filter(|&b| b > 0)
+                    .unwrap_or(4_096);
+                return Some(Some(budget));
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(effort) = obj
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            obj.get("reasoning")
+                .and_then(|r| r.get("effort"))
+                .and_then(Value::as_str)
+        })
+    {
+        return Some(reasoning_effort_to_budget(effort));
+    }
+
+    None
+}
+
+fn is_openai_reasoning_model(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    lower == "o1"
+        || lower.starts_with("o1-")
+        || lower == "o3"
+        || lower.starts_with("o3-")
+        || lower.starts_with("o4-")
+        || lower.starts_with("gpt-5")
+}
+
+/// Recursively strips Anthropic-style `cache_control` keys from `messages[]` and `tools[]`
+/// so OpenAI-compatible upstreams do not reject cross-provider requests with `400`.
+pub(crate) fn strip_cache_control_from_openai_obj(obj: &mut Map<String, Value>) -> bool {
+    let mut changed = false;
+    if let Some(Value::Array(messages)) = obj.get_mut("messages") {
+        for msg in messages {
+            if let Some(m) = msg.as_object_mut() {
+                if m.remove("cache_control").is_some() {
+                    changed = true;
+                }
+                if let Some(Value::Array(parts)) = m.get_mut("content") {
+                    for part in parts {
+                        if let Some(p) = part.as_object_mut()
+                            && p.remove("cache_control").is_some()
+                        {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(Value::Array(tools)) = obj.get_mut("tools") {
+        for tool in tools {
+            if let Some(t) = tool.as_object_mut() {
+                if t.remove("cache_control").is_some() {
+                    changed = true;
+                }
+                if let Some(f) = t.get_mut("function").and_then(Value::as_object_mut)
+                    && f.remove("cache_control").is_some()
+                {
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
+}
+
+/// Applies provider/target `default_params`, `override_params`, and `drop_params` to a JSON
+/// request body before dialect translation or forwarding.
+///
+/// Precedence: client body < provider defaults < target defaults < provider overrides < target overrides < drop_params.
+/// Returns `Ok(None)` when no transforms are configured or no fields changed (preserving zero-copy).
+#[allow(clippy::too_many_arguments)]
+pub fn apply_request_param_transforms(
+    body: &[u8],
+    provider_defaults: &BTreeMap<String, Value>,
+    target_defaults: &BTreeMap<String, Value>,
+    provider_overrides: &BTreeMap<String, Value>,
+    target_overrides: &BTreeMap<String, Value>,
+    drop_params: &DropParamsConfig,
+    dialect: ProviderDialect,
+    target_model: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    if provider_defaults.is_empty()
+        && target_defaults.is_empty()
+        && provider_overrides.is_empty()
+        && target_overrides.is_empty()
+        && drop_params.is_disabled()
+    {
+        return Ok(None);
+    }
+
+    let mut val: Value =
+        serde_json::from_slice(body).map_err(|e| format!("invalid JSON request body: {e}"))?;
+    let obj = val
+        .as_object_mut()
+        .ok_or_else(|| "request body must be a JSON object".to_owned())?;
+
+    let mut changed = false;
+
+    // Defaults: target defaults take precedence over provider defaults when client omits key.
+    for (k, v) in target_defaults {
+        let missing = obj.get(k).is_none_or(Value::is_null);
+        if missing {
+            obj.insert(k.clone(), v.clone());
+            changed = true;
+        }
+    }
+    for (k, v) in provider_defaults {
+        let missing = obj.get(k).is_none_or(Value::is_null);
+        if missing {
+            obj.insert(k.clone(), v.clone());
+            changed = true;
+        }
+    }
+
+    // Overrides: provider overrides first, then target overrides win.
+    for (k, v) in provider_overrides {
+        if obj.get(k) != Some(v) {
+            obj.insert(k.clone(), v.clone());
+            changed = true;
+        }
+    }
+    for (k, v) in target_overrides {
+        if obj.get(k) != Some(v) {
+            obj.insert(k.clone(), v.clone());
+            changed = true;
+        }
+    }
+
+    // Drop unsupported or explicitly stripped parameters.
+    match drop_params {
+        DropParamsConfig::Bool(false) => {}
+        DropParamsConfig::List(keys) => {
+            for k in keys {
+                if obj.remove(k).is_some() {
+                    changed = true;
+                }
+            }
+        }
+        DropParamsConfig::Bool(true) => {
+            let strip_keys: &[&str] = match dialect {
+                ProviderDialect::OpenAiCompatible | ProviderDialect::AzureOpenAi => &[
+                    "thinking",
+                    "anthropic_version",
+                    "top_k",
+                    "output_config",
+                    "safety_settings",
+                    "additionalModelRequestFields",
+                ],
+                ProviderDialect::Anthropic => &[
+                    "frequency_penalty",
+                    "presence_penalty",
+                    "logprobs",
+                    "top_logprobs",
+                    "n",
+                    "seed",
+                    "logit_bias",
+                    "parallel_tool_calls",
+                    "stream_options",
+                    "prediction",
+                    "service_tier",
+                    "store",
+                    "audio",
+                    "modalities",
+                    "web_search_options",
+                ],
+                ProviderDialect::Gemini | ProviderDialect::Bedrock => &[
+                    "frequency_penalty",
+                    "presence_penalty",
+                    "logprobs",
+                    "top_logprobs",
+                    "n",
+                    "seed",
+                    "logit_bias",
+                    "service_tier",
+                    "store",
+                    "stream_options",
+                ],
+            };
+            for &k in strip_keys {
+                if obj.remove(k).is_some() {
+                    changed = true;
+                }
+            }
+            if matches!(
+                dialect,
+                ProviderDialect::OpenAiCompatible | ProviderDialect::AzureOpenAi
+            ) {
+                if strip_cache_control_from_openai_obj(obj) {
+                    changed = true;
+                }
+                if is_openai_reasoning_model(target_model) {
+                    if let Some(mt) = obj.remove("max_tokens") {
+                        if !obj.contains_key("max_completion_tokens") {
+                            obj.insert("max_completion_tokens".to_owned(), mt);
+                        }
+                        changed = true;
+                    }
+                    if obj.remove("temperature").is_some() {
+                        changed = true;
+                    }
+                    if obj.remove("top_p").is_some() {
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if !changed {
+        return Ok(None);
+    }
+
+    serde_json::to_vec(&val)
+        .map(Some)
+        .map_err(|e| format!("failed to serialize normalized AI request: {e}"))
+}
+
+/// Builds the upstream URI path for Claude on Google Cloud Vertex AI (`rawPredict` / `streamRawPredict`).
+pub fn vertex_anthropic_path(project: &str, location: &str, model: &str, stream: bool) -> String {
+    let action = if stream {
+        "streamRawPredict"
+    } else {
+        "rawPredict"
+    };
+    format!(
+        "/v1/projects/{}/locations/{}/publishers/anthropic/models/{}:{}",
+        percent_encode_path_segment(project),
+        percent_encode_path_segment(location),
+        percent_encode_path_segment(model),
+        action
+    )
+}
+
+/// Adapts an Anthropic Messages JSON body for Google Cloud Vertex AI:
+/// removes `"model"` (encoded in the Vertex URL path) and injects `"anthropic_version"`
+/// (defaulting to `"vertex-2023-10-16"`).
+pub fn adapt_anthropic_body_for_vertex(
+    body: &[u8],
+    anthropic_version: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let mut val: Value =
+        serde_json::from_slice(body).map_err(|e| format!("invalid JSON request body: {e}"))?;
+    let obj = val
+        .as_object_mut()
+        .ok_or_else(|| "request body must be a JSON object".to_owned())?;
+
+    obj.remove("model");
+    let ver = match anthropic_version {
+        Some(v) if !v.trim().is_empty() && v != "2023-06-01" => v,
+        _ => "vertex-2023-10-16",
+    };
+    obj.insert(
+        "anthropic_version".to_owned(),
+        Value::String(ver.to_owned()),
+    );
+
+    serde_json::to_vec(&val)
+        .map_err(|e| format!("failed to serialize Vertex Anthropic request: {e}"))
+}
 
 fn unix_timestamp_secs() -> u64 {
     SystemTime::now()
@@ -53,6 +385,15 @@ pub fn rewrite_openai_request(
             }
             _ => {}
         }
+    }
+
+    // Strip Anthropic-specific cross-dialect annotations (e.g., `cache_control`, `thinking`)
+    // that would trigger 400 errors on OpenAI-compatible upstreams.
+    if strip_cache_control_from_openai_obj(obj) {
+        changed = true;
+    }
+    if obj.remove("thinking").is_some() {
+        changed = true;
     }
 
     if !changed {
@@ -104,7 +445,8 @@ pub fn openai_to_anthropic_request(
         .and_then(Value::as_array)
         .ok_or_else(|| "missing or invalid `messages` array".to_owned())?;
 
-    let mut system_parts: Vec<String> = Vec::new();
+    let mut system_blocks: Vec<Value> = Vec::new();
+    let mut system_has_cache_control = false;
     let mut anthropic_messages: Vec<(String, Vec<Value>)> = Vec::new();
 
     for msg in messages_val {
@@ -118,9 +460,42 @@ pub fn openai_to_anthropic_request(
 
         match role {
             "system" | "developer" => {
-                let text = extract_text_content(msg_obj.get("content"));
-                if !text.is_empty() {
-                    system_parts.push(text);
+                let msg_cc = msg_obj.get("cache_control").filter(|v| !v.is_null());
+                match msg_obj.get("content") {
+                    Some(Value::Array(parts)) => {
+                        for part in parts {
+                            if part.get("type").and_then(Value::as_str) == Some("text")
+                                && let Some(text) = part.get("text").and_then(Value::as_str)
+                                && !text.is_empty()
+                            {
+                                let mut blk = Map::new();
+                                blk.insert("type".to_owned(), Value::String("text".to_owned()));
+                                blk.insert("text".to_owned(), Value::String(text.to_owned()));
+                                if let Some(cc) = part
+                                    .get("cache_control")
+                                    .filter(|v| !v.is_null())
+                                    .or(msg_cc)
+                                {
+                                    blk.insert("cache_control".to_owned(), cc.clone());
+                                    system_has_cache_control = true;
+                                }
+                                system_blocks.push(Value::Object(blk));
+                            }
+                        }
+                    }
+                    other => {
+                        let text = extract_text_content(other);
+                        if !text.is_empty() {
+                            let mut blk = Map::new();
+                            blk.insert("type".to_owned(), Value::String("text".to_owned()));
+                            blk.insert("text".to_owned(), Value::String(text));
+                            if let Some(cc) = msg_cc {
+                                blk.insert("cache_control".to_owned(), cc.clone());
+                                system_has_cache_control = true;
+                            }
+                            system_blocks.push(Value::Object(blk));
+                        }
+                    }
                 }
             }
             "tool" => {
@@ -178,9 +553,10 @@ pub fn openai_to_anthropic_request(
     let formatted_messages: Vec<Value> = anthropic_messages
         .into_iter()
         .map(|(role, blocks)| {
-            // Keep simple single-text messages compact when there's just one text block.
+            // Keep simple single-text messages compact when there's just one text block without cache_control.
             if blocks.len() == 1
                 && blocks[0].get("type").and_then(Value::as_str) == Some("text")
+                && blocks[0].get("cache_control").is_none()
                 && let Some(text) = blocks[0].get("text").and_then(Value::as_str)
             {
                 json!({ "role": role, "content": text })
@@ -190,7 +566,7 @@ pub fn openai_to_anthropic_request(
         })
         .collect();
 
-    let max_tokens = obj
+    let mut max_tokens = obj
         .get("max_tokens")
         .and_then(Value::as_u64)
         .filter(|&n| n > 0)
@@ -201,16 +577,81 @@ pub fn openai_to_anthropic_request(
         })
         .unwrap_or_else(|| default_max_tokens.max(1));
 
+    // Reasoning / extended thinking translation.
+    let thinking_intent = resolve_thinking_budget(obj);
+    let thinking_enabled = matches!(thinking_intent, Some(Some(_)));
+    if let Some(Some(budget)) = thinking_intent
+        && max_tokens <= budget
+    {
+        max_tokens = budget.saturating_add(1_024);
+    }
+
+    // Structured outputs (`response_format`).
+    let mut output_config: Option<Value> = None;
+    if let Some(rf) = obj.get("response_format").and_then(Value::as_object) {
+        match rf.get("type").and_then(Value::as_str) {
+            Some("json_schema") => {
+                if let Some(schema) = rf
+                    .get("json_schema")
+                    .and_then(|js| js.get("schema"))
+                    .or_else(|| rf.get("schema"))
+                {
+                    output_config = Some(json!({
+                        "format": {
+                            "type": "json_schema",
+                            "schema": schema,
+                        }
+                    }));
+                }
+            }
+            Some("json_object") => {
+                system_blocks.push(json!({
+                    "type": "text",
+                    "text": "Respond with a valid JSON object only."
+                }));
+            }
+            _ => {}
+        }
+    } else if let Some(oc) = obj.get("output_config").filter(|v| v.is_object()) {
+        output_config = Some(oc.clone());
+    }
+
     let mut out = Map::new();
     out.insert("model".to_owned(), Value::String(target_model.to_owned()));
     out.insert("max_tokens".to_owned(), Value::Number(max_tokens.into()));
     out.insert("messages".to_owned(), Value::Array(formatted_messages));
 
-    if !system_parts.is_empty() {
-        out.insert(
-            "system".to_owned(),
-            Value::String(system_parts.join("\n\n")),
-        );
+    if !system_blocks.is_empty() {
+        if system_has_cache_control {
+            out.insert("system".to_owned(), Value::Array(system_blocks));
+        } else {
+            let joined = system_blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if !joined.is_empty() {
+                out.insert("system".to_owned(), Value::String(joined));
+            }
+        }
+    }
+
+    if let Some(intent) = thinking_intent {
+        match intent {
+            Some(budget) => {
+                out.insert(
+                    "thinking".to_owned(),
+                    json!({ "type": "enabled", "budget_tokens": budget }),
+                );
+            }
+            None => {
+                out.insert("thinking".to_owned(), json!({ "type": "disabled" }));
+            }
+        }
+    }
+
+    if let Some(oc) = output_config {
+        out.insert("output_config".to_owned(), oc);
     }
 
     if let Some(stream) = obj.get("stream").and_then(Value::as_bool)
@@ -219,11 +660,14 @@ pub fn openai_to_anthropic_request(
         out.insert("stream".to_owned(), Value::Bool(true));
     }
 
-    if let Some(temp) = obj.get("temperature").filter(|v| !v.is_null()) {
-        out.insert("temperature".to_owned(), temp.clone());
-    }
-    if let Some(top_p) = obj.get("top_p").filter(|v| !v.is_null()) {
-        out.insert("top_p".to_owned(), top_p.clone());
+    // Anthropic rejects non-default temperature/top_p when extended thinking is enabled.
+    if !thinking_enabled {
+        if let Some(temp) = obj.get("temperature").filter(|v| !v.is_null()) {
+            out.insert("temperature".to_owned(), temp.clone());
+        }
+        if let Some(top_p) = obj.get("top_p").filter(|v| !v.is_null()) {
+            out.insert("top_p".to_owned(), top_p.clone());
+        }
     }
 
     if let Some(stop) = obj.get("stop") {
@@ -263,6 +707,13 @@ pub fn openai_to_anthropic_request(
                     .cloned()
                     .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
                 tool.insert("input_schema".to_owned(), schema);
+                if let Some(cc) = t
+                    .get("cache_control")
+                    .or_else(|| func.get("cache_control"))
+                    .filter(|v| !v.is_null())
+                {
+                    tool.insert("cache_control".to_owned(), cc.clone());
+                }
                 Some(Value::Object(tool))
             })
             .collect();
@@ -350,7 +801,13 @@ fn convert_content_to_blocks(content: Option<&Value>) -> Vec<Value> {
                 match part.get("type").and_then(Value::as_str) {
                     Some("text") => {
                         if let Some(t) = part.get("text").and_then(Value::as_str) {
-                            out.push(json!({ "type": "text", "text": t }));
+                            let mut blk = Map::new();
+                            blk.insert("type".to_owned(), Value::String("text".to_owned()));
+                            blk.insert("text".to_owned(), Value::String(t.to_owned()));
+                            if let Some(cc) = part.get("cache_control").filter(|v| !v.is_null()) {
+                                blk.insert("cache_control".to_owned(), cc.clone());
+                            }
+                            out.push(Value::Object(blk));
                         }
                     }
                     Some("image_url") => {
@@ -359,27 +816,33 @@ fn convert_content_to_blocks(content: Option<&Value>) -> Vec<Value> {
                             .and_then(|u| u.get("url"))
                             .and_then(Value::as_str)
                         {
+                            let mut blk = Map::new();
+                            blk.insert("type".to_owned(), Value::String("image".to_owned()));
                             if let Some(rest) = url.strip_prefix("data:")
                                 && let Some((meta, data)) = rest.split_once(',')
                                 && let Some(media_type) = meta.strip_suffix(";base64")
                             {
-                                out.push(json!({
-                                    "type": "image",
-                                    "source": {
+                                blk.insert(
+                                    "source".to_owned(),
+                                    json!({
                                         "type": "base64",
                                         "media_type": media_type,
                                         "data": data,
-                                    }
-                                }));
+                                    }),
+                                );
                             } else {
-                                out.push(json!({
-                                    "type": "image",
-                                    "source": {
+                                blk.insert(
+                                    "source".to_owned(),
+                                    json!({
                                         "type": "url",
                                         "url": url,
-                                    }
-                                }));
+                                    }),
+                                );
                             }
+                            if let Some(cc) = part.get("cache_control").filter(|v| !v.is_null()) {
+                                blk.insert("cache_control".to_owned(), cc.clone());
+                            }
+                            out.push(Value::Object(blk));
                         }
                     }
                     _ => {}
@@ -442,6 +905,7 @@ pub fn anthropic_to_openai_response(
         .unwrap_or(fallback_model);
 
     let mut text_parts: Vec<&str> = Vec::new();
+    let mut thinking_parts: Vec<&str> = Vec::new();
     let mut tool_calls: Vec<Value> = Vec::new();
 
     if let Some(content) = val.get("content").and_then(Value::as_array) {
@@ -450,6 +914,13 @@ pub fn anthropic_to_openai_response(
                 Some("text") => {
                     if let Some(t) = block.get("text").and_then(Value::as_str) {
                         text_parts.push(t);
+                    }
+                }
+                Some("thinking") => {
+                    if let Some(t) = block.get("thinking").and_then(Value::as_str)
+                        && !t.is_empty()
+                    {
+                        thinking_parts.push(t);
                     }
                 }
                 Some("tool_use") => {
@@ -483,20 +954,66 @@ pub fn anthropic_to_openai_response(
     } else {
         message.insert("content".to_owned(), Value::String(text_parts.join("")));
     }
+    if !thinking_parts.is_empty() {
+        message.insert(
+            "reasoning_content".to_owned(),
+            Value::String(thinking_parts.join("")),
+        );
+    }
     if !tool_calls.is_empty() {
         message.insert("tool_calls".to_owned(), Value::Array(tool_calls));
     }
 
-    let input_tokens = val
-        .get("usage")
+    let usage_in = val.get("usage");
+    let raw_input_tokens = usage_in
         .and_then(|u| u.get("input_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let output_tokens = val
-        .get("usage")
+    let cache_read_tokens = usage_in
+        .and_then(|u| u.get("cache_read_input_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cache_creation_tokens = usage_in
+        .and_then(|u| u.get("cache_creation_input_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let prompt_tokens = raw_input_tokens
+        .saturating_add(cache_read_tokens)
+        .saturating_add(cache_creation_tokens);
+    let output_tokens = usage_in
         .and_then(|u| u.get("output_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
+
+    let mut usage_obj = Map::new();
+    usage_obj.insert(
+        "prompt_tokens".to_owned(),
+        Value::Number(prompt_tokens.into()),
+    );
+    usage_obj.insert(
+        "completion_tokens".to_owned(),
+        Value::Number(output_tokens.into()),
+    );
+    usage_obj.insert(
+        "total_tokens".to_owned(),
+        Value::Number(prompt_tokens.saturating_add(output_tokens).into()),
+    );
+    if cache_read_tokens > 0 || cache_creation_tokens > 0 {
+        let mut details = Map::new();
+        if cache_read_tokens > 0 {
+            details.insert(
+                "cached_tokens".to_owned(),
+                Value::Number(cache_read_tokens.into()),
+            );
+        }
+        if cache_creation_tokens > 0 {
+            details.insert(
+                "cache_creation_tokens".to_owned(),
+                Value::Number(cache_creation_tokens.into()),
+            );
+        }
+        usage_obj.insert("prompt_tokens_details".to_owned(), Value::Object(details));
+    }
 
     let openai_resp = json!({
         "id": id,
@@ -510,11 +1027,7 @@ pub fn anthropic_to_openai_response(
                 "finish_reason": finish_reason,
             }
         ],
-        "usage": {
-            "prompt_tokens": input_tokens,
-            "completion_tokens": output_tokens,
-            "total_tokens": input_tokens.saturating_add(output_tokens),
-        }
+        "usage": Value::Object(usage_obj),
     });
 
     serde_json::to_vec(&openai_resp)
@@ -538,6 +1051,8 @@ pub struct AnthropicSseTranslator {
     model: String,
     created: u64,
     input_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
     output_tokens: u64,
     next_tool_call_index: usize,
     /// Maps Anthropic `content_block` index -> OpenAI `tool_calls` array index.
@@ -554,6 +1069,8 @@ impl AnthropicSseTranslator {
             model: fallback_model.into(),
             created: unix_timestamp_secs(),
             input_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
             output_tokens: 0,
             next_tool_call_index: 0,
             block_to_tool_index: HashMap::new(),
@@ -620,6 +1137,14 @@ impl AnthropicSseTranslator {
                         if let Some(inp) = u.get("input_tokens").and_then(Value::as_u64) {
                             self.input_tokens = inp;
                         }
+                        if let Some(cr) = u.get("cache_read_input_tokens").and_then(Value::as_u64) {
+                            self.cache_read_tokens = cr;
+                        }
+                        if let Some(cw) =
+                            u.get("cache_creation_input_tokens").and_then(Value::as_u64)
+                        {
+                            self.cache_creation_tokens = cw;
+                        }
                         if let Some(out_tok) = u.get("output_tokens").and_then(Value::as_u64) {
                             self.output_tokens = out_tok;
                         }
@@ -651,6 +1176,21 @@ impl AnthropicSseTranslator {
                                 json!([{
                                     "index": 0,
                                     "delta": { "content": text },
+                                    "finish_reason": Value::Null,
+                                }]),
+                                None,
+                            );
+                        }
+                    }
+                    Some("thinking") => {
+                        if let Some(thinking) = cb.get("thinking").and_then(Value::as_str)
+                            && !thinking.is_empty()
+                        {
+                            self.emit_chunk(
+                                out,
+                                json!([{
+                                    "index": 0,
+                                    "delta": { "reasoning_content": thinking },
                                     "finish_reason": Value::Null,
                                 }]),
                                 None,
@@ -706,6 +1246,21 @@ impl AnthropicSseTranslator {
                             );
                         }
                     }
+                    Some("thinking_delta") => {
+                        if let Some(thinking) = delta.get("thinking").and_then(Value::as_str)
+                            && !thinking.is_empty()
+                        {
+                            self.emit_chunk(
+                                out,
+                                json!([{
+                                    "index": 0,
+                                    "delta": { "reasoning_content": thinking },
+                                    "finish_reason": Value::Null,
+                                }]),
+                                None,
+                            );
+                        }
+                    }
                     Some("input_json_delta") => {
                         if let Some(partial) = delta.get("partial_json").and_then(Value::as_str) {
                             let tool_idx = *self.block_to_tool_index.get(&block_idx).unwrap_or(&0);
@@ -731,10 +1286,16 @@ impl AnthropicSseTranslator {
                 }
             }
             "message_delta" => {
-                if let Some(u) = payload.get("usage")
-                    && let Some(out_tok) = u.get("output_tokens").and_then(Value::as_u64)
-                {
-                    self.output_tokens = out_tok;
+                if let Some(u) = payload.get("usage") {
+                    if let Some(out_tok) = u.get("output_tokens").and_then(Value::as_u64) {
+                        self.output_tokens = out_tok;
+                    }
+                    if let Some(cr) = u.get("cache_read_input_tokens").and_then(Value::as_u64) {
+                        self.cache_read_tokens = cr;
+                    }
+                    if let Some(cw) = u.get("cache_creation_input_tokens").and_then(Value::as_u64) {
+                        self.cache_creation_tokens = cw;
+                    }
                 }
                 let stop_reason = payload
                     .get("delta")
@@ -753,12 +1314,40 @@ impl AnthropicSseTranslator {
                 );
 
                 // Emit standard OpenAI final usage chunk (matching stream_options.include_usage).
-                let usage = json!({
-                    "prompt_tokens": self.input_tokens,
-                    "completion_tokens": self.output_tokens,
-                    "total_tokens": self.input_tokens.saturating_add(self.output_tokens),
-                });
-                self.emit_chunk(out, json!([]), Some(usage));
+                let total_prompt = self
+                    .input_tokens
+                    .saturating_add(self.cache_read_tokens)
+                    .saturating_add(self.cache_creation_tokens);
+                let mut usage_obj = Map::new();
+                usage_obj.insert(
+                    "prompt_tokens".to_owned(),
+                    Value::Number(total_prompt.into()),
+                );
+                usage_obj.insert(
+                    "completion_tokens".to_owned(),
+                    Value::Number(self.output_tokens.into()),
+                );
+                usage_obj.insert(
+                    "total_tokens".to_owned(),
+                    Value::Number(total_prompt.saturating_add(self.output_tokens).into()),
+                );
+                if self.cache_read_tokens > 0 || self.cache_creation_tokens > 0 {
+                    let mut details = Map::new();
+                    if self.cache_read_tokens > 0 {
+                        details.insert(
+                            "cached_tokens".to_owned(),
+                            Value::Number(self.cache_read_tokens.into()),
+                        );
+                    }
+                    if self.cache_creation_tokens > 0 {
+                        details.insert(
+                            "cache_creation_tokens".to_owned(),
+                            Value::Number(self.cache_creation_tokens.into()),
+                        );
+                    }
+                    usage_obj.insert("prompt_tokens_details".to_owned(), Value::Object(details));
+                }
+                self.emit_chunk(out, json!([]), Some(Value::Object(usage_obj)));
             }
             "message_stop" => {
                 if !self.done_emitted {
@@ -966,5 +1555,127 @@ mod tests {
         assert_eq!(f4["usage"]["total_tokens"], 27);
 
         assert_eq!(frames[5].data, "[DONE]");
+    }
+
+    #[test]
+    fn translates_reasoning_json_schema_cache_control_and_vertex_anthropic() {
+        let req = json!({
+            "model": "smart",
+            "reasoning_effort": "high",
+            "temperature": 0.7,
+            "max_tokens": 1000,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": { "type": "object", "properties": { "ok": { "type": "boolean" } } }
+                }
+            },
+            "messages": [
+                { "role": "system", "content": "Cached sys", "cache_control": { "type": "ephemeral" } },
+                { "role": "user", "content": [{ "type": "text", "text": "Solve", "cache_control": { "type": "ephemeral" } }] }
+            ]
+        });
+
+        let anth_bytes = openai_to_anthropic_request(
+            &serde_json::to_vec(&req).unwrap(),
+            "claude-sonnet-4-20250514",
+            4096,
+        )
+        .unwrap();
+        let anth: Value = serde_json::from_slice(&anth_bytes).unwrap();
+        assert_eq!(anth["thinking"]["type"], "enabled");
+        assert_eq!(anth["thinking"]["budget_tokens"], 16384);
+        assert!(anth["max_tokens"].as_u64().unwrap() > 16384);
+        assert!(anth.get("temperature").is_none());
+        assert_eq!(anth["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(
+            anth["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(anth["output_config"]["format"]["type"], "json_schema");
+        assert_eq!(
+            anth["output_config"]["format"]["schema"]["properties"]["ok"]["type"],
+            "boolean"
+        );
+
+        // Claude-on-Vertex body adaptation removes `model` and adds vertex anthropic_version
+        let vertex_bytes =
+            adapt_anthropic_body_for_vertex(&anth_bytes, Some("2023-06-01")).unwrap();
+        let vertex: Value = serde_json::from_slice(&vertex_bytes).unwrap();
+        assert!(vertex.get("model").is_none());
+        assert_eq!(vertex["anthropic_version"], "vertex-2023-10-16");
+        assert_eq!(
+            vertex_anthropic_path("my-proj", "us-east5", "claude-sonnet-4@20250514", true),
+            "/v1/projects/my-proj/locations/us-east5/publishers/anthropic/models/claude-sonnet-4%4020250514:streamRawPredict"
+        );
+
+        // Anthropic thinking + cache write/read response -> OpenAI reasoning_content + prompt_tokens_details
+        let anth_resp = json!({
+            "id": "msg_think",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-20250514",
+            "content": [
+                { "type": "thinking", "thinking": "Step 1..." },
+                { "type": "text", "text": "{\"ok\":true}" }
+            ],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 100,
+                "cache_read_input_tokens": 400,
+                "cache_creation_input_tokens": 200,
+                "output_tokens": 50
+            }
+        });
+        let oa_bytes = anthropic_to_openai_response(
+            &serde_json::to_vec(&anth_resp).unwrap(),
+            StatusCode::OK,
+            "fallback",
+        )
+        .unwrap();
+        let oa: Value = serde_json::from_slice(&oa_bytes).unwrap();
+        assert_eq!(
+            oa["choices"][0]["message"]["reasoning_content"],
+            "Step 1..."
+        );
+        assert_eq!(oa["choices"][0]["message"]["content"], "{\"ok\":true}");
+        assert_eq!(oa["usage"]["prompt_tokens"], 700);
+        assert_eq!(oa["usage"]["prompt_tokens_details"]["cached_tokens"], 400);
+        assert_eq!(
+            oa["usage"]["prompt_tokens_details"]["cache_creation_tokens"],
+            200
+        );
+    }
+
+    #[test]
+    fn applies_param_defaults_overrides_and_drop_params() {
+        let mut p_def = BTreeMap::new();
+        p_def.insert("temperature".to_owned(), json!(0.3));
+        p_def.insert("seed".to_owned(), json!(7));
+        let mut t_def = BTreeMap::new();
+        t_def.insert("temperature".to_owned(), json!(0.1));
+        let mut t_over = BTreeMap::new();
+        t_over.insert("max_tokens".to_owned(), json!(512));
+
+        let body = br#"{"model":"o3-mini","top_k":40,"messages":[{"role":"user","content":"hi"}]}"#;
+        let out = apply_request_param_transforms(
+            body,
+            &p_def,
+            &t_def,
+            &BTreeMap::new(),
+            &t_over,
+            &DropParamsConfig::Bool(true),
+            ProviderDialect::OpenAiCompatible,
+            "o3-mini",
+        )
+        .unwrap()
+        .unwrap();
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert!(v.get("top_k").is_none());
+        assert!(v.get("temperature").is_none(), "o3-mini drops temperature");
+        assert!(v.get("max_tokens").is_none());
+        assert_eq!(v["max_completion_tokens"], 512);
+        assert_eq!(v["seed"], 7);
     }
 }
