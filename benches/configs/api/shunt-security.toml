@@ -1,4 +1,4 @@
-# Workload 2b/2c: Modern HTTP API Gateway Security & Compression Chain (RFC 0018)
+# API Workload: Modern API Gateway Security & Compression Chain (RFC 0018)
 # request-id + ip-filter + jwt-auth (HS256 + claims/scope check) + body-limit + compression (zstd/br/gzip)
 [server]
 listen = "127.0.0.1:18081"

@@ -1,0 +1,52 @@
+# API Workload: Observability tax (3-plugin chain + metrics + otel-trace + access-log)
+[server]
+listen = "127.0.0.1:18081"
+drain_timeout_ms = 5000
+
+[admin]
+enabled = false
+
+[[plugins]]
+name = "metrics"
+
+[[plugins]]
+name = "otel-trace"
+[plugins.config]
+sample_rate = 1.0
+respect_parent_sampling = true
+propagate_headers = true
+emit_response_header = true
+
+[[plugins]]
+name = "access-log"
+[plugins.config]
+include_timings = true
+
+[[upstreams]]
+name = "bench_upstream"
+endpoints = ["http://127.0.0.1:18080"]
+connect_timeout_ms = 5000
+pool_max_idle_per_host = 512
+
+[[routes]]
+id = "observability_chain"
+path_prefix = "/"
+upstream = "bench_upstream"
+max_attempts = 1
+allow_websockets = false
+
+[[routes.plugins]]
+name = "request-id"
+
+[[routes.plugins]]
+name = "bearer-auth"
+[routes.plugins.config]
+tokens = [{ token = "bench-secret-token", subject = "bench-client" }]
+
+[[routes.plugins]]
+name = "rate-limit"
+id = "bench-rl-obs"
+[routes.plugins.config]
+requests_per_second = 1000000.0
+burst = 1000000
+key = "client_ip"

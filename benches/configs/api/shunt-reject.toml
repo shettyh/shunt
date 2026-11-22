@@ -1,4 +1,4 @@
-# Workload 2: 3-plugin chain (request-id + bearer-auth + local rate-limit)
+# API Workload: Rate-limit load-shedding fast-path (429 short-circuit without touching upstream)
 [server]
 listen = "127.0.0.1:18081"
 drain_timeout_ms = 5000
@@ -10,10 +10,10 @@ enabled = false
 name = "bench_upstream"
 endpoints = ["http://127.0.0.1:18080"]
 connect_timeout_ms = 5000
-pool_max_idle_per_host = 512
+pool_max_idle_per_host = 64
 
 [[routes]]
-id = "plugin_chain"
+id = "reject_429"
 path_prefix = "/"
 upstream = "bench_upstream"
 max_attempts = 1
@@ -23,14 +23,9 @@ allow_websockets = false
 name = "request-id"
 
 [[routes.plugins]]
-name = "bearer-auth"
-[routes.plugins.config]
-tokens = [{ token = "bench-secret-token", subject = "bench-client" }]
-
-[[routes.plugins]]
 name = "rate-limit"
-id = "bench-rl"
+id = "strict-rl"
 [routes.plugins.config]
-requests_per_second = 1000000.0
-burst = 1000000
+requests_per_second = 0.0001
+burst = 1
 key = "client_ip"

@@ -1,6 +1,4 @@
-# AI Benchmark: Exact-Match + Streaming AI Cache Chain (RFC 0011 + RFC 0016)
-# request-id + ai-virtual-keys + ai-model-router + ai-cache (exact + streaming + singleflight)
-# + ai-token-rate-limit + ai-budget + ai-provider-adapter + ai-usage-tracker
+# AI Workload: Exact-Match + Streaming SSE + Singleflight AI Cache Chain
 [server]
 listen = "127.0.0.1:18081"
 drain_timeout_ms = 10000
@@ -60,7 +58,7 @@ name = "ai-cache"
 id = "cache"
 [routes.plugins.config]
 ttl_secs = 600
-max_entries = 1024
+max_entries = 2048
 max_total_bytes = 33554432
 max_entry_bytes = 524288
 scope = "virtual_key"

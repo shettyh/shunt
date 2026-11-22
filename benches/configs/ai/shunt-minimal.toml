@@ -1,4 +1,4 @@
-# Workload 3b: High-concurrency SSE streaming with live Anthropic -> OpenAI translation + usage tracking
+# AI Workload: Minimal 3-plugin Shunt AI Gateway (router + adapter + usage)
 [server]
 listen = "127.0.0.1:18081"
 drain_timeout_ms = 10000
@@ -7,16 +7,16 @@ drain_timeout_ms = 10000
 enabled = false
 
 [[upstreams]]
-name = "anthropic_mock"
+name = "mock_ai"
 endpoints = ["http://127.0.0.1:18080"]
 connect_timeout_ms = 5000
 pool_max_idle_per_host = 2048
 
 [[routes]]
-id = "ai_sse_translate"
-path_exact = "/v1/chat/completions"
-methods = ["POST"]
-upstream = "anthropic_mock"
+id = "ai_minimal"
+path_prefix = "/v1"
+upstream = "mock_ai"
+max_body_bytes = 2097152
 max_attempts = 1
 response_headers_timeout_ms = 30000
 idle_chunk_timeout_ms = 30000
@@ -25,10 +25,15 @@ allow_websockets = false
 [[routes.plugins]]
 name = "ai-model-router"
 [routes.plugins.config.models]
-claude-bench = [{ provider = "anthropic", upstream = "anthropic_mock", model = "claude-bench" }]
+gpt-bench = [{ provider = "openai", upstream = "mock_ai", model = "gpt-bench" }]
+claude-bench = [{ provider = "anthropic", upstream = "mock_ai", model = "claude-bench" }]
 
 [[routes.plugins]]
 name = "ai-provider-adapter"
+[routes.plugins.config.providers.openai]
+dialect = "openai_compatible"
+auth = { type = "bearer", api_key = "sk-openai-bench" }
+
 [routes.plugins.config.providers.anthropic]
 dialect = "anthropic"
 auth = { type = "header", header = "x-api-key", api_key = "sk-ant-bench" }

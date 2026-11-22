@@ -1,0 +1,121 @@
+# MCP Workload: Full 5-Plugin Virtual MCP & Agentic Governance Chain (RFC 0019)
+# request-id + mcp-auth + mcp-router (2 backend servers) + mcp-guardrails + mcp-rate-limit + mcp-telemetry
+[server]
+listen = "127.0.0.1:18081"
+drain_timeout_ms = 10000
+
+[admin]
+enabled = false
+
+[[upstreams]]
+name = "github_mcp"
+endpoints = ["http://127.0.0.1:18080"]
+connect_timeout_ms = 5000
+pool_max_idle_per_host = 1024
+
+[[upstreams]]
+name = "postgres_mcp"
+endpoints = ["http://127.0.0.1:18082"]
+connect_timeout_ms = 5000
+pool_max_idle_per_host = 1024
+
+[[routes]]
+id = "mcp_virtual_gateway"
+path_prefix = "/"
+methods = ["GET", "POST", "DELETE"]
+upstream = "github_mcp"
+max_body_bytes = 2097152
+max_attempts = 1
+response_headers_timeout_ms = 30000
+idle_chunk_timeout_ms = 30000
+allow_websockets = false
+
+[[routes.plugins]]
+name = "request-id"
+
+[[routes.plugins]]
+name = "mcp-auth"
+id = "mcp-auth"
+[routes.plugins.config]
+strip_key_header = true
+bind_session_to_principal = true
+
+[[routes.plugins.config.keys]]
+id = "bench-agent"
+api_key = "sk-mcp-bench-key"
+team = "bench"
+agent_id = "claude-code-bench"
+allowed_servers = ["github", "postgres"]
+allowed_tools = ["github__*", "postgres__*"]
+denied_tools = ["*drop*", "*delete*"]
+allowed_resources = ["github://*", "postgres://*"]
+rpm = 10000000
+tool_rpm = 10000000
+max_calls_per_session = 10000000
+max_parallel_calls = 4096
+
+[[routes.plugins]]
+name = "mcp-router"
+id = "mcp-router"
+[routes.plugins.config]
+max_body_bytes = 2097152
+namespace_separator = "__"
+server_name = "shunt-mcp-bench"
+catalog_ttl_secs = 600
+session_ttl_secs = 3600
+response_headers = true
+mirror_mcp_name_header = true
+
+[routes.plugins.config.servers.github]
+upstream = "github_mcp"
+endpoint = "http://127.0.0.1:18080/mcp"
+path = "/mcp"
+auth = { type = "bearer", api_key = "ghp_bench_upstream_token" }
+resource_prefixes = ["github://"]
+stateful = false
+
+[routes.plugins.config.servers.postgres]
+upstream = "postgres_mcp"
+endpoint = "http://127.0.0.1:18082/mcp"
+path = "/mcp"
+auth = { type = "header", header = "x-api-key", api_key = "pg_bench_upstream_token" }
+resource_prefixes = ["postgres://"]
+stateful = false
+
+[[routes.plugins]]
+name = "mcp-guardrails"
+id = "mcp-guardrails"
+[routes.plugins.config]
+denied_tools = ["*drop_database*"]
+argument_detectors = ["aws_key", "private_key"]
+argument_action = "redact"
+response_detectors = ["prompt_injection", "private_key"]
+response_action = "block"
+
+[[routes.plugins.config.argument_rules]]
+tool = "postgres__query"
+max_arg_bytes = 4096
+required_args = ["sql"]
+allow_patterns = { sql = "(?i)^\\s*SELECT\\b" }
+deny_patterns = { sql = "(?i)\\b(DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE)\\b" }
+
+[[routes.plugins]]
+name = "mcp-rate-limit"
+id = "mcp-rate-limit"
+[routes.plugins.config]
+rpm = 10000000
+tool_rpm = 10000000
+window_secs = 60
+max_calls_per_session = 10000000
+max_parallel_calls = 4096
+
+[routes.plugins.config.loop_breaker]
+max_repeats = 2
+window_secs = 60
+
+[[routes.plugins]]
+name = "mcp-telemetry"
+id = "mcp-telemetry"
+[routes.plugins.config]
+log_calls = false
+inspect_tool_errors = true

@@ -25,18 +25,22 @@ A tiny, zero-allocation-fast-path data plane (`shunt-core`) pairs with a strict 
 
 ## Benchmarks at a Glance
 
-Local loopback results on Apple M5 Pro (`c=64` HTTP / `c=1,000` SSE) comparing a single Shunt release binary against **Envoy 1.40.2**, **Caddy 2.11.9**, and **LiteLLM Proxy 1.110.2** (stateless, 4 workers):
+Unified local loopback suite ([`bench.sh`](benches/scripts/bench.sh), [RFC 0020](rfcs/0020-unified-comprehensive-benchmarks.md)) on Apple M5 Pro (`c=64` HTTP / `c=1,000` SSE) comparing a single Shunt release binary against **Envoy 1.40.2**, **Caddy v2.11.9**, and **LiteLLM Proxy 1.110.2** (stateless, 4 workers):
 
-| Workload | Shunt | Comparison |
+| Suite / Workload | Shunt | Comparison |
 | --- | --- | --- |
-| **HTTP/1.1 Passthrough** (`0` plugins) | **88,649 req/s** · p99 **930 µs** · 22.4 MB RSS | Envoy: 80.3k req/s · 53.7 MB · Caddy: 68.8k req/s · 72.1 MB |
-| **3-Plugin HTTP Chain** | **87,820 req/s** · p99 **946 µs** · 23.8 MB RSS | Envoy: 74.9k req/s · 55.6 MB · Caddy: 59.1k req/s · 72.3 MB |
-| **JWT + Security + Streaming `zstd`** | **70,187 req/s** · p99 **1.17 ms** · 33.9 MB RSS | — |
-| **1,000 Concurrent SSE Streams** | **1,000/0** · **32.8k ch/s** · **87.6 MB RSS** | Envoy: 32.7k ch/s · 92.2 MB · Caddy: 26.1k ch/s · 157.4 MB |
-| **AI Gateway** *(8-plugin governed, Anthropic ↔ OpenAI)* | **68,845 req/s** · p99 **1.22 ms** · **30.0 MB RSS** | LiteLLM (4w): 832 req/s · p99 100.8 ms · 2,071 MB |
-| **AI Cold Start & Cache Hit** | **33–35 ms** start · **165,876 req/s** cached | LiteLLM (4w): 15,067 ms start · 1,873 MB idle |
+| **API · HTTP/1.1 Passthrough** (`0` plugins) | **84,771 req/s** · p99 **1.02 ms** · 22.5 MB RSS | Envoy: 78.3k req/s · 53.6 MB · Caddy: 69.9k req/s · 72.9 MB |
+| **API · TLS 1.3 + HTTP/2 / mTLS** | **90.9k** (TLS/H2) · **89.6k** (mTLS) · p99 **962 µs** | Envoy (TLS/H2): 99.9k · p99 1.41 ms · Caddy: 67.0k · p99 2.24 ms |
+| **API · JWT HS256 + Security + `zstd`** | **68,664 req/s** · p99 **1.27 ms** · 38.5 MB RSS | Envoy (`jwt_authn+zstd`): 66.3k · 84.4 MB · Caddy (`zstd`): 62.8k · 252.7 MB |
+| **API · 200-Route Table + Weighted LB** | **78,900 req/s** · p99 **1.06 ms** · 23.6 MB RSS | Envoy: 62.0k req/s · p99 1.24 ms · 56.4 MB |
+| **API · Open-Loop 25k RPS Tail Latency** | p99 **3.37 ms** · p99.9 **4.22 ms** · **46.2 ms** CPU/1k | Envoy: p99 5.81 ms · p99.9 16.2 ms · Caddy: p99 4.69 ms |
+| **AI · 4 KB Multi-Turn Translate** *(8-plugin governed)* | **56,296 req/s** · p99 **1.57 ms** · **31.8 MB RSS** | LiteLLM (4w): 598 req/s · p99 117.4 ms · 2,071 MB |
+| **AI · 1,000 Concurrent SSE Translation** *(governed)* | **1,000/0** · **31.1k ch/s** · TTFC p99 **131.6 ms** | LiteLLM (4w): 3.3k ch/s · TTFC p99 6.07 s · 2,165 MB |
+| **AI · Cold Start, Bedrock SigV4 & Cache Hit** | **32–37 ms** start · **60.4k** SigV4 · **141.3k** cache hit | LiteLLM (4w): 15,207 ms start · 1,873 MB idle |
+| **MCP · 5-Plugin Governed `tools/call` & Loop Breaker** | **77,069 req/s** governed · **160.0k req/s** loop-break | 200 concurrent SSE tool calls: 200/0 · 7.4k ch/s |
+| **Soak · Live `POST /reload` Under Load** | **84,760 req/s** · **9/0 reloads** · **0 errors** | RSS soak delta across 672k AI reqs: **+1.0 MB** |
 
-See [`benches/README.md`](benches/README.md) for full tables, methodology, and reproduction scripts.
+See [`benches/README.md`](benches/README.md) for full tables, methodology, and reproduction commands.
 
 ---
 

@@ -11,7 +11,23 @@
             {
               "handle": [
                 {
+                  "handler": "encode",
+                  "encodings": {
+                    "zstd": {}
+                  },
+                  "prefer": ["zstd"],
+                  "minimum_length": 512
+                },
+                {
                   "handler": "reverse_proxy",
+                  "transport": {
+                    "protocol": "http",
+                    "keep_alive": {
+                      "enabled": true,
+                      "max_idle_conns": 512,
+                      "max_idle_conns_per_host": 512
+                    }
+                  },
                   "upstreams": [{ "dial": "127.0.0.1:18080" }]
                 }
               ]
