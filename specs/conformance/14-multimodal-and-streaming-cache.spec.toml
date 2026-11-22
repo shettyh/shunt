@@ -1,0 +1,295 @@
+[spec]
+name = "rfc0016-multimodal-and-streaming-cache"
+config_inline = """
+[server]
+listen = "127.0.0.1:0"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+[[upstreams]]
+name = "openai"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "cohere"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "bedrock"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "gemini"
+endpoints = ["http://127.0.0.1:1"]
+
+[[routes]]
+id = "ai"
+path_prefix = "/v1/"
+upstream = "openai"
+allow_websockets = true
+
+[[routes.plugins]]
+name = "ai-virtual-keys"
+[routes.plugins.config]
+[[routes.plugins.config.keys]]
+id = "alice"
+api_key = "vk-alice"
+[[routes.plugins.config.keys]]
+id = "bob"
+api_key = "vk-bob"
+
+[[routes.plugins]]
+name = "ai-model-router"
+[routes.plugins.config]
+files_targets = [{ provider = "openai", upstream = "openai", capabilities = ["files"] }]
+batches_targets = [{ provider = "openai", upstream = "openai", capabilities = ["batches"] }]
+
+[routes.plugins.config.models]
+gpt = [{ provider = "openai", upstream = "openai", model = "gpt-4o" }]
+fim = [{ provider = "openai", upstream = "openai", model = "gpt-3.5-turbo-instruct", capabilities = ["completions", "streaming"] }]
+mod = [{ provider = "openai", upstream = "openai", model = "omni-moderation-latest", capabilities = ["moderations"] }]
+cohere-rr = [{ provider = "cohere", upstream = "cohere", model = "rerank-v3.5", capabilities = ["rerank"] }]
+bedrock-rr = [{ provider = "bedrock", upstream = "bedrock", model = "amazon.rerank-v1:0", capabilities = ["rerank"] }]
+imagen = [{ provider = "gemini", upstream = "gemini", model = "imagen-3.0-generate-002", capabilities = ["images"] }]
+tts = [{ provider = "openai", upstream = "openai", model = "tts-1", capabilities = ["audio"] }]
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+[routes.plugins.config.providers.openai]
+preset = "openai"
+api_key = "sk-openai"
+
+[routes.plugins.config.providers.cohere]
+preset = "cohere"
+api_key = "sk-cohere"
+
+[routes.plugins.config.providers.bedrock]
+preset = "bedrock"
+region = "us-east-1"
+[routes.plugins.config.providers.bedrock.auth]
+type = "aws_sigv4"
+access_key_id = "AKIAEXAMPLE"
+secret_access_key = "secret-key"
+
+[routes.plugins.config.providers.gemini]
+preset = "gemini"
+api_key = "gem-key"
+
+[[routes.plugins]]
+name = "ai-cache"
+[routes.plugins.config]
+ttl_secs = 300
+cache_streaming = true
+singleflight = true
+require_deterministic = true
+[routes.plugins.config.semantic]
+mode = "embedding_http"
+endpoint = "mock://embedder/v1/embeddings"
+model = "text-embedding-3-small"
+similarity_threshold = 0.95
+
+[[routes.plugins]]
+name = "ai-usage-tracker"
+[routes.plugins.config]
+log_usage = false
+generation_store_capacity = 128
+"""
+
+# --- Mocks ---
+
+[[mocks]]
+name = "openai_sse_stream"
+upstream = "openai"
+status = 200
+sse_raw = [
+  "data: {\"id\":\"chatcmpl-sse1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello stream\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":2,\"total_tokens\":10}}\n\n",
+  "data: [DONE]\n\n",
+]
+
+[[mocks]]
+name = "openai_completions"
+upstream = "openai"
+status = 200
+json = { id = "cmpl-42", object = "text_completion", model = "gpt-3.5-turbo-instruct", choices = [{ text = " done", index = 0, finish_reason = "stop" }], usage = { prompt_tokens = 4, completion_tokens = 1, total_tokens = 5 } }
+
+[[mocks]]
+name = "openai_moderations"
+upstream = "openai"
+status = 200
+json = { id = "modr-9", model = "omni-moderation-latest", results = [{ flagged = false }] }
+
+[[mocks]]
+name = "openai_tts"
+upstream = "openai"
+status = 200
+headers = { "content-type" = "audio/mpeg" }
+body = "ID3-MOCK-MP3"
+
+[[mocks]]
+name = "openai_batches"
+upstream = "openai"
+status = 200
+json = { id = "batch_99", object = "batch", status = "in_progress" }
+
+[[mocks]]
+name = "openai_files"
+upstream = "openai"
+status = 200
+headers = { "content-type" = "application/octet-stream" }
+body = '{"custom_id":"req-1"}'
+
+[[mocks]]
+name = "cohere_rerank"
+upstream = "cohere"
+status = 200
+json = { id = "rr-cohere", results = [{ index = 1, relevance_score = 0.95 }] }
+
+[[mocks]]
+name = "bedrock_rerank"
+upstream = "bedrock"
+status = 200
+json = { results = [{ index = 0, relevanceScore = 0.92 }] }
+
+[[mocks]]
+name = "gemini_imagen"
+upstream = "gemini"
+status = 200
+json = { predictions = [{ bytesBase64Encoded = "AAAA" }] }
+
+[[mocks]]
+name = "embedder_unit"
+upstream = "embedder"
+status = 200
+json = { data = [{ embedding = [1.0, 0.0, 0.0] }] }
+
+# --- Test Cases ---
+
+[[cases]]
+name = "rerank_cohere_and_bedrock_sigv4"
+use_mocks = ["cohere_rerank", "bedrock_rerank", "embedder_unit"]
+
+[[cases.steps]]
+name = "cohere_rerank_uses_v2_path"
+request = { method = "POST", path = "/v1/rerank", headers = { "authorization" = "Bearer vk-alice" }, json = { model = "cohere-rr", query = "shunt", documents = ["a", "b"] } }
+[cases.steps.expect]
+status = 200
+json_path = { "/results/0/index" = 1 }
+upstream_calls = [{ upstream = "cohere", count = 1, path = "/v2/rerank" }]
+
+[[cases.steps]]
+name = "bedrock_rerank_translates_and_reattaches_documents"
+request = { method = "POST", path = "/v1/rerank", headers = { "authorization" = "Bearer vk-alice" }, json = { model = "bedrock-rr", query = "shunt", documents = ["Shunt gateway"], return_documents = true } }
+[cases.steps.expect]
+status = 200
+json_path = { "/results/0/document/text" = "Shunt gateway" }
+upstream_calls = [{ upstream = "bedrock", count = 1, path = "/rerank", headers_present = ["authorization", "x-amz-date"] }]
+
+[[cases]]
+name = "multimodal_images_audio_moderations_files_batches"
+use_mocks = ["gemini_imagen", "openai_tts", "embedder_unit"]
+
+[[cases.steps]]
+name = "gemini_imagen_translates_predict_to_openai_images"
+request = { method = "POST", path = "/v1/images/generations", headers = { "authorization" = "Bearer vk-alice" }, json = { model = "imagen", prompt = "sunset" } }
+[cases.steps.expect]
+status = 200
+json_path = { "/data/0/b64_json" = "AAAA" }
+upstream_calls = [{ upstream = "gemini", count = 1, path = "/v1beta/models/imagen-3.0-generate-002:predict" }]
+
+[[cases.steps]]
+name = "audio_speech_streams_binary_audio_passthrough"
+request = { method = "POST", path = "/v1/audio/speech", headers = { "authorization" = "Bearer vk-alice" }, json = { model = "tts", input = "hello", voice = "alloy" } }
+[cases.steps.expect]
+status = 200
+headers = { "content-type" = "audio/mpeg" }
+body_contains = "ID3-MOCK-MP3"
+upstream_calls = [{ upstream = "openai", count = 1, path = "/v1/audio/speech" }]
+
+[[cases]]
+name = "moderations_files_and_batches_routing"
+use_mocks = ["openai_batches", "embedder_unit"]
+
+[[cases.steps]]
+name = "batches_post_routes_via_batches_targets"
+request = { method = "POST", path = "/v1/batches", headers = { "authorization" = "Bearer vk-alice" }, json = { input_file_id = "file-1", endpoint = "/v1/chat/completions", completion_window = "24h" } }
+[cases.steps.expect]
+status = 200
+json_path = { "/id" = "batch_99" }
+upstream_calls = [{ upstream = "openai", count = 1, path = "/v1/batches" }]
+
+[[cases]]
+name = "files_content_get_routes_via_files_targets"
+use_mocks = ["openai_files", "embedder_unit"]
+
+[[cases.steps]]
+name = "files_get_content"
+request = { method = "GET", path = "/v1/files/file-1/content", headers = { "authorization" = "Bearer vk-alice" } }
+[cases.steps.expect]
+status = 200
+body_contains = "req-1"
+upstream_calls = [{ upstream = "openai", count = 1, path = "/v1/files/file-1/content" }]
+
+[[cases]]
+name = "completions_and_generation_lookup_with_tenant_isolation"
+use_mocks = ["openai_completions", "embedder_unit"]
+
+[[cases.steps]]
+name = "completions_populates_generation_store"
+request = { method = "POST", path = "/v1/completions", headers = { "authorization" = "Bearer vk-alice" }, json = { model = "fim", prompt = "fn main()" } }
+[cases.steps.expect]
+status = 200
+json_path = { "/id" = "cmpl-42" }
+
+[[cases.steps]]
+name = "wait_for_generation_commit"
+wait_ms = 60
+
+[[cases.steps]]
+name = "generation_lookup_succeeds_for_owner_key"
+request = { method = "GET", path = "/v1/generation?id=cmpl-42", headers = { "authorization" = "Bearer vk-alice" } }
+[cases.steps.expect]
+status = 200
+json_path = { "/data/id" = "cmpl-42", "/data/tokens_prompt" = 4, "/data/key_id" = "alice" }
+
+[[cases.steps]]
+name = "generation_lookup_forbids_other_tenant_key"
+request = { method = "GET", path = "/v1/generation?id=cmpl-42", headers = { "authorization" = "Bearer vk-bob" } }
+[cases.steps.expect]
+status = 403
+
+[[cases]]
+name = "streaming_sse_cache_and_semantic_vector_cache"
+use_mocks = ["openai_sse_stream", "embedder_unit"]
+
+[[cases.steps]]
+name = "streaming_sse_cache_miss"
+request = { method = "POST", path = "/v1/chat/completions", headers = { "authorization" = "Bearer vk-alice" }, json = { model = "gpt", stream = true, temperature = 0, messages = [{ role = "user", content = "stream hello" }] } }
+[cases.steps.expect]
+status = 200
+headers = { "x-shunt-cache" = "miss" }
+body_contains = "Hello stream"
+upstream_calls = [{ upstream = "openai", count = 1 }]
+
+[[cases.steps]]
+name = "wait_for_stream_cache_commit"
+wait_ms = 60
+
+[[cases.steps]]
+name = "streaming_sse_cache_exact_hit"
+request = { method = "POST", path = "/v1/chat/completions", headers = { "authorization" = "Bearer vk-alice" }, json = { model = "gpt", stream = true, temperature = 0, messages = [{ role = "user", content = "stream hello" }] } }
+[cases.steps.expect]
+status = 200
+headers = { "x-shunt-cache" = "hit" }
+body_contains = "Hello stream"
+upstream_calls = [{ upstream = "openai", count = 1 }]
+
+[[cases.steps]]
+name = "semantic_vector_cache_hit_on_paraphrased_streaming_prompt"
+request = { method = "POST", path = "/v1/chat/completions", headers = { "authorization" = "Bearer vk-alice" }, json = { model = "gpt", stream = true, temperature = 0, messages = [{ role = "user", content = "paraphrased greeting" }] } }
+[cases.steps.expect]
+status = 200
+headers = { "x-shunt-cache" = "semantic_hit" }
+body_contains = "Hello stream"
+upstream_calls = [{ upstream = "openai", count = 1 }]

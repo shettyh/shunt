@@ -65,14 +65,31 @@ pub fn estimate_request_tokens(endpoint: AiEndpointKind, body: &[u8]) -> TokenEs
         .and_then(Value::as_u64);
 
     let input_tokens = match endpoint {
-        AiEndpointKind::Embeddings => estimate_embeddings_input(&val),
+        AiEndpointKind::Embeddings | AiEndpointKind::Moderations => estimate_embeddings_input(&val),
         AiEndpointKind::OpenAiResponses => estimate_responses_input(&val),
         AiEndpointKind::AnthropicMessages | AiEndpointKind::AnthropicCountTokens => {
             estimate_anthropic_input(&val)
         }
+        AiEndpointKind::Completions | AiEndpointKind::ImagesGenerations => {
+            val.get("prompt").map(estimate_prompt_field).unwrap_or(1)
+        }
+        AiEndpointKind::AudioSpeech => val
+            .get("input")
+            .and_then(Value::as_str)
+            .map(estimate_text_tokens)
+            .unwrap_or(1),
+        AiEndpointKind::Rerank => estimate_rerank_input(&val),
         AiEndpointKind::ChatCompletions
+        | AiEndpointKind::ImagesEdits
+        | AiEndpointKind::ImagesVariations
+        | AiEndpointKind::AudioTranscriptions
+        | AiEndpointKind::AudioTranslations
+        | AiEndpointKind::Realtime
+        | AiEndpointKind::Files
+        | AiEndpointKind::Batches
         | AiEndpointKind::ModelsList
-        | AiEndpointKind::ModelRetrieve => estimate_chat_input(&val),
+        | AiEndpointKind::ModelRetrieve
+        | AiEndpointKind::GenerationRetrieve => estimate_chat_input(&val),
     };
 
     TokenEstimate {
@@ -275,6 +292,43 @@ fn estimate_json_compact(val: &Value) -> u64 {
     serde_json::to_string(val)
         .map(|s| estimate_text_tokens(&s))
         .unwrap_or(0)
+}
+
+fn estimate_prompt_field(val: &Value) -> u64 {
+    match val {
+        Value::String(s) => estimate_text_tokens(s),
+        Value::Array(items) => {
+            let mut sum = 0u64;
+            for item in items {
+                match item {
+                    Value::String(s) => sum = sum.saturating_add(estimate_text_tokens(s)),
+                    other => sum = sum.saturating_add(estimate_json_compact(other)),
+                }
+            }
+            sum
+        }
+        other => estimate_json_compact(other),
+    }
+}
+
+fn estimate_rerank_input(val: &Value) -> u64 {
+    let mut total = val
+        .get("query")
+        .and_then(Value::as_str)
+        .map(estimate_text_tokens)
+        .unwrap_or(0);
+    if let Some(docs) = val.get("documents").and_then(Value::as_array) {
+        for doc in docs {
+            if let Some(s) = doc.as_str() {
+                total = total.saturating_add(estimate_text_tokens(s));
+            } else if let Some(s) = doc.get("text").and_then(Value::as_str) {
+                total = total.saturating_add(estimate_text_tokens(s));
+            } else {
+                total = total.saturating_add(estimate_json_compact(doc));
+            }
+        }
+    }
+    total
 }
 
 #[cfg(test)]

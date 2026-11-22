@@ -4,22 +4,26 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use shunt_plugin_sdk::{
-    BuildContext, Bytes, Flow, HookMask, HookResult, HttpPlugin, PluginBuildError, PluginConfig,
-    PluginFactory, RequestCtx, RequestSummary, ResponseHead, SpanHandle, StreamFlow, header,
+    BufferedResponse, BuildContext, Bytes, Clock, Flow, HeaderName, HeaderValue, HookMask,
+    HookResult, HttpPlugin, Method, PluginBuildError, PluginConfig, PluginFactory, RequestCtx,
+    RequestHead, RequestSummary, ResponseHead, SpanHandle, StatusCode, StreamFlow, header,
 };
 use tracing::info;
 
 use crate::cache::AiCacheStatus;
-use crate::pricing::nano_usd_to_usd;
+use crate::generation::{AiGenerationRecord, AiGenerationStore, AiRecordedCost};
+use crate::multimodal::extract_query_param;
+use crate::pricing::{PricingCatalog, nano_usd_to_usd};
 use crate::sse::SseParser;
 use crate::types::{
     AiEndpointKind, AiFailoverHistory, AiKeyPolicy, AiRequestMeta, AiUsage, AiUsageReport,
-    DetectedEndpoint,
+    DetectedEndpoint, openai_error_response,
 };
 
 const DEFAULT_MAX_JSON_INSPECT_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+const DEFAULT_GENERATION_STORE_CAPACITY: usize = 4096;
 
 const AI_LATENCY_BUCKETS: &[f64] = &[0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0];
 
@@ -325,7 +329,9 @@ impl AiMetrics {
         let total_cache_hits = data
             .cache_requests_total
             .iter()
-            .filter(|((status, _, _), _)| *status == "hit")
+            .filter(|((status, _, _), _)| {
+                matches!(*status, "hit" | "stream_hit" | "coalesced" | "semantic_hit")
+            })
             .map(|(_, &v)| v)
             .sum();
         let total_cache_misses = data
@@ -371,7 +377,9 @@ impl AiMetrics {
         let total_cache_hits = data
             .cache_requests_total
             .iter()
-            .filter(|((status, _, _), _)| *status == "hit")
+            .filter(|((status, _, _), _)| {
+                matches!(*status, "hit" | "stream_hit" | "coalesced" | "semantic_hit")
+            })
             .map(|(_, &v)| v)
             .sum();
         let total_cache_misses = data
@@ -717,6 +725,13 @@ struct AiUsageTrackerConfig {
     log_usage: bool,
     /// Safety cap (bytes) for inspecting non-streaming JSON response bodies (default: 4 MiB).
     max_json_inspect_bytes: usize,
+    /// Bounded capacity of the reload-persistent `AiGenerationStore` backing `GET /v1/generation?id=...`
+    /// (default: `4096`; set to `0` to disable generation storage).
+    generation_store_capacity: usize,
+    /// Serve `GET /v1/generation?id=...` directly from `on_request_headers` (default: true).
+    serve_generation_endpoint: bool,
+    /// Attach `x-shunt-generation-id: gen-<request_id>` on upstream AI responses (default: true).
+    emit_generation_id_header: bool,
 }
 
 impl Default for AiUsageTrackerConfig {
@@ -724,6 +739,9 @@ impl Default for AiUsageTrackerConfig {
         Self {
             log_usage: true,
             max_json_inspect_bytes: DEFAULT_MAX_JSON_INSPECT_BYTES,
+            generation_store_capacity: DEFAULT_GENERATION_STORE_CAPACITY,
+            serve_generation_endpoint: true,
+            emit_generation_id_header: true,
         }
     }
 }
@@ -762,26 +780,49 @@ impl PluginFactory for AiUsageTrackerFactory {
     fn build(
         &self,
         config: &PluginConfig,
-        _ctx: &BuildContext,
+        ctx: &BuildContext,
     ) -> Result<Arc<dyn HttpPlugin>, PluginBuildError> {
         let cfg: AiUsageTrackerConfig = config.deserialize(self.name())?;
+        let generation_store = if cfg.generation_store_capacity > 0 {
+            Some(
+                ctx.state_handle()
+                    .get_or_init("ai_generation_store", AiGenerationStore::new),
+            )
+        } else {
+            None
+        };
+        let pricing_catalog = PricingCatalog::new(std::collections::HashMap::new(), true, None)
+            .expect("built-in pricing catalog is valid");
+
         Ok(Arc::new(AiUsageTrackerPlugin {
             metrics: Arc::clone(&self.metrics),
             sink: self.sink.clone(),
             log_usage: cfg.log_usage,
             max_json_inspect_bytes: cfg.max_json_inspect_bytes.max(1024),
+            generation_store,
+            generation_store_capacity: cfg.generation_store_capacity,
+            serve_generation_endpoint: cfg.serve_generation_endpoint,
+            emit_generation_id_header: cfg.emit_generation_id_header,
+            clock: ctx.clock(),
+            pricing_catalog,
         }))
     }
 }
 
 /// Inspects non-streaming JSON and streaming SSE responses (both OpenAI and Anthropic
 /// formats) to record token usage, TTFT, and duration into `ctx.extensions`, [`AiMetrics`],
-/// and structured completion logs.
+/// [`AiGenerationStore`] (`GET /v1/generation?id=...`), and structured completion logs.
 pub struct AiUsageTrackerPlugin {
     metrics: Arc<AiMetrics>,
     sink: Option<UsageSink>,
     log_usage: bool,
     max_json_inspect_bytes: usize,
+    generation_store: Option<Arc<AiGenerationStore>>,
+    generation_store_capacity: usize,
+    serve_generation_endpoint: bool,
+    emit_generation_id_header: bool,
+    clock: Arc<dyn Clock>,
+    pricing_catalog: PricingCatalog,
 }
 
 impl HttpPlugin for AiUsageTrackerPlugin {
@@ -790,7 +831,74 @@ impl HttpPlugin for AiUsageTrackerPlugin {
     }
 
     fn hook_mask(&self) -> HookMask {
-        HookMask::ON_RESPONSE_HEADERS | HookMask::RESPONSE_BODY_STREAM | HookMask::ON_COMPLETE
+        let mut mask =
+            HookMask::ON_RESPONSE_HEADERS | HookMask::RESPONSE_BODY_STREAM | HookMask::ON_COMPLETE;
+        if self.serve_generation_endpoint && self.generation_store.is_some() {
+            mask |= HookMask::ON_REQUEST_HEADERS;
+        }
+        mask
+    }
+
+    fn on_request_headers<'a>(
+        &'a self,
+        ctx: &'a mut RequestCtx,
+        req: &'a mut RequestHead,
+    ) -> HookResult<'a, Flow> {
+        if !self.serve_generation_endpoint || req.method != Method::GET {
+            return HookResult::Ready(Flow::Continue);
+        }
+        let Some(store) = &self.generation_store else {
+            return HookResult::Ready(Flow::Continue);
+        };
+        let raw_path = req.uri.path();
+        let path = if raw_path.len() > 1 {
+            raw_path.trim_end_matches('/')
+        } else {
+            raw_path
+        };
+        if path != "/v1/generation" && path != "/generation" {
+            return HookResult::Ready(Flow::Continue);
+        }
+
+        ctx.insert_ext(DetectedEndpoint(AiEndpointKind::GenerationRetrieve));
+
+        let Some(gen_id) = extract_query_param(req.uri.query(), "id") else {
+            return HookResult::Ready(Flow::Respond(openai_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                Some("missing_generation_id"),
+                "Query parameter `id` is required (e.g., `GET /v1/generation?id=gen-1`)",
+            )));
+        };
+
+        let Some(record) = store.get(&gen_id) else {
+            return HookResult::Ready(Flow::Respond(openai_error_response(
+                StatusCode::NOT_FOUND,
+                "invalid_request_error",
+                Some("generation_not_found"),
+                &format!("Generation `{gen_id}` was not found"),
+            )));
+        };
+
+        // Strict virtual-key tenant isolation: callers with an authenticated key may only
+        // inspect generations belonging to that key.
+        if let Some(policy) = ctx.get_ext::<AiKeyPolicy>()
+            && record.key_id.as_deref() != Some(policy.key_id.as_str())
+        {
+            return HookResult::Ready(Flow::Respond(openai_error_response(
+                StatusCode::FORBIDDEN,
+                "permission_error",
+                Some("generation_not_allowed"),
+                &format!(
+                    "Virtual key `{}` is not allowed to inspect generation `{gen_id}`",
+                    policy.key_id
+                ),
+            )));
+        }
+
+        let payload = json!({ "data": *record });
+        let bytes = serde_json::to_vec(&payload).unwrap_or_default();
+        HookResult::Ready(Flow::Respond(BufferedResponse::json(StatusCode::OK, bytes)))
     }
 
     fn on_response_headers<'a>(
@@ -798,28 +906,44 @@ impl HttpPlugin for AiUsageTrackerPlugin {
         ctx: &'a mut RequestCtx,
         res: &'a mut ResponseHead,
     ) -> HookResult<'a, Flow> {
-        let is_sse = res
+        if self.emit_generation_id_header
+            && self.generation_store.is_some()
+            && ctx.get_ext::<AiRequestMeta>().is_some()
+            && let Ok(hv) = HeaderValue::from_str(&format!("gen-{}", ctx.request_id))
+        {
+            res.headers
+                .insert(HeaderName::from_static("x-shunt-generation-id"), hv);
+        }
+
+        let ct_lower = res
             .headers
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .map(|ct| ct.to_ascii_lowercase().contains("text/event-stream"))
-            .unwrap_or(false);
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        let is_sse = ct_lower.contains("text/event-stream");
+        let is_binary_media = ct_lower.starts_with("audio/")
+            || ct_lower.starts_with("image/")
+            || ct_lower.starts_with("video/")
+            || ct_lower.contains("application/octet-stream");
 
         let provider = ctx
             .get_ext::<AiRequestMeta>()
             .and_then(AiRequestMeta::active_target)
             .map(|t| t.provider.clone());
 
-        let collector = if is_sse {
-            UsageCollectorState::Sse(SseParser::new())
-        } else {
-            UsageCollectorState::Json {
-                buf: Vec::new(),
-                overflowed: false,
-            }
-        };
+        if !is_binary_media {
+            let collector = if is_sse {
+                UsageCollectorState::Sse(SseParser::new())
+            } else {
+                UsageCollectorState::Json {
+                    buf: Vec::new(),
+                    overflowed: false,
+                }
+            };
+            ctx.insert_ext(collector);
+        }
 
-        ctx.insert_ext(collector);
         ctx.insert_ext(AiUsage {
             provider,
             ..AiUsage::default()
@@ -900,12 +1024,10 @@ impl HttpPlugin for AiUsageTrackerPlugin {
         let meta = ctx.get_ext::<AiRequestMeta>();
         let cache_status = ctx.get_ext::<AiCacheStatus>();
 
-        // On an exact-match AI cache hit, annotate the active OTel span & inspector trace with
-        // GenAI metadata without double-counting upstream inference requests/tokens in `AiMetrics::record`.
-        if let Some(AiCacheStatus::Hit {
-            provider,
-            served_model,
-        }) = cache_status
+        // On any AI cache hit (exact, streaming, coalesced, or semantic), annotate OTel &
+        // optionally store a zero-cost generation record without double-counting upstream inference.
+        if let Some(cs) = cache_status
+            && let Some((provider, served_model)) = cs.hit_target()
         {
             if ctx.has_trace_collectors() {
                 let op = meta
@@ -913,21 +1035,55 @@ impl HttpPlugin for AiUsageTrackerPlugin {
                     .unwrap_or("chat");
                 let requested_model = meta
                     .map(|m| m.requested_model.as_str())
-                    .unwrap_or(served_model.as_str());
+                    .unwrap_or(served_model);
                 if let Some(span) = ctx.get_ext::<SpanHandle>() {
                     span.set_name(format!("{op} {requested_model}"));
                 }
                 ctx.annotate_str("gen_ai.operation.name", op);
-                ctx.annotate_str("gen_ai.provider.name", provider.as_str());
+                ctx.annotate_str("gen_ai.provider.name", provider);
                 ctx.annotate_str("gen_ai.request.model", requested_model);
-                ctx.annotate_str("gen_ai.response.model", served_model.as_str());
-                ctx.annotate_str("shunt.ai.cache_status", "hit");
+                ctx.annotate_str("gen_ai.response.model", served_model);
+                ctx.annotate_str("shunt.ai.cache_status", cs.as_str());
                 if let Some(policy) = ctx.get_ext::<AiKeyPolicy>() {
                     ctx.annotate_str("shunt.ai.key_id", policy.key_id.as_str());
                     if let Some(team) = &policy.team {
                         ctx.annotate_str("shunt.ai.team", team.as_str());
                     }
                 }
+            }
+            if let Some(store) = &self.generation_store {
+                let gw_id = format!("gen-{}", summary.request_id);
+                let policy = ctx.get_ext::<AiKeyPolicy>();
+                store.insert(
+                    AiGenerationRecord {
+                        id: gw_id.clone(),
+                        gateway_id: Some(gw_id),
+                        created_at_ms: self.clock.now_ms(),
+                        endpoint: meta
+                            .map(|m| m.endpoint.as_str().to_owned())
+                            .unwrap_or_else(|| "chat_completions".to_owned()),
+                        model: meta
+                            .map(|m| m.requested_model.clone())
+                            .unwrap_or_else(|| served_model.to_owned()),
+                        served_model: served_model.to_owned(),
+                        provider_name: provider.to_owned(),
+                        streamed: meta.map(|m| m.stream).unwrap_or(false),
+                        status: summary.status.map(|s| s.as_u16()).unwrap_or(200),
+                        tokens_prompt: 0,
+                        tokens_completion: 0,
+                        tokens_cached_read: 0,
+                        tokens_cache_write: 0,
+                        tokens_reasoning: 0,
+                        total_cost: 0.0,
+                        latency_ms: summary.total_duration.as_secs_f64() * 1000.0,
+                        generation_time_ms: summary.total_duration.as_secs_f64() * 1000.0,
+                        finish_reason: None,
+                        cache_status: Some(cs.as_str().to_owned()),
+                        key_id: policy.map(|p| p.key_id.clone()),
+                        team: policy.and_then(|p| p.team.clone()),
+                    },
+                    self.generation_store_capacity,
+                );
             }
             return HookResult::Ready(());
         }
@@ -995,6 +1151,64 @@ impl HttpPlugin for AiUsageTrackerPlugin {
         };
 
         self.metrics.record(&report);
+
+        if let Some(store) = &self.generation_store
+            && summary.attempts > 0
+        {
+            let gw_id = format!("gen-{}", summary.request_id);
+            let canonical_id = usage
+                .and_then(|u| u.response_id.clone())
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or_else(|| gw_id.clone());
+            let budget_nano = ctx
+                .get_ext::<AiRecordedCost>()
+                .map(AiRecordedCost::nano_usd)
+                .unwrap_or(0);
+            let cost_nano = if budget_nano > 0 {
+                budget_nano
+            } else {
+                self.pricing_catalog
+                    .lookup(&report.served_model, &report.requested_model)
+                    .map(|p| {
+                        p.cost_nano_usd_detailed(
+                            report.prompt_tokens.unwrap_or(0),
+                            report.cached_prompt_tokens.unwrap_or(0),
+                            report.cache_creation_prompt_tokens.unwrap_or(0),
+                            report.completion_tokens.unwrap_or(0),
+                        )
+                    })
+                    .unwrap_or(0)
+            };
+
+            store.insert(
+                AiGenerationRecord {
+                    id: canonical_id,
+                    gateway_id: Some(gw_id),
+                    created_at_ms: self.clock.now_ms(),
+                    endpoint: meta
+                        .map(|m| m.endpoint.as_str().to_owned())
+                        .unwrap_or_else(|| "chat_completions".to_owned()),
+                    model: report.requested_model.clone(),
+                    served_model: report.served_model.clone(),
+                    provider_name: report.provider.clone(),
+                    streamed: report.stream,
+                    status: report.status.unwrap_or(0),
+                    tokens_prompt: report.prompt_tokens.unwrap_or(0),
+                    tokens_completion: report.completion_tokens.unwrap_or(0),
+                    tokens_cached_read: report.cached_prompt_tokens.unwrap_or(0),
+                    tokens_cache_write: report.cache_creation_prompt_tokens.unwrap_or(0),
+                    tokens_reasoning: report.reasoning_tokens.unwrap_or(0),
+                    total_cost: nano_usd_to_usd(cost_nano),
+                    latency_ms: report.ttft.unwrap_or(report.total_duration).as_secs_f64() * 1000.0,
+                    generation_time_ms: report.total_duration.as_secs_f64() * 1000.0,
+                    finish_reason: usage.and_then(|u| u.finish_reason.clone()),
+                    cache_status: cache_status.map(|cs| cs.as_str().to_owned()),
+                    key_id: report.key_id.clone(),
+                    team: report.team.clone(),
+                },
+                self.generation_store_capacity,
+            );
+        }
 
         if ctx.has_trace_collectors() {
             let op = meta
@@ -1080,6 +1294,19 @@ impl HttpPlugin for AiUsageTrackerPlugin {
 const fn genai_operation_name(endpoint: AiEndpointKind) -> &'static str {
     match endpoint {
         AiEndpointKind::Embeddings => "embeddings",
+        AiEndpointKind::Completions => "text_completion",
+        AiEndpointKind::Rerank => "rerank",
+        AiEndpointKind::Moderations => "moderations",
+        AiEndpointKind::ImagesGenerations
+        | AiEndpointKind::ImagesEdits
+        | AiEndpointKind::ImagesVariations => "images",
+        AiEndpointKind::AudioSpeech
+        | AiEndpointKind::AudioTranscriptions
+        | AiEndpointKind::AudioTranslations => "audio",
+        AiEndpointKind::Realtime => "realtime",
+        AiEndpointKind::Files => "files",
+        AiEndpointKind::Batches => "batches",
+        AiEndpointKind::GenerationRetrieve => "generation",
         AiEndpointKind::ChatCompletions
         | AiEndpointKind::AnthropicMessages
         | AiEndpointKind::OpenAiResponses
@@ -1136,6 +1363,15 @@ fn contains_first_token(val: &Value) -> bool {
                     return true;
                 }
             }
+            // Legacy `/v1/completions` streaming chunk: choices[0].text
+            if ch
+                .get("text")
+                .and_then(Value::as_str)
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
+            {
+                return true;
+            }
         }
     }
 
@@ -1175,6 +1411,54 @@ fn contains_first_token(val: &Value) -> bool {
 }
 
 fn extract_usage_from_json(val: &Value, usage: &mut AiUsage) {
+    // Capture upstream response/generation ID (OpenAI `id`, Anthropic `message.id`, Responses `response.id`).
+    if usage.response_id.is_none() {
+        if let Some(id) = val
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            usage.response_id = Some(id.to_owned());
+        } else if let Some(id) = val
+            .get("message")
+            .and_then(|m| m.get("id"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            usage.response_id = Some(id.to_owned());
+        } else if let Some(id) = val
+            .get("response")
+            .and_then(|r| r.get("id"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            usage.response_id = Some(id.to_owned());
+        }
+    }
+
+    // Capture finish/stop reason when present.
+    if let Some(fr) = val
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.first())
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            val.get("stop_reason")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            val.get("delta")
+                .and_then(|d| d.get("stop_reason"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        })
+    {
+        usage.finish_reason = Some(fr.to_owned());
+    }
+
     // Model name (OpenAI top-level, Gemini modelVersion, Anthropic message_start.message.model,
     // or OpenAI Responses SSE response.completed / response.created)
     if let Some(m) = val.get("model").and_then(Value::as_str) {

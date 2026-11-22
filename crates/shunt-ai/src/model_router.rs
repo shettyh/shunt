@@ -7,8 +7,11 @@ use shunt_plugin_sdk::{
     BufferedResponse, BuildContext, Bytes, Clock, Flow, HeaderName, HeaderValue, HookMask,
     HookResult, HttpPlugin, Method, PluginBuildError, PluginConfig, PluginFactory, RequestCtx,
     RequestHead, RequestSummary, ResponseHead, RouteDecision, StatusCode, UpstreamSelection,
+    header,
 };
 
+use crate::multimodal::extract_query_param;
+use crate::multipart::{extract_multipart_text_field, parse_multipart_boundary};
 use crate::pricing::{ModelPricing, PricingCatalog};
 use crate::routing::{
     LatencyRoutingConfig, RoutingCursorTable, TargetLatencyTable, UnknownCostPolicy,
@@ -172,6 +175,12 @@ struct AiModelRouterConfig {
     rules: Vec<ModelRule>,
     /// Catch-all fallback targets when neither `models` nor `rules` match.
     default_targets: Vec<TargetSpec>,
+    /// Optional dedicated targets for `/v1/files*` resource endpoints (falls back to `default_targets`).
+    #[serde(default)]
+    files_targets: Vec<TargetSpec>,
+    /// Optional dedicated targets for `/v1/batches*` resource endpoints (falls back to `default_targets`).
+    #[serde(default)]
+    batches_targets: Vec<TargetSpec>,
 }
 
 impl Default for AiModelRouterConfig {
@@ -194,9 +203,21 @@ impl Default for AiModelRouterConfig {
             models: HashMap::new(),
             rules: Vec::new(),
             default_targets: Vec::new(),
+            files_targets: Vec::new(),
+            batches_targets: Vec::new(),
         }
     }
 }
+
+/// Multipart boundary captured from the incoming `Content-Type` header so `ai-provider-adapter`
+/// can rewrite aliased `model` fields in multipart audio/image requests without re-parsing headers.
+#[derive(Debug, Clone)]
+pub struct MultipartBoundary(pub String);
+
+/// Optional explicit provider selector header (`x-shunt-provider`) captured for resource endpoints
+/// (`/v1/files*`, `/v1/batches*`).
+#[derive(Debug, Clone)]
+struct RequestedProviderHeader(String);
 
 /// Factory for the `ai-model-router` plugin.
 pub struct AiModelRouterFactory;
@@ -227,10 +248,15 @@ impl PluginFactory for AiModelRouterFactory {
             });
         }
 
-        if cfg.models.is_empty() && cfg.rules.is_empty() && cfg.default_targets.is_empty() {
+        if cfg.models.is_empty()
+            && cfg.rules.is_empty()
+            && cfg.default_targets.is_empty()
+            && cfg.files_targets.is_empty()
+            && cfg.batches_targets.is_empty()
+        {
             return Err(PluginBuildError::BuildFailed {
                 plugin: self.name().to_owned(),
-                message: "configure at least one entry in `models`, `rules`, or `default_targets`"
+                message: "configure at least one entry in `models`, `rules`, `default_targets`, `files_targets`, or `batches_targets`"
                     .to_owned(),
             });
         }
@@ -253,6 +279,12 @@ impl PluginFactory for AiModelRouterFactory {
         }
         if !cfg.default_targets.is_empty() {
             validate_targets(self.name(), "default_targets", &cfg.default_targets)?;
+        }
+        if !cfg.files_targets.is_empty() {
+            validate_targets(self.name(), "files_targets", &cfg.files_targets)?;
+        }
+        if !cfg.batches_targets.is_empty() {
+            validate_targets(self.name(), "batches_targets", &cfg.batches_targets)?;
         }
 
         let pricing_catalog =
@@ -328,6 +360,8 @@ impl PluginFactory for AiModelRouterFactory {
             models: cfg.models,
             rules: cfg.rules,
             default_targets: cfg.default_targets,
+            files_targets: cfg.files_targets,
+            batches_targets: cfg.batches_targets,
             models_list_json,
             models_by_id,
             catalog_entries,
@@ -483,6 +517,8 @@ pub struct AiModelRouterPlugin {
     models: HashMap<String, ModelEntryConfig>,
     rules: Vec<ModelRule>,
     default_targets: Vec<TargetSpec>,
+    files_targets: Vec<TargetSpec>,
+    batches_targets: Vec<TargetSpec>,
     models_list_json: Bytes,
     models_by_id: HashMap<String, Bytes>,
     catalog_entries: Vec<(String, String)>,
@@ -569,6 +605,224 @@ impl AiModelRouterPlugin {
             ),
         }
     }
+
+    fn finish_model_routing<'a>(
+        &'a self,
+        ctx: &'a mut RequestCtx,
+        endpoint: AiEndpointKind,
+        model: String,
+        probe_stream: bool,
+        parsed: &Value,
+        raw_body: &[u8],
+    ) -> HookResult<'a, Flow> {
+        // Enforce virtual key model ACL before routing or local count_tokens.
+        if let Some(policy) = ctx.get_ext::<AiKeyPolicy>()
+            && !policy.allows_model(&model)
+        {
+            let resp = endpoint_error_response(
+                endpoint,
+                StatusCode::FORBIDDEN,
+                "permission_error",
+                Some("model_not_allowed"),
+                &format!(
+                    "Virtual key `{}` is not allowed to access model `{model}`",
+                    policy.key_id
+                ),
+            );
+            return HookResult::Ready(Flow::Respond(resp));
+        }
+
+        // Local Anthropic `POST /v1/messages/count_tokens` estimation fast path.
+        if endpoint == AiEndpointKind::AnthropicCountTokens && self.serve_count_tokens_endpoint {
+            let est = estimate_request_tokens(endpoint, raw_body);
+            let payload = json!({ "input_tokens": est.input_tokens });
+            let bytes = serde_json::to_vec(&payload).unwrap_or_default();
+            return HookResult::Ready(Flow::Respond(BufferedResponse::json(StatusCode::OK, bytes)));
+        }
+
+        // Apply per-key provider overrides if present, else resolve from route rules.
+        let override_targets = ctx
+            .get_ext::<AiKeyPolicy>()
+            .and_then(|p| p.override_targets(&model));
+
+        let Some((group_key, strategy, all_targets)) = override_targets
+            .map(|t| (format!("override:{model}"), RoutingStrategy::Priority, t))
+            .or_else(|| self.resolve_targets_with_strategy(&model))
+        else {
+            let resp = endpoint_error_response(
+                endpoint,
+                StatusCode::NOT_FOUND,
+                "invalid_request_error",
+                Some("model_not_found"),
+                &format!("The model `{model}` is not configured on this gateway"),
+            );
+            return HookResult::Ready(Flow::Respond(resp));
+        };
+
+        // Filter targets by virtual key `allowed_providers` if configured.
+        let allowed_targets: Vec<AiTarget> = match ctx.get_ext::<AiKeyPolicy>() {
+            Some(policy) if !policy.allowed_providers.is_empty() => all_targets
+                .into_iter()
+                .filter(|t| policy.allows_provider(&t.provider))
+                .collect(),
+            _ => all_targets,
+        };
+
+        if allowed_targets.is_empty() {
+            let key_id = ctx
+                .get_ext::<AiKeyPolicy>()
+                .map(|p| p.key_id.as_str())
+                .unwrap_or("unknown");
+            let resp = endpoint_error_response(
+                endpoint,
+                StatusCode::FORBIDDEN,
+                "permission_error",
+                Some("provider_not_allowed"),
+                &format!("Virtual key `{key_id}` has no permitted providers for model `{model}`"),
+            );
+            return HookResult::Ready(Flow::Respond(resp));
+        }
+
+        // Enforce multi-protocol capability guards before ordering/failover.
+        let required_caps = detect_required_capabilities(endpoint, parsed);
+        let capable_targets: Vec<AiTarget> = if required_caps.is_empty() {
+            allowed_targets
+        } else {
+            allowed_targets
+                .into_iter()
+                .filter(|t| t.supports_all(&required_caps))
+                .collect()
+        };
+
+        if capable_targets.is_empty() {
+            let (code, msg) = if required_caps.len() == 1
+                && matches!(
+                    required_caps[0],
+                    AiCapability::Embeddings
+                        | AiCapability::Chat
+                        | AiCapability::Rerank
+                        | AiCapability::Completions
+                        | AiCapability::Moderations
+                        | AiCapability::Images
+                        | AiCapability::Audio
+                        | AiCapability::Realtime
+                ) {
+                (
+                    "unsupported_endpoint",
+                    format!("No configured targets for model `{model}` support `{endpoint}`"),
+                )
+            } else {
+                let cap_names: Vec<&str> = required_caps.iter().map(|c| c.as_str()).collect();
+                (
+                    "unsupported_capability",
+                    format!(
+                        "No configured targets for model `{model}` support required capabilities: [{}]",
+                        cap_names.join(", ")
+                    ),
+                )
+            };
+            let resp = endpoint_error_response(
+                endpoint,
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                Some(code),
+                &msg,
+            );
+            return HookResult::Ready(Flow::Respond(resp));
+        }
+
+        // Rank/order eligible targets according to the active smart routing strategy.
+        let targets = self.apply_strategy(
+            &group_key,
+            strategy,
+            capable_targets,
+            endpoint,
+            &model,
+            raw_body,
+        );
+
+        let effective_stream = if endpoint.supports_sse_streaming() {
+            probe_stream
+        } else {
+            false
+        };
+
+        ctx.insert_ext(AiRequestMeta::with_strategy(
+            endpoint,
+            model,
+            effective_stream,
+            strategy,
+            targets,
+        ));
+        HookResult::Ready(Flow::Continue)
+    }
+}
+
+/// Classifies an incoming AI gateway request path and HTTP method into an [`AiEndpointKind`].
+pub fn classify_ai_endpoint(method: &Method, path: &str) -> AiEndpointKind {
+    if *method == Method::GET && (path == "/v1/generation" || path == "/generation") {
+        return AiEndpointKind::GenerationRetrieve;
+    }
+    if path == "/v1/realtime" || path == "/realtime" || path.ends_with("/realtime") {
+        return AiEndpointKind::Realtime;
+    }
+    if path.ends_with("/embeddings") {
+        return AiEndpointKind::Embeddings;
+    }
+    if path.ends_with("/rerank") {
+        return AiEndpointKind::Rerank;
+    }
+    if path.ends_with("/moderations") {
+        return AiEndpointKind::Moderations;
+    }
+    if path.ends_with("/images/generations") {
+        return AiEndpointKind::ImagesGenerations;
+    }
+    if path.ends_with("/images/edits") {
+        return AiEndpointKind::ImagesEdits;
+    }
+    if path.ends_with("/images/variations") {
+        return AiEndpointKind::ImagesVariations;
+    }
+    if path.ends_with("/audio/speech") {
+        return AiEndpointKind::AudioSpeech;
+    }
+    if path.ends_with("/audio/transcriptions") {
+        return AiEndpointKind::AudioTranscriptions;
+    }
+    if path.ends_with("/audio/translations") {
+        return AiEndpointKind::AudioTranslations;
+    }
+    if path == "/v1/files"
+        || path == "/files"
+        || path.starts_with("/v1/files/")
+        || path.starts_with("/files/")
+    {
+        return AiEndpointKind::Files;
+    }
+    if path == "/v1/batches"
+        || path == "/batches"
+        || path.starts_with("/v1/batches/")
+        || path.starts_with("/batches/")
+    {
+        return AiEndpointKind::Batches;
+    }
+    if path.ends_with("/messages/count_tokens") {
+        return AiEndpointKind::AnthropicCountTokens;
+    }
+    if path.ends_with("/messages") {
+        return AiEndpointKind::AnthropicMessages;
+    }
+    if path.ends_with("/responses") {
+        return AiEndpointKind::OpenAiResponses;
+    }
+    if path.ends_with("/chat/completions") {
+        return AiEndpointKind::ChatCompletions;
+    }
+    if path.ends_with("/completions") {
+        return AiEndpointKind::Completions;
+    }
+    AiEndpointKind::ChatCompletions
 }
 
 impl HttpPlugin for AiModelRouterPlugin {
@@ -672,18 +926,121 @@ impl HttpPlugin for AiModelRouterPlugin {
             }
         }
 
-        let endpoint = if path.ends_with("/embeddings") {
-            AiEndpointKind::Embeddings
-        } else if path.ends_with("/messages/count_tokens") {
-            AiEndpointKind::AnthropicCountTokens
-        } else if path.ends_with("/messages") {
-            AiEndpointKind::AnthropicMessages
-        } else if path.ends_with("/responses") {
-            AiEndpointKind::OpenAiResponses
-        } else {
-            AiEndpointKind::ChatCompletions
-        };
+        if let Some(ct) = req
+            .headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            && let Some(boundary) = parse_multipart_boundary(ct)
+        {
+            ctx.insert_ext(MultipartBoundary(boundary));
+        }
+
+        if let Some(prov) = req
+            .headers
+            .get("x-shunt-provider")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            ctx.insert_ext(RequestedProviderHeader(prov.to_owned()));
+        }
+
+        let endpoint = classify_ai_endpoint(&req.method, path);
         ctx.insert_ext(DetectedEndpoint(endpoint));
+
+        // WebSocket upgrades (`GET /v1/realtime?model=...`) skip `on_request_body_buffered`,
+        // so resolve the target chain and enforce virtual-key ACLs directly in `on_request_headers`.
+        if endpoint == AiEndpointKind::Realtime {
+            let Some(model) = extract_query_param(req.uri.query(), "model") else {
+                let resp = endpoint_error_response(
+                    endpoint,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    Some("missing_model"),
+                    "Realtime WebSocket request must include a non-empty `?model=` query parameter",
+                );
+                return HookResult::Ready(Flow::Respond(resp));
+            };
+
+            if let Some(policy) = ctx.get_ext::<AiKeyPolicy>()
+                && !policy.allows_model(&model)
+            {
+                let resp = endpoint_error_response(
+                    endpoint,
+                    StatusCode::FORBIDDEN,
+                    "permission_error",
+                    Some("model_not_allowed"),
+                    &format!(
+                        "Virtual key `{}` is not allowed to access model `{model}`",
+                        policy.key_id
+                    ),
+                );
+                return HookResult::Ready(Flow::Respond(resp));
+            }
+
+            let override_targets = ctx
+                .get_ext::<AiKeyPolicy>()
+                .and_then(|p| p.override_targets(&model));
+            let Some((group_key, strategy, all_targets)) = override_targets
+                .map(|t| (format!("override:{model}"), RoutingStrategy::Priority, t))
+                .or_else(|| self.resolve_targets_with_strategy(&model))
+            else {
+                let resp = endpoint_error_response(
+                    endpoint,
+                    StatusCode::NOT_FOUND,
+                    "invalid_request_error",
+                    Some("model_not_found"),
+                    &format!("The model `{model}` is not configured on this gateway"),
+                );
+                return HookResult::Ready(Flow::Respond(resp));
+            };
+
+            let allowed_targets: Vec<AiTarget> = match ctx.get_ext::<AiKeyPolicy>() {
+                Some(policy) if !policy.allowed_providers.is_empty() => all_targets
+                    .into_iter()
+                    .filter(|t| policy.allows_provider(&t.provider))
+                    .collect(),
+                _ => all_targets,
+            };
+            if allowed_targets.is_empty() {
+                let key_id = ctx
+                    .get_ext::<AiKeyPolicy>()
+                    .map(|p| p.key_id.as_str())
+                    .unwrap_or("unknown");
+                let resp = endpoint_error_response(
+                    endpoint,
+                    StatusCode::FORBIDDEN,
+                    "permission_error",
+                    Some("provider_not_allowed"),
+                    &format!(
+                        "Virtual key `{key_id}` has no permitted providers for model `{model}`"
+                    ),
+                );
+                return HookResult::Ready(Flow::Respond(resp));
+            }
+
+            let required_caps = [AiCapability::Realtime];
+            let capable_targets: Vec<AiTarget> = allowed_targets
+                .into_iter()
+                .filter(|t| t.supports_all(&required_caps))
+                .collect();
+            if capable_targets.is_empty() {
+                let resp = endpoint_error_response(
+                    endpoint,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    Some("unsupported_endpoint"),
+                    &format!("No configured targets for model `{model}` support `{endpoint}`"),
+                );
+                return HookResult::Ready(Flow::Respond(resp));
+            }
+
+            let targets =
+                self.apply_strategy(&group_key, strategy, capable_targets, endpoint, &model, &[]);
+            ctx.insert_ext(AiRequestMeta::with_strategy(
+                endpoint, model, true, strategy, targets,
+            ));
+        }
 
         HookResult::Ready(Flow::Continue)
     }
@@ -697,6 +1054,114 @@ impl HttpPlugin for AiModelRouterPlugin {
             .get_ext::<DetectedEndpoint>()
             .map(|d| d.0)
             .unwrap_or(AiEndpointKind::ChatCompletions);
+
+        // Discovery, generation lookup, and WebSocket Realtime do not route from a JSON body
+        // (`POST /v1/messages/count_tokens` DOES parse JSON to enforce model ACL and estimate tokens).
+        if matches!(
+            endpoint,
+            AiEndpointKind::ModelsList
+                | AiEndpointKind::ModelRetrieve
+                | AiEndpointKind::GenerationRetrieve
+                | AiEndpointKind::Realtime
+        ) {
+            return HookResult::Ready(Flow::Continue);
+        }
+
+        // Resource CRUD endpoints (`/v1/files*`, `/v1/batches*`) have no `model` body field.
+        if endpoint.is_resource_endpoint() {
+            let specs: &[TargetSpec] = match endpoint {
+                AiEndpointKind::Files if !self.files_targets.is_empty() => &self.files_targets,
+                AiEndpointKind::Batches if !self.batches_targets.is_empty() => {
+                    &self.batches_targets
+                }
+                _ => &self.default_targets,
+            };
+            let requested_label = endpoint.as_str().to_owned();
+            let mut candidates: Vec<AiTarget> =
+                specs.iter().map(|s| s.resolve(&requested_label)).collect();
+
+            if let Some(req_prov) = ctx.get_ext::<RequestedProviderHeader>() {
+                candidates.retain(|t| t.provider == req_prov.0);
+            }
+
+            if let Some(policy) = ctx.get_ext::<AiKeyPolicy>()
+                && !policy.allowed_providers.is_empty()
+            {
+                candidates.retain(|t| policy.allows_provider(&t.provider));
+            }
+
+            let req_cap = if endpoint == AiEndpointKind::Files {
+                AiCapability::Files
+            } else {
+                AiCapability::Batches
+            };
+            candidates.retain(|t| t.supports(req_cap));
+
+            if candidates.is_empty() {
+                let resp = endpoint_error_response(
+                    endpoint,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    Some("no_provider_configured"),
+                    &format!(
+                        "No eligible provider target configured for `{endpoint}` (configure `files_targets`, `batches_targets`, or `default_targets`)"
+                    ),
+                );
+                return HookResult::Ready(Flow::Respond(resp));
+            }
+
+            let targets = self.apply_strategy(
+                endpoint.as_str(),
+                self.default_targets_strategy,
+                candidates,
+                endpoint,
+                &requested_label,
+                body,
+            );
+            ctx.insert_ext(AiRequestMeta::with_strategy(
+                endpoint,
+                requested_label,
+                false,
+                self.default_targets_strategy,
+                targets,
+            ));
+            return HookResult::Ready(Flow::Continue);
+        }
+
+        // Multipart form-data endpoints (`/v1/audio/transcriptions`, `/v1/audio/translations`,
+        // `/v1/images/edits`, `/v1/images/variations`) carry `model` as a multipart text field.
+        if endpoint.is_multipart_model_endpoint() {
+            let Some(boundary) = ctx.get_ext::<MultipartBoundary>().map(|b| b.0.clone()) else {
+                let resp = endpoint_error_response(
+                    endpoint,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    Some("invalid_multipart"),
+                    "Request must use `Content-Type: multipart/form-data; boundary=...`",
+                );
+                return HookResult::Ready(Flow::Respond(resp));
+            };
+
+            let model = extract_multipart_text_field(body, &boundary, "model").or_else(|| {
+                if endpoint == AiEndpointKind::ImagesVariations {
+                    Some("dall-e-2".to_owned())
+                } else {
+                    None
+                }
+            });
+            let Some(model) = model else {
+                let resp = endpoint_error_response(
+                    endpoint,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    Some("missing_model"),
+                    "Multipart request must include a non-empty `model` form field",
+                );
+                return HookResult::Ready(Flow::Respond(resp));
+            };
+
+            return self.finish_model_routing(ctx, endpoint, model, false, &Value::Null, body);
+        }
 
         let parsed: Value = match serde_json::from_slice(body) {
             Ok(v) => v,
@@ -733,138 +1198,7 @@ impl HttpPlugin for AiModelRouterPlugin {
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
-        // Enforce virtual key model ACL before routing or local count_tokens.
-        if let Some(policy) = ctx.get_ext::<AiKeyPolicy>()
-            && !policy.allows_model(&model)
-        {
-            let resp = endpoint_error_response(
-                endpoint,
-                StatusCode::FORBIDDEN,
-                "permission_error",
-                Some("model_not_allowed"),
-                &format!(
-                    "Virtual key `{}` is not allowed to access model `{model}`",
-                    policy.key_id
-                ),
-            );
-            return HookResult::Ready(Flow::Respond(resp));
-        }
-
-        // Local Anthropic `POST /v1/messages/count_tokens` estimation fast path.
-        if endpoint == AiEndpointKind::AnthropicCountTokens && self.serve_count_tokens_endpoint {
-            let est = estimate_request_tokens(endpoint, body);
-            let payload = json!({ "input_tokens": est.input_tokens });
-            let bytes = serde_json::to_vec(&payload).unwrap_or_default();
-            return HookResult::Ready(Flow::Respond(BufferedResponse::json(StatusCode::OK, bytes)));
-        }
-
-        // Apply per-key provider overrides if present, else resolve from route rules.
-        let override_targets = ctx
-            .get_ext::<AiKeyPolicy>()
-            .and_then(|p| p.override_targets(&model));
-
-        let Some((group_key, strategy, all_targets)) = override_targets
-            .map(|t| (format!("override:{model}"), RoutingStrategy::Priority, t))
-            .or_else(|| self.resolve_targets_with_strategy(&model))
-        else {
-            let resp = endpoint_error_response(
-                endpoint,
-                StatusCode::NOT_FOUND,
-                "invalid_request_error",
-                Some("model_not_found"),
-                &format!("The model `{model}` is not configured on this gateway"),
-            );
-            return HookResult::Ready(Flow::Respond(resp));
-        };
-
-        // Filter targets by virtual key `allowed_providers` if configured.
-        let allowed_targets: Vec<AiTarget> = match ctx.get_ext::<AiKeyPolicy>() {
-            Some(policy) if !policy.allowed_providers.is_empty() => all_targets
-                .into_iter()
-                .filter(|t| policy.allows_provider(&t.provider))
-                .collect(),
-            _ => all_targets,
-        };
-
-        if allowed_targets.is_empty() {
-            let key_id = ctx
-                .get_ext::<AiKeyPolicy>()
-                .map(|p| p.key_id.as_str())
-                .unwrap_or("unknown");
-            let resp = endpoint_error_response(
-                endpoint,
-                StatusCode::FORBIDDEN,
-                "permission_error",
-                Some("provider_not_allowed"),
-                &format!("Virtual key `{key_id}` has no permitted providers for model `{model}`"),
-            );
-            return HookResult::Ready(Flow::Respond(resp));
-        }
-
-        // Enforce multi-protocol capability guards before ordering/failover.
-        let required_caps = detect_required_capabilities(endpoint, &parsed);
-        let capable_targets: Vec<AiTarget> = if required_caps.is_empty() {
-            allowed_targets
-        } else {
-            allowed_targets
-                .into_iter()
-                .filter(|t| t.supports_all(&required_caps))
-                .collect()
-        };
-
-        if capable_targets.is_empty() {
-            let (code, msg) = if required_caps.len() == 1
-                && matches!(
-                    required_caps[0],
-                    AiCapability::Embeddings | AiCapability::Chat
-                ) {
-                (
-                    "unsupported_endpoint",
-                    format!("No configured targets for model `{model}` support `{endpoint}`"),
-                )
-            } else {
-                let cap_names: Vec<&str> = required_caps.iter().map(|c| c.as_str()).collect();
-                (
-                    "unsupported_capability",
-                    format!(
-                        "No configured targets for model `{model}` support required capabilities: [{}]",
-                        cap_names.join(", ")
-                    ),
-                )
-            };
-            let resp = endpoint_error_response(
-                endpoint,
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                Some(code),
-                &msg,
-            );
-            return HookResult::Ready(Flow::Respond(resp));
-        }
-
-        // Rank/order eligible targets according to the active smart routing strategy.
-        let targets = self.apply_strategy(
-            &group_key,
-            strategy,
-            capable_targets,
-            endpoint,
-            &model,
-            body,
-        );
-
-        let effective_stream = match endpoint {
-            AiEndpointKind::Embeddings => false,
-            _ => probe_stream,
-        };
-
-        ctx.insert_ext(AiRequestMeta::with_strategy(
-            endpoint,
-            model,
-            effective_stream,
-            strategy,
-            targets,
-        ));
-        HookResult::Ready(Flow::Continue)
+        self.finish_model_routing(ctx, endpoint, model, probe_stream, &parsed, body)
     }
 
     fn on_route<'a>(

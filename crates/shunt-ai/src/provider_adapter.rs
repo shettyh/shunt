@@ -37,6 +37,15 @@ use crate::ingress::responses::{
     ChatToResponsesSseTranslator, chat_to_responses_response, responses_to_chat_request,
     rewrite_openai_responses_request,
 };
+use crate::model_router::MultipartBoundary;
+use crate::multimodal::{
+    RerankRequestContext, bedrock_to_openai_rerank_response, extract_rerank_context,
+    gemini_imagen_path, gemini_imagen_to_openai_response, normalize_voyage_rerank_response,
+    openai_to_bedrock_rerank_request, openai_to_gemini_imagen_request, rewrite_json_model_field,
+    rewrite_openai_completions_request, rewrite_realtime_uri, rewrite_rerank_request,
+    strip_realtime_ws_key_subprotocol,
+};
+use crate::multipart::rewrite_multipart_text_field;
 use crate::presets::{
     DefaultAuthShape, KeyPoolTable, ProviderPreset, default_auth_shape_for_dialect,
 };
@@ -52,6 +61,16 @@ use crate::types::{
 
 const DEFAULT_OPENAI_CHAT_PATH: &str = "/v1/chat/completions";
 const DEFAULT_OPENAI_EMBEDDINGS_PATH: &str = "/v1/embeddings";
+const DEFAULT_OPENAI_COMPLETIONS_PATH: &str = "/v1/completions";
+const DEFAULT_OPENAI_RERANK_PATH: &str = "/v1/rerank";
+const DEFAULT_BEDROCK_RERANK_PATH: &str = "/rerank";
+const DEFAULT_OPENAI_MODERATIONS_PATH: &str = "/v1/moderations";
+const DEFAULT_OPENAI_IMAGES_BASE_PATH: &str = "/v1/images";
+const DEFAULT_OPENAI_AUDIO_BASE_PATH: &str = "/v1/audio";
+const DEFAULT_OPENAI_REALTIME_PATH: &str = "/v1/realtime";
+const DEFAULT_AZURE_REALTIME_PATH: &str = "/openai/realtime";
+const DEFAULT_OPENAI_FILES_PATH: &str = "/v1/files";
+const DEFAULT_OPENAI_BATCHES_PATH: &str = "/v1/batches";
 const DEFAULT_ANTHROPIC_PATH: &str = "/v1/messages";
 const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_ANTHROPIC_MAX_TOKENS: u64 = 4096;
@@ -172,6 +191,30 @@ pub struct ProviderInstanceConfig {
     /// `/v1/responses` transparently translates through Chat Completions.
     #[serde(default)]
     pub responses_path: Option<String>,
+    /// Override legacy completions path (default: `"/v1/completions"`).
+    #[serde(default)]
+    pub completions_path: Option<String>,
+    /// Override rerank path (default: `"/v1/rerank"`, `"/v2/rerank"` for Cohere, `"/rerank"` for Bedrock).
+    #[serde(default)]
+    pub rerank_path: Option<String>,
+    /// Override moderations path (default: `"/v1/moderations"`).
+    #[serde(default)]
+    pub moderations_path: Option<String>,
+    /// Override images base path (default: `"/v1/images"` -> `/generations`, `/edits`, `/variations`).
+    #[serde(default)]
+    pub images_base_path: Option<String>,
+    /// Override audio base path (default: `"/v1/audio"` -> `/speech`, `/transcriptions`, `/translations`).
+    #[serde(default)]
+    pub audio_base_path: Option<String>,
+    /// Override WebSocket realtime path (default: `"/v1/realtime"` or `"/openai/realtime"` for Azure).
+    #[serde(default)]
+    pub realtime_path: Option<String>,
+    /// Override files base path (default: `"/v1/files"`).
+    #[serde(default)]
+    pub files_path: Option<String>,
+    /// Override batches base path (default: `"/v1/batches"`).
+    #[serde(default)]
+    pub batches_path: Option<String>,
     /// OpenAI-compatible: inject `stream_options.include_usage = true` on streaming chat
     /// (default: `true`, or preset default e.g. `false` for `mistral`).
     #[serde(default)]
@@ -265,13 +308,23 @@ impl CompiledAuth {
 }
 
 struct CompiledProvider {
+    preset: Option<ProviderPreset>,
     dialect: ProviderDialect,
+    region: Option<String>,
     auth: CompiledAuth,
     key_cooldown: Duration,
     key_rotate_statuses: HashSet<u16>,
     chat_path: Uri,
     embeddings_path: Uri,
     responses_path: Option<Uri>,
+    completions_path: Uri,
+    rerank_path: Uri,
+    moderations_path: Uri,
+    images_base_path: String,
+    audio_base_path: String,
+    realtime_path: String,
+    files_path: String,
+    batches_path: String,
     include_stream_usage: bool,
     organization: Option<HeaderValue>,
     project: Option<HeaderValue>,
@@ -386,8 +439,11 @@ enum UpstreamJsonKind {
     Anthropic,
     Gemini,
     GeminiEmbeddings,
+    GeminiImagen,
     Bedrock,
     BedrockEmbeddings,
+    BedrockRerank,
+    VoyageRerank,
 }
 
 impl UpstreamJsonKind {
@@ -397,8 +453,11 @@ impl UpstreamJsonKind {
             UpstreamJsonKind::Anthropic => "Anthropic",
             UpstreamJsonKind::Gemini => "Gemini",
             UpstreamJsonKind::GeminiEmbeddings => "Gemini embeddings",
+            UpstreamJsonKind::GeminiImagen => "Gemini Imagen",
             UpstreamJsonKind::Bedrock => "Bedrock",
             UpstreamJsonKind::BedrockEmbeddings => "Bedrock embeddings",
+            UpstreamJsonKind::BedrockRerank => "Bedrock rerank",
+            UpstreamJsonKind::VoyageRerank => "Voyage rerank",
         }
     }
 }
@@ -412,6 +471,8 @@ enum AdapterResponseState {
     Streaming {
         upstream: UpstreamStreamStage,
         ingress: IngressStreamStage,
+        cache_buf: Vec<u8>,
+        cache_overflowed: bool,
     },
     /// Two-stage buffered JSON translator: upstream JSON -> canonical OpenAI JSON -> ingress JSON.
     BufferedJson {
@@ -865,6 +926,104 @@ fn compile_provider(
         None => None,
     };
 
+    let raw_completions_path = cfg
+        .completions_path
+        .as_deref()
+        .or_else(|| preset_defaults.map(|pd| pd.completions_path))
+        .unwrap_or(DEFAULT_OPENAI_COMPLETIONS_PATH);
+    let completions_path: Uri =
+        raw_completions_path
+            .parse()
+            .map_err(|e| PluginBuildError::BuildFailed {
+                plugin: plugin.to_owned(),
+                message: format!("invalid {prefix}.completions_path `{raw_completions_path}`: {e}"),
+            })?;
+
+    let default_rerank = preset_defaults
+        .map(|pd| pd.rerank_path)
+        .unwrap_or(match dialect {
+            ProviderDialect::Bedrock => DEFAULT_BEDROCK_RERANK_PATH,
+            _ => DEFAULT_OPENAI_RERANK_PATH,
+        });
+    let raw_rerank_path = cfg.rerank_path.as_deref().unwrap_or(default_rerank);
+    let rerank_path: Uri = raw_rerank_path
+        .parse()
+        .map_err(|e| PluginBuildError::BuildFailed {
+            plugin: plugin.to_owned(),
+            message: format!("invalid {prefix}.rerank_path `{raw_rerank_path}`: {e}"),
+        })?;
+
+    let raw_moderations_path = cfg
+        .moderations_path
+        .as_deref()
+        .or_else(|| preset_defaults.map(|pd| pd.moderations_path))
+        .unwrap_or(DEFAULT_OPENAI_MODERATIONS_PATH);
+    let moderations_path: Uri =
+        raw_moderations_path
+            .parse()
+            .map_err(|e| PluginBuildError::BuildFailed {
+                plugin: plugin.to_owned(),
+                message: format!("invalid {prefix}.moderations_path `{raw_moderations_path}`: {e}"),
+            })?;
+
+    let images_base_path = cfg
+        .images_base_path
+        .as_deref()
+        .or_else(|| preset_defaults.map(|pd| pd.images_base_path))
+        .unwrap_or(DEFAULT_OPENAI_IMAGES_BASE_PATH)
+        .trim_end_matches('/')
+        .to_owned();
+    let audio_base_path = cfg
+        .audio_base_path
+        .as_deref()
+        .or_else(|| preset_defaults.map(|pd| pd.audio_base_path))
+        .unwrap_or(DEFAULT_OPENAI_AUDIO_BASE_PATH)
+        .trim_end_matches('/')
+        .to_owned();
+    let default_rt = preset_defaults
+        .map(|pd| pd.realtime_path)
+        .unwrap_or(match dialect {
+            ProviderDialect::AzureOpenAi => DEFAULT_AZURE_REALTIME_PATH,
+            _ => DEFAULT_OPENAI_REALTIME_PATH,
+        });
+    let realtime_path = cfg
+        .realtime_path
+        .as_deref()
+        .unwrap_or(default_rt)
+        .trim_end_matches('/')
+        .to_owned();
+    let files_path = cfg
+        .files_path
+        .as_deref()
+        .or_else(|| preset_defaults.map(|pd| pd.files_path))
+        .unwrap_or(DEFAULT_OPENAI_FILES_PATH)
+        .trim_end_matches('/')
+        .to_owned();
+    let batches_path = cfg
+        .batches_path
+        .as_deref()
+        .or_else(|| preset_defaults.map(|pd| pd.batches_path))
+        .unwrap_or(DEFAULT_OPENAI_BATCHES_PATH)
+        .trim_end_matches('/')
+        .to_owned();
+
+    let resolved_region = match cfg
+        .region
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    {
+        Some(raw) => {
+            Some(
+                resolve_env_secret(raw).map_err(|msg| PluginBuildError::BuildFailed {
+                    plugin: plugin.to_owned(),
+                    message: format!("{prefix}.region: {msg}"),
+                })?,
+            )
+        }
+        None => None,
+    };
+
     let include_stream_usage = cfg.include_stream_usage.unwrap_or_else(|| {
         preset_defaults
             .map(|pd| pd.include_stream_usage)
@@ -892,13 +1051,23 @@ fn compile_provider(
     let extra_headers = compile_extra_headers(plugin, &cfg.extra_headers)?;
 
     Ok(CompiledProvider {
+        preset: cfg.preset,
         dialect,
+        region: resolved_region,
         auth,
         key_cooldown: Duration::from_millis(cfg.key_cooldown_ms),
         key_rotate_statuses: cfg.key_rotate_statuses.into_iter().collect(),
         chat_path,
         embeddings_path,
         responses_path,
+        completions_path,
+        rerank_path,
+        moderations_path,
+        images_base_path,
+        audio_base_path,
+        realtime_path,
+        files_path,
+        batches_path,
         include_stream_usage,
         organization,
         project,
@@ -1170,14 +1339,21 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             req.headers
                 .remove(HeaderName::from_static("anthropic-beta"));
         }
-        req.headers.insert(
-            header::ACCEPT_ENCODING,
-            HeaderValue::from_static("identity"),
-        );
-        req.headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
+        let preserve_content_type = endpoint.is_multipart_model_endpoint()
+            || endpoint.is_resource_endpoint()
+            || endpoint == AiEndpointKind::Realtime;
+        if endpoint != AiEndpointKind::Realtime {
+            req.headers.insert(
+                header::ACCEPT_ENCODING,
+                HeaderValue::from_static("identity"),
+            );
+        }
+        if !preserve_content_type {
+            req.headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+        }
 
         // Apply static, pooled, or BYOK auth headers upfront (SigV4 & dynamic cloud IAM finalize after path/body translation).
         match &provider.auth {
@@ -1221,6 +1397,239 @@ impl HttpPlugin for AiProviderAdapterPlugin {
         }
         for (k, v) in &provider.extra_headers {
             req.headers.insert(k.clone(), v.clone());
+        }
+
+        // Fast path 0a: WebSocket Realtime proxy (`GET /v1/realtime?model=...`).
+        if endpoint == AiEndpointKind::Realtime {
+            strip_realtime_ws_key_subprotocol(&mut req.headers);
+            match provider.dialect {
+                ProviderDialect::OpenAiCompatible => {
+                    if let Some(org) = &provider.organization {
+                        req.headers
+                            .insert(HeaderName::from_static("openai-organization"), org.clone());
+                    }
+                    if let Some(proj) = &provider.project {
+                        req.headers
+                            .insert(HeaderName::from_static("openai-project"), proj.clone());
+                    }
+                    let beta_hdr = HeaderName::from_static("openai-beta");
+                    if !req.headers.contains_key(&beta_hdr) {
+                        req.headers
+                            .insert(beta_hdr, HeaderValue::from_static("realtime=v1"));
+                    }
+                    match rewrite_realtime_uri(
+                        &req.uri,
+                        &provider.realtime_path,
+                        &target.model,
+                        None,
+                    ) {
+                        Ok(uri) => req.uri = uri,
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
+                    }
+                }
+                ProviderDialect::AzureOpenAi => {
+                    match rewrite_realtime_uri(
+                        &req.uri,
+                        &provider.realtime_path,
+                        &target.model,
+                        Some(&provider.api_version),
+                    ) {
+                        Ok(uri) => req.uri = uri,
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
+                    }
+                }
+                _ => {
+                    return HookResult::Ready(Flow::Respond(endpoint_error_response(
+                        endpoint,
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        Some("unsupported_endpoint"),
+                        &format!(
+                            "Provider `{}` (dialect `{}`) does not support `/v1/realtime`",
+                            target.provider, provider.dialect
+                        ),
+                    )));
+                }
+            }
+            return self.finalize_upstream_auth(endpoint, provider, req);
+        }
+
+        // Fast path 0b: Resource CRUD endpoints (`/v1/files*`, `/v1/batches*`).
+        if endpoint.is_resource_endpoint() {
+            match provider.dialect {
+                ProviderDialect::OpenAiCompatible | ProviderDialect::AzureOpenAi => {
+                    if provider.dialect == ProviderDialect::OpenAiCompatible {
+                        if let Some(org) = &provider.organization {
+                            req.headers.insert(
+                                HeaderName::from_static("openai-organization"),
+                                org.clone(),
+                            );
+                        }
+                        if let Some(proj) = &provider.project {
+                            req.headers
+                                .insert(HeaderName::from_static("openai-project"), proj.clone());
+                        }
+                    }
+                    let (target_base, incoming_prefixes): (&str, &[&str]) =
+                        if endpoint == AiEndpointKind::Files {
+                            (&provider.files_path, &["/v1/files", "/files"])
+                        } else {
+                            (&provider.batches_path, &["/v1/batches", "/batches"])
+                        };
+                    let orig_path = req.uri.path();
+                    let suffix = incoming_prefixes
+                        .iter()
+                        .find_map(|p| orig_path.strip_prefix(p))
+                        .unwrap_or("");
+                    let mut new_uri = if provider.dialect == ProviderDialect::AzureOpenAi {
+                        let base = if endpoint == AiEndpointKind::Files {
+                            "/openai/files"
+                        } else {
+                            "/openai/batches"
+                        };
+                        format!("{base}{suffix}")
+                    } else {
+                        format!("{target_base}{suffix}")
+                    };
+                    let existing_q = req.uri.query();
+                    if provider.dialect == ProviderDialect::AzureOpenAi {
+                        let ver = format!(
+                            "api-version={}",
+                            percent_encode_path_segment(&provider.api_version)
+                        );
+                        match existing_q {
+                            Some(q) if !q.is_empty() => {
+                                new_uri.push('?');
+                                new_uri.push_str(q);
+                                if !q.contains("api-version=") {
+                                    new_uri.push('&');
+                                    new_uri.push_str(&ver);
+                                }
+                            }
+                            _ => {
+                                new_uri.push('?');
+                                new_uri.push_str(&ver);
+                            }
+                        }
+                    } else if let Some(q) = existing_q
+                        && !q.is_empty()
+                    {
+                        new_uri.push('?');
+                        new_uri.push_str(q);
+                    }
+                    match new_uri.parse::<Uri>() {
+                        Ok(uri) => req.uri = uri,
+                        Err(e) => {
+                            return HookResult::Ready(bad_request_translation(
+                                endpoint,
+                                &format!("invalid resource URI `{new_uri}`: {e}"),
+                            ));
+                        }
+                    }
+                    return self.finalize_upstream_auth(endpoint, provider, req);
+                }
+                _ => {
+                    return HookResult::Ready(Flow::Respond(endpoint_error_response(
+                        endpoint,
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        Some("unsupported_endpoint"),
+                        &format!(
+                            "Provider `{}` (dialect `{}`) does not support `{endpoint}`",
+                            target.provider, provider.dialect
+                        ),
+                    )));
+                }
+            }
+        }
+
+        // Fast path 0c: Multipart model endpoints (`/v1/audio/transcriptions`, `/v1/audio/translations`,
+        // `/v1/images/edits`, `/v1/images/variations`).
+        if endpoint.is_multipart_model_endpoint() {
+            let path_str = match provider.dialect {
+                ProviderDialect::OpenAiCompatible => {
+                    if let Some(org) = &provider.organization {
+                        req.headers
+                            .insert(HeaderName::from_static("openai-organization"), org.clone());
+                    }
+                    if let Some(proj) = &provider.project {
+                        req.headers
+                            .insert(HeaderName::from_static("openai-project"), proj.clone());
+                    }
+                    match endpoint {
+                        AiEndpointKind::AudioTranscriptions => {
+                            format!("{}/transcriptions", provider.audio_base_path)
+                        }
+                        AiEndpointKind::AudioTranslations => {
+                            format!("{}/translations", provider.audio_base_path)
+                        }
+                        AiEndpointKind::ImagesEdits => {
+                            format!("{}/edits", provider.images_base_path)
+                        }
+                        AiEndpointKind::ImagesVariations => {
+                            format!("{}/variations", provider.images_base_path)
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                ProviderDialect::AzureOpenAi => {
+                    let dep = percent_encode_path_segment(&target.model);
+                    let ver = percent_encode_path_segment(&provider.api_version);
+                    let op = match endpoint {
+                        AiEndpointKind::AudioTranscriptions => "audio/transcriptions",
+                        AiEndpointKind::AudioTranslations => "audio/translations",
+                        AiEndpointKind::ImagesEdits => "images/edits",
+                        AiEndpointKind::ImagesVariations => "images/variations",
+                        _ => unreachable!(),
+                    };
+                    format!("/openai/deployments/{dep}/{op}?api-version={ver}")
+                }
+                _ => {
+                    return HookResult::Ready(Flow::Respond(endpoint_error_response(
+                        endpoint,
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        Some("unsupported_endpoint"),
+                        &format!(
+                            "Provider `{}` (dialect `{}`) does not support `{endpoint}`",
+                            target.provider, provider.dialect
+                        ),
+                    )));
+                }
+            };
+            match path_str.parse::<Uri>() {
+                Ok(uri) => req.uri = uri,
+                Err(e) => {
+                    return HookResult::Ready(bad_request_translation(
+                        endpoint,
+                        &format!("invalid multipart endpoint URI `{path_str}`: {e}"),
+                    ));
+                }
+            }
+            if let Some(boundary) = ctx.get_ext::<MultipartBoundary>().map(|b| b.0.clone())
+                && let Some(body) = &req.body
+                && let Some(rewritten) =
+                    rewrite_multipart_text_field(body, &boundary, "model", &target.model)
+            {
+                req.body = Some(Bytes::from(rewritten));
+            }
+            return self.finalize_upstream_auth(endpoint, provider, req);
+        }
+
+        // Fast path 0d: Non-conversational JSON multimodal / rerank / completions / moderations endpoints.
+        if matches!(
+            endpoint,
+            AiEndpointKind::Rerank
+                | AiEndpointKind::Completions
+                | AiEndpointKind::Moderations
+                | AiEndpointKind::ImagesGenerations
+                | AiEndpointKind::AudioSpeech
+        ) {
+            return self.handle_specialized_json_request(ctx, endpoint, provider, &target, req);
         }
 
         // Fast path 1: Native Anthropic `/v1/messages` -> Anthropic or Claude-on-Vertex upstream.
@@ -1774,9 +2183,24 @@ impl HttpPlugin for AiProviderAdapterPlugin {
         // Native same-protocol passthrough fast paths (zero translation overhead).
         let is_native_passthrough = match (endpoint, provider.dialect) {
             (
-                AiEndpointKind::ChatCompletions | AiEndpointKind::Embeddings,
+                AiEndpointKind::ChatCompletions
+                | AiEndpointKind::Embeddings
+                | AiEndpointKind::Completions
+                | AiEndpointKind::Moderations
+                | AiEndpointKind::ImagesGenerations
+                | AiEndpointKind::ImagesEdits
+                | AiEndpointKind::ImagesVariations
+                | AiEndpointKind::AudioSpeech
+                | AiEndpointKind::AudioTranscriptions
+                | AiEndpointKind::AudioTranslations
+                | AiEndpointKind::Realtime
+                | AiEndpointKind::Files
+                | AiEndpointKind::Batches,
                 ProviderDialect::OpenAiCompatible | ProviderDialect::AzureOpenAi,
             ) => true,
+            (AiEndpointKind::Rerank, ProviderDialect::OpenAiCompatible) => {
+                provider.preset != Some(ProviderPreset::Voyage)
+            }
             (AiEndpointKind::AnthropicMessages, ProviderDialect::Anthropic) => true,
             (
                 AiEndpointKind::OpenAiResponses,
@@ -1786,6 +2210,47 @@ impl HttpPlugin for AiProviderAdapterPlugin {
         };
         if is_native_passthrough {
             ctx.insert_ext(AdapterResponseState::Passthrough);
+            return HookResult::Ready(Flow::Continue);
+        }
+
+        // Special-case Bedrock Rerank, Voyage Rerank normalization, and Gemini Imagen.
+        if endpoint == AiEndpointKind::Rerank
+            && (provider.dialect == ProviderDialect::Bedrock
+                || provider.preset == Some(ProviderPreset::Voyage))
+        {
+            res.headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            let upstream = if provider.dialect == ProviderDialect::Bedrock {
+                UpstreamJsonKind::BedrockRerank
+            } else {
+                UpstreamJsonKind::VoyageRerank
+            };
+            ctx.insert_ext(AdapterResponseState::BufferedJson {
+                upstream,
+                ingress: IngressResponseFormat::OpenAiChat,
+                status: res.status,
+                fallback_model: target.model,
+                buffer: Vec::new(),
+            });
+            return HookResult::Ready(Flow::Continue);
+        }
+
+        if endpoint == AiEndpointKind::ImagesGenerations
+            && provider.dialect == ProviderDialect::Gemini
+        {
+            res.headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            ctx.insert_ext(AdapterResponseState::BufferedJson {
+                upstream: UpstreamJsonKind::GeminiImagen,
+                ingress: IngressResponseFormat::OpenAiChat,
+                status: res.status,
+                fallback_model: target.model,
+                buffer: Vec::new(),
+            });
             return HookResult::Ready(Flow::Continue);
         }
 
@@ -1862,7 +2327,12 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                     Box::new(ChatToResponsesSseTranslator::new(target.model)),
                 ),
             };
-            ctx.insert_ext(AdapterResponseState::Streaming { upstream, ingress });
+            ctx.insert_ext(AdapterResponseState::Streaming {
+                upstream,
+                ingress,
+                cache_buf: Vec::new(),
+                cache_overflowed: false,
+            });
         } else {
             res.headers.insert(
                 header::CONTENT_TYPE,
@@ -1894,15 +2364,24 @@ impl HttpPlugin for AiProviderAdapterPlugin {
         chunk: &'a mut Bytes,
         end_of_stream: bool,
     ) -> HookResult<'a, StreamFlow> {
+        let max_bytes = self.max_non_stream_response_bytes;
+        let rerank_ctx = ctx.get_ext::<RerankRequestContext>().cloned();
+        let capture_stream_for_cache = ctx
+            .get_ext::<AiCachePending>()
+            .map(|p| p.is_stream)
+            .unwrap_or(false);
         let Some(state) = ctx.get_ext_mut::<AdapterResponseState>() else {
             return HookResult::Ready(StreamFlow::Continue);
         };
 
-        let max_bytes = self.max_non_stream_response_bytes;
-
         match state {
             AdapterResponseState::Passthrough => HookResult::Ready(StreamFlow::Continue),
-            AdapterResponseState::Streaming { upstream, ingress } => {
+            AdapterResponseState::Streaming {
+                upstream,
+                ingress,
+                cache_buf,
+                cache_overflowed,
+            } => {
                 let mut canonical = if chunk.is_empty() {
                     Bytes::new()
                 } else {
@@ -1921,7 +2400,28 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                     out = concat_bytes(out, ingress.finish());
                 }
 
+                if capture_stream_for_cache && !*cache_overflowed && !out.is_empty() {
+                    if cache_buf.len().saturating_add(out.len()) <= max_bytes {
+                        cache_buf.extend_from_slice(&out);
+                    } else {
+                        *cache_overflowed = true;
+                        cache_buf.clear();
+                    }
+                }
+                let finished_stream = if end_of_stream
+                    && capture_stream_for_cache
+                    && !*cache_overflowed
+                    && !cache_buf.is_empty()
+                {
+                    Some(Bytes::from(std::mem::take(cache_buf)))
+                } else {
+                    None
+                };
+
                 *chunk = out;
+                if let Some(full_sse) = finished_stream {
+                    ctx.insert_ext(AiTranslatedResponseBody(full_sse));
+                }
                 HookResult::Ready(StreamFlow::Continue)
             }
             AdapterResponseState::BufferedJson {
@@ -1956,6 +2456,9 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                                     fallback_model,
                                 );
                             }
+                            UpstreamJsonKind::GeminiImagen => {
+                                return gemini_imagen_to_openai_response(buf, resp_status);
+                            }
                             UpstreamJsonKind::Bedrock => bedrock_converse_to_openai_response(
                                 buf,
                                 resp_status,
@@ -1963,6 +2466,21 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                             )?,
                             UpstreamJsonKind::BedrockEmbeddings => {
                                 return bedrock_embeddings_to_openai_response(
+                                    buf,
+                                    resp_status,
+                                    fallback_model,
+                                );
+                            }
+                            UpstreamJsonKind::BedrockRerank => {
+                                return bedrock_to_openai_rerank_response(
+                                    buf,
+                                    resp_status,
+                                    fallback_model,
+                                    rerank_ctx.as_ref(),
+                                );
+                            }
+                            UpstreamJsonKind::VoyageRerank => {
+                                return normalize_voyage_rerank_response(
                                     buf,
                                     resp_status,
                                     fallback_model,
@@ -1995,6 +2513,278 @@ impl HttpPlugin for AiProviderAdapterPlugin {
 }
 
 impl AiProviderAdapterPlugin {
+    fn handle_specialized_json_request<'a>(
+        &'a self,
+        ctx: &'a mut RequestCtx,
+        endpoint: AiEndpointKind,
+        provider: &'a CompiledProvider,
+        target: &crate::types::AiTarget,
+        req: &'a mut UpstreamRequest,
+    ) -> HookResult<'a, Flow> {
+        if provider.dialect == ProviderDialect::OpenAiCompatible {
+            if let Some(org) = &provider.organization {
+                req.headers
+                    .insert(HeaderName::from_static("openai-organization"), org.clone());
+            }
+            if let Some(proj) = &provider.project {
+                req.headers
+                    .insert(HeaderName::from_static("openai-project"), proj.clone());
+            }
+        }
+
+        match (endpoint, provider.dialect) {
+            (AiEndpointKind::Rerank, ProviderDialect::OpenAiCompatible) => {
+                req.uri = provider.rerank_path.clone();
+                if let Some(body) = &req.body {
+                    match rewrite_rerank_request(body, &target.model) {
+                        Ok(Some(rewritten)) => req.body = Some(Bytes::from(rewritten)),
+                        Ok(None) => {}
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
+                    }
+                }
+            }
+            (AiEndpointKind::Rerank, ProviderDialect::Bedrock) => {
+                let Some(body) = &req.body else {
+                    return HookResult::Ready(bad_request_translation(
+                        endpoint,
+                        "missing rerank request body",
+                    ));
+                };
+                if let Some(rctx) = extract_rerank_context(body) {
+                    ctx.insert_ext(rctx);
+                }
+                let region = provider.region.as_deref().unwrap_or("us-east-1");
+                let translated = match openai_to_bedrock_rerank_request(body, &target.model, region)
+                {
+                    Ok(t) => t,
+                    Err(err) => {
+                        return HookResult::Ready(bad_request_translation(endpoint, &err));
+                    }
+                };
+                req.uri = provider.rerank_path.clone();
+                req.body = Some(Bytes::from(translated));
+            }
+            (AiEndpointKind::Completions, ProviderDialect::OpenAiCompatible) => {
+                req.uri = provider.completions_path.clone();
+                if let Some(body) = &req.body {
+                    match rewrite_openai_completions_request(
+                        body,
+                        &target.model,
+                        provider.include_stream_usage,
+                    ) {
+                        Ok(Some(rewritten)) => req.body = Some(Bytes::from(rewritten)),
+                        Ok(None) => {}
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
+                    }
+                }
+            }
+            (AiEndpointKind::Completions, ProviderDialect::AzureOpenAi) => {
+                let path_str = format!(
+                    "/openai/deployments/{}/completions?api-version={}",
+                    percent_encode_path_segment(&target.model),
+                    percent_encode_path_segment(&provider.api_version)
+                );
+                match path_str.parse::<Uri>() {
+                    Ok(uri) => req.uri = uri,
+                    Err(e) => {
+                        return HookResult::Ready(bad_request_translation(
+                            endpoint,
+                            &format!("invalid Azure completions URI `{path_str}`: {e}"),
+                        ));
+                    }
+                }
+                if let Some(body) = &req.body {
+                    match rewrite_openai_completions_request(
+                        body,
+                        &target.model,
+                        provider.include_stream_usage,
+                    ) {
+                        Ok(Some(rewritten)) => req.body = Some(Bytes::from(rewritten)),
+                        Ok(None) => {}
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
+                    }
+                }
+            }
+            (AiEndpointKind::Moderations, ProviderDialect::OpenAiCompatible) => {
+                req.uri = provider.moderations_path.clone();
+                if let Some(body) = &req.body {
+                    match rewrite_json_model_field(body, &target.model) {
+                        Ok(Some(rewritten)) => req.body = Some(Bytes::from(rewritten)),
+                        Ok(None) => {}
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
+                    }
+                }
+            }
+            (AiEndpointKind::Moderations, ProviderDialect::AzureOpenAi) => {
+                let path_str = format!(
+                    "/openai/deployments/{}/moderations?api-version={}",
+                    percent_encode_path_segment(&target.model),
+                    percent_encode_path_segment(&provider.api_version)
+                );
+                match path_str.parse::<Uri>() {
+                    Ok(uri) => req.uri = uri,
+                    Err(e) => {
+                        return HookResult::Ready(bad_request_translation(
+                            endpoint,
+                            &format!("invalid Azure moderations URI `{path_str}`: {e}"),
+                        ));
+                    }
+                }
+                if let Some(body) = &req.body {
+                    match rewrite_json_model_field(body, &target.model) {
+                        Ok(Some(rewritten)) => req.body = Some(Bytes::from(rewritten)),
+                        Ok(None) => {}
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
+                    }
+                }
+            }
+            (AiEndpointKind::ImagesGenerations, ProviderDialect::OpenAiCompatible) => {
+                let path_str = format!("{}/generations", provider.images_base_path);
+                match path_str.parse::<Uri>() {
+                    Ok(uri) => req.uri = uri,
+                    Err(e) => {
+                        return HookResult::Ready(bad_request_translation(
+                            endpoint,
+                            &format!("invalid images URI `{path_str}`: {e}"),
+                        ));
+                    }
+                }
+                if let Some(body) = &req.body {
+                    match rewrite_json_model_field(body, &target.model) {
+                        Ok(Some(rewritten)) => req.body = Some(Bytes::from(rewritten)),
+                        Ok(None) => {}
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
+                    }
+                }
+            }
+            (AiEndpointKind::ImagesGenerations, ProviderDialect::AzureOpenAi) => {
+                let path_str = format!(
+                    "/openai/deployments/{}/images/generations?api-version={}",
+                    percent_encode_path_segment(&target.model),
+                    percent_encode_path_segment(&provider.api_version)
+                );
+                match path_str.parse::<Uri>() {
+                    Ok(uri) => req.uri = uri,
+                    Err(e) => {
+                        return HookResult::Ready(bad_request_translation(
+                            endpoint,
+                            &format!("invalid Azure images URI `{path_str}`: {e}"),
+                        ));
+                    }
+                }
+                if let Some(body) = &req.body {
+                    match rewrite_json_model_field(body, &target.model) {
+                        Ok(Some(rewritten)) => req.body = Some(Bytes::from(rewritten)),
+                        Ok(None) => {}
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
+                    }
+                }
+            }
+            (AiEndpointKind::ImagesGenerations, ProviderDialect::Gemini) => {
+                let Some(body) = &req.body else {
+                    return HookResult::Ready(bad_request_translation(
+                        endpoint,
+                        "missing image generation request body",
+                    ));
+                };
+                let vertex_ref = provider
+                    .vertex
+                    .as_ref()
+                    .map(|(p, l)| (p.as_str(), l.as_str()));
+                let path_str = gemini_imagen_path(&target.model, vertex_ref);
+                match path_str.parse::<Uri>() {
+                    Ok(uri) => req.uri = uri,
+                    Err(e) => {
+                        return HookResult::Ready(bad_request_translation(
+                            endpoint,
+                            &format!("invalid Gemini Imagen URI `{path_str}`: {e}"),
+                        ));
+                    }
+                }
+                match openai_to_gemini_imagen_request(body) {
+                    Ok(translated) => req.body = Some(Bytes::from(translated)),
+                    Err(err) => {
+                        return HookResult::Ready(bad_request_translation(endpoint, &err));
+                    }
+                }
+            }
+            (AiEndpointKind::AudioSpeech, ProviderDialect::OpenAiCompatible) => {
+                let path_str = format!("{}/speech", provider.audio_base_path);
+                match path_str.parse::<Uri>() {
+                    Ok(uri) => req.uri = uri,
+                    Err(e) => {
+                        return HookResult::Ready(bad_request_translation(
+                            endpoint,
+                            &format!("invalid audio speech URI `{path_str}`: {e}"),
+                        ));
+                    }
+                }
+                if let Some(body) = &req.body {
+                    match rewrite_json_model_field(body, &target.model) {
+                        Ok(Some(rewritten)) => req.body = Some(Bytes::from(rewritten)),
+                        Ok(None) => {}
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
+                    }
+                }
+            }
+            (AiEndpointKind::AudioSpeech, ProviderDialect::AzureOpenAi) => {
+                let path_str = format!(
+                    "/openai/deployments/{}/audio/speech?api-version={}",
+                    percent_encode_path_segment(&target.model),
+                    percent_encode_path_segment(&provider.api_version)
+                );
+                match path_str.parse::<Uri>() {
+                    Ok(uri) => req.uri = uri,
+                    Err(e) => {
+                        return HookResult::Ready(bad_request_translation(
+                            endpoint,
+                            &format!("invalid Azure audio speech URI `{path_str}`: {e}"),
+                        ));
+                    }
+                }
+                if let Some(body) = &req.body {
+                    match rewrite_json_model_field(body, &target.model) {
+                        Ok(Some(rewritten)) => req.body = Some(Bytes::from(rewritten)),
+                        Ok(None) => {}
+                        Err(err) => {
+                            return HookResult::Ready(bad_request_translation(endpoint, &err));
+                        }
+                    }
+                }
+            }
+            _ => {
+                return HookResult::Ready(Flow::Respond(endpoint_error_response(
+                    endpoint,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    Some("unsupported_endpoint"),
+                    &format!(
+                        "Provider `{}` (dialect `{}`) does not support `{endpoint}`",
+                        target.provider, provider.dialect
+                    ),
+                )));
+            }
+        }
+
+        self.finalize_upstream_auth(endpoint, provider, req)
+    }
+
     fn finalize_upstream_auth<'a>(
         &'a self,
         endpoint: AiEndpointKind,

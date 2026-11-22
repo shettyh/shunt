@@ -56,8 +56,21 @@ pub enum AiEndpointKind {
     AnthropicCountTokens,
     OpenAiResponses,
     Embeddings,
+    Completions,
+    Rerank,
+    Moderations,
+    ImagesGenerations,
+    ImagesEdits,
+    ImagesVariations,
+    AudioSpeech,
+    AudioTranscriptions,
+    AudioTranslations,
+    Realtime,
+    Files,
+    Batches,
     ModelsList,
     ModelRetrieve,
+    GenerationRetrieve,
 }
 
 impl AiEndpointKind {
@@ -68,8 +81,21 @@ impl AiEndpointKind {
             AiEndpointKind::AnthropicCountTokens => "anthropic_count_tokens",
             AiEndpointKind::OpenAiResponses => "openai_responses",
             AiEndpointKind::Embeddings => "embeddings",
+            AiEndpointKind::Completions => "completions",
+            AiEndpointKind::Rerank => "rerank",
+            AiEndpointKind::Moderations => "moderations",
+            AiEndpointKind::ImagesGenerations => "images_generations",
+            AiEndpointKind::ImagesEdits => "images_edits",
+            AiEndpointKind::ImagesVariations => "images_variations",
+            AiEndpointKind::AudioSpeech => "audio_speech",
+            AiEndpointKind::AudioTranscriptions => "audio_transcriptions",
+            AiEndpointKind::AudioTranslations => "audio_translations",
+            AiEndpointKind::Realtime => "realtime",
+            AiEndpointKind::Files => "files",
+            AiEndpointKind::Batches => "batches",
             AiEndpointKind::ModelsList => "models_list",
             AiEndpointKind::ModelRetrieve => "model_retrieve",
+            AiEndpointKind::GenerationRetrieve => "generation_retrieve",
         }
     }
 
@@ -79,6 +105,7 @@ impl AiEndpointKind {
             AiEndpointKind::ModelsList
                 | AiEndpointKind::ModelRetrieve
                 | AiEndpointKind::AnthropicCountTokens
+                | AiEndpointKind::GenerationRetrieve
         )
     }
 
@@ -90,6 +117,34 @@ impl AiEndpointKind {
             AiEndpointKind::ChatCompletions
                 | AiEndpointKind::AnthropicMessages
                 | AiEndpointKind::OpenAiResponses
+        )
+    }
+
+    /// Returns `true` for endpoints whose request body uses `multipart/form-data` with a `model` field.
+    pub const fn is_multipart_model_endpoint(self) -> bool {
+        matches!(
+            self,
+            AiEndpointKind::ImagesEdits
+                | AiEndpointKind::ImagesVariations
+                | AiEndpointKind::AudioTranscriptions
+                | AiEndpointKind::AudioTranslations
+        )
+    }
+
+    /// Returns `true` for resource CRUD endpoints (`/v1/files*`, `/v1/batches*`) that do not
+    /// carry a JSON `model` field and instead route by configured provider targets or header.
+    pub const fn is_resource_endpoint(self) -> bool {
+        matches!(self, AiEndpointKind::Files | AiEndpointKind::Batches)
+    }
+
+    /// Returns `true` for endpoints that may stream SSE responses eligible for streaming caching.
+    pub const fn supports_sse_streaming(self) -> bool {
+        matches!(
+            self,
+            AiEndpointKind::ChatCompletions
+                | AiEndpointKind::AnthropicMessages
+                | AiEndpointKind::OpenAiResponses
+                | AiEndpointKind::Completions
         )
     }
 
@@ -290,6 +345,14 @@ pub enum AiCapability {
     JsonSchema,
     Reasoning,
     Embeddings,
+    Completions,
+    Rerank,
+    Moderations,
+    Images,
+    Audio,
+    Realtime,
+    Files,
+    Batches,
 }
 
 impl AiCapability {
@@ -302,6 +365,14 @@ impl AiCapability {
             AiCapability::JsonSchema => "json_schema",
             AiCapability::Reasoning => "reasoning",
             AiCapability::Embeddings => "embeddings",
+            AiCapability::Completions => "completions",
+            AiCapability::Rerank => "rerank",
+            AiCapability::Moderations => "moderations",
+            AiCapability::Images => "images",
+            AiCapability::Audio => "audio",
+            AiCapability::Realtime => "realtime",
+            AiCapability::Files => "files",
+            AiCapability::Batches => "batches",
         }
     }
 }
@@ -456,6 +527,8 @@ pub struct AiFailoverHistory {
 pub struct AiUsage {
     pub provider: Option<String>,
     pub served_model: Option<String>,
+    pub response_id: Option<String>,
+    pub finish_reason: Option<String>,
     pub prompt_tokens: Option<u64>,
     pub cached_prompt_tokens: Option<u64>,
     pub cache_creation_prompt_tokens: Option<u64>,

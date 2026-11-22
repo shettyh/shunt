@@ -72,7 +72,48 @@ pub fn detect_required_capabilities(endpoint: AiEndpointKind, body: &Value) -> V
             caps.push(AiCapability::Embeddings);
             return caps;
         }
-        AiEndpointKind::ModelsList | AiEndpointKind::ModelRetrieve => {
+        AiEndpointKind::Rerank => {
+            caps.push(AiCapability::Rerank);
+            return caps;
+        }
+        AiEndpointKind::Moderations => {
+            caps.push(AiCapability::Moderations);
+            return caps;
+        }
+        AiEndpointKind::ImagesGenerations
+        | AiEndpointKind::ImagesEdits
+        | AiEndpointKind::ImagesVariations => {
+            caps.push(AiCapability::Images);
+            return caps;
+        }
+        AiEndpointKind::AudioSpeech
+        | AiEndpointKind::AudioTranscriptions
+        | AiEndpointKind::AudioTranslations => {
+            caps.push(AiCapability::Audio);
+            return caps;
+        }
+        AiEndpointKind::Realtime => {
+            caps.push(AiCapability::Realtime);
+            return caps;
+        }
+        AiEndpointKind::Files => {
+            caps.push(AiCapability::Files);
+            return caps;
+        }
+        AiEndpointKind::Batches => {
+            caps.push(AiCapability::Batches);
+            return caps;
+        }
+        AiEndpointKind::Completions => {
+            caps.push(AiCapability::Completions);
+            if body.get("stream").and_then(Value::as_bool) == Some(true) {
+                caps.push(AiCapability::Streaming);
+            }
+            return caps;
+        }
+        AiEndpointKind::ModelsList
+        | AiEndpointKind::ModelRetrieve
+        | AiEndpointKind::GenerationRetrieve => {
             return caps;
         }
         AiEndpointKind::ChatCompletions
