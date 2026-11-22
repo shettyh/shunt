@@ -1,0 +1,100 @@
+# Shunt AI Gateway — Dynamic Cloud IAM Authentication Example (RFC 0014)
+#
+# Demonstrates zero-SDK, auto-refreshing cloud IAM authentication across:
+# - AWS Bedrock (EC2 IMDSv2 / ECS Task Role / EKS IRSA + optional STS AssumeRole)
+# - Google Cloud Vertex AI (GCE/GKE Workload Identity or Service Account JSON RS256 JWT)
+# - Azure OpenAI (Entra ID Managed Identity / AKS Workload Identity / Client Credentials)
+#
+# Validate with:
+#   shunt check -c examples/shunt-ai-cloud-iam.toml
+
+[server]
+listen = "127.0.0.1:8080"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:9090"
+
+[[upstreams]]
+name = "bedrock"
+endpoints = ["https://bedrock-runtime.us-east-1.amazonaws.com"]
+
+[[upstreams]]
+name = "vertex"
+endpoints = ["https://us-central1-aiplatform.googleapis.com"]
+
+[[upstreams]]
+name = "azure_openai"
+endpoints = ["https://my-company-ai.openai.azure.com"]
+
+[[routes]]
+id = "ai-cloud-iam"
+path_prefix = "/v1/"
+upstream = "bedrock"
+max_attempts = 3
+
+[[routes.plugins]]
+name = "ai-model-router"
+[routes.plugins.config.models]
+claude = [
+  { provider = "bedrock", upstream = "bedrock", model = "anthropic.claude-sonnet-4-20250514-v1:0" },
+  { provider = "vertex_claude", upstream = "vertex", model = "claude-sonnet-4" },
+]
+gemini = [
+  { provider = "vertex_gemini", upstream = "vertex", model = "gemini-2.5-pro" },
+]
+gpt = [
+  { provider = "azure_openai", upstream = "azure_openai", model = "gpt-4o" },
+]
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+
+# 1. AWS Bedrock via default AWS IAM chain (env -> EKS IRSA -> ECS Task Role -> EC2 IMDSv2)
+[routes.plugins.config.providers.bedrock]
+preset = "bedrock"
+region = "us-east-1"
+[routes.plugins.config.providers.bedrock.auth]
+type = "aws_iam"
+mode = "auto" # or "imds", "ecs", "web_identity", "env"
+# Optional cross-account role chaining:
+# role_arn = "arn:aws:iam::123456789012:role/shunt-bedrock-access"
+refresh_margin_secs = 300
+
+# 2. Google Cloud Vertex AI (Gemini) via ADC / GKE Workload Identity Metadata Server
+[routes.plugins.config.providers.vertex_gemini]
+preset = "gemini"
+vertex_project = "my-gcp-project"
+vertex_location = "us-central1"
+[routes.plugins.config.providers.vertex_gemini.auth]
+type = "gcp_iam"
+mode = "auto" # checks credentials_json -> credentials_file/GOOGLE_APPLICATION_CREDENTIALS -> GCE/GKE metadata
+refresh_margin_secs = 300
+
+# 3. Claude-on-Vertex via Service Account JSON key (RS256 JWT assertion)
+[routes.plugins.config.providers.vertex_claude]
+preset = "anthropic"
+vertex_project = "my-gcp-project"
+vertex_location = "us-east5"
+[routes.plugins.config.providers.vertex_claude.auth]
+type = "gcp_iam"
+mode = "metadata" # or "service_account" with credentials_file = "/var/run/secrets/gcp-sa.json"
+refresh_margin_secs = 300
+
+# 4. Azure OpenAI via Microsoft Entra ID (AKS Workload Identity / Client Credentials / Managed Identity)
+[routes.plugins.config.providers.azure_openai]
+preset = "azure_openai"
+api_version = "2024-10-21"
+[routes.plugins.config.providers.azure_openai.auth]
+type = "azure_ad"
+mode = "auto" # checks workload_identity -> client_credentials -> managed_identity (IMDS)
+scope = "https://cognitiveservices.azure.com/.default"
+refresh_margin_secs = 300
+
+[[routes.plugins]]
+name = "ai-failover"
+[routes.plugins.config]
+retry_statuses = [429, 500, 502, 503, 504, 529]
+
+[[routes.plugins]]
+name = "ai-usage-tracker"

@@ -6,14 +6,18 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::Value;
 use shunt_plugin_sdk::{
-    BuildContext, Bytes, Clock, Flow, HeaderName, HeaderValue, HookMask, HookResult, HttpPlugin,
-    PluginBuildError, PluginConfig, PluginFactory, RequestCtx, ResponseHead, RouteDecision,
-    StatusCode, StreamFlow, UpstreamRequest, Uri, header,
+    BuildContext, Bytes, Clock, Flow, HeaderName, HeaderValue, HookMask, HookResult, HttpClient,
+    HttpPlugin, PluginBuildError, PluginConfig, PluginFactory, RequestCtx, ResponseHead,
+    RouteDecision, StatusCode, StreamFlow, UpstreamRequest, Uri, header,
 };
 use tracing::{info, warn};
 
 use crate::aws_sigv4::{AwsSigV4Credentials, sign_upstream_request};
 use crate::cache::{AiCachePending, AiTranslatedResponseBody};
+use crate::cloud_auth::{
+    AwsIamAuthConfig, AzureAdAuthConfig, CacheLookup, CloudTokenCache, CompiledCloudAuth,
+    GcpIamAuthConfig, ResolvedCloudCredential,
+};
 use crate::dialects::bedrock::{
     BedrockStreamTranslator, bedrock_converse_path, bedrock_converse_to_openai_response,
     bedrock_embeddings_to_openai_response, bedrock_invoke_path,
@@ -113,6 +117,18 @@ pub enum ProviderAuthConfig {
         #[serde(default)]
         prefix: Option<String>,
     },
+    /// Dynamic AWS IAM credentials (EC2 IMDSv2, ECS Task Role, EKS IRSA, env, STS `AssumeRole`)
+    /// cached in `StateStore` and used to sign upstream requests via SigV4.
+    #[serde(rename = "aws_iam")]
+    AwsIam(AwsIamAuthConfig),
+    /// Dynamic Google Cloud IAM credentials (GCE/GKE Metadata Server / Workload Identity,
+    /// Service Account JSON RS256 JWT, or ADC `authorized_user`) injecting a Bearer token.
+    #[serde(rename = "gcp_iam")]
+    GcpIam(GcpIamAuthConfig),
+    /// Dynamic Microsoft Entra ID credentials (Azure Managed Identity IMDS, Service Principal
+    /// `client_credentials`, or AKS Workload Identity) injecting a Bearer token.
+    #[serde(rename = "azure_ad")]
+    AzureAd(AzureAdAuthConfig),
 }
 
 /// Declarative configuration for a single named provider instance in `providers.<name>`.
@@ -232,6 +248,7 @@ enum CompiledAuth {
         target_header: HeaderName,
         target_prefix: Option<String>,
     },
+    CloudIam(Arc<CompiledCloudAuth>),
 }
 
 impl CompiledAuth {
@@ -240,6 +257,10 @@ impl CompiledAuth {
             CompiledAuth::HeaderPool(_, vals) => vals.len(),
             _ => 1,
         }
+    }
+
+    fn is_cloud_iam(&self) -> bool {
+        matches!(self, CompiledAuth::CloudIam(_))
     }
 }
 
@@ -289,6 +310,11 @@ impl fmt::Debug for ClientByokCredential {
         f.write_str("ClientByokCredential([REDACTED])")
     }
 }
+
+/// Tracks dynamic cloud auth providers that already performed one forced refresh retry
+/// on the current request (prevents infinite retry loops on permanent 401/403 errors).
+#[derive(Debug, Default, Clone)]
+struct CloudAuthRefreshedProviders(HashSet<String>);
 
 /// Target client ingress response format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -421,6 +447,7 @@ impl PluginFactory for AiProviderAdapterFactory {
 
         let mut compiled = HashMap::with_capacity(cfg.providers.len());
         let mut has_key_pools = false;
+        let mut has_dynamic_auth = false;
         for (name, pcfg) in cfg.providers {
             if name.trim().is_empty() {
                 return Err(PluginBuildError::BuildFailed {
@@ -431,6 +458,9 @@ impl PluginFactory for AiProviderAdapterFactory {
             let cp = compile_provider(self.name(), &name, pcfg)?;
             if cp.auth.pool_len() > 1 {
                 has_key_pools = true;
+            }
+            if cp.auth.is_cloud_iam() {
+                has_dynamic_auth = true;
             }
             compiled.insert(name, cp);
         }
@@ -444,13 +474,29 @@ impl PluginFactory for AiProviderAdapterFactory {
             None
         };
 
+        let (http_client, cloud_tokens) = if has_dynamic_auth {
+            let client = ctx.http_client().ok_or_else(|| PluginBuildError::BuildFailed {
+                plugin: self.name().to_owned(),
+                message: "dynamic cloud IAM auth (`aws_iam`, `gcp_iam`, `azure_ad`) requires a runtime HttpClient in BuildContext".to_owned(),
+            })?;
+            let cache = ctx
+                .state_handle()
+                .get_or_init("ai_cloud_tokens", CloudTokenCache::default);
+            (Some(client), Some(cache))
+        } else {
+            (None, None)
+        };
+
         Ok(Arc::new(AiProviderAdapterPlugin {
             providers: compiled,
             response_headers: cfg.response_headers,
             max_non_stream_response_bytes: cfg.max_non_stream_response_bytes.max(1024),
             has_key_pools,
+            has_dynamic_auth,
             clock: ctx.clock(),
             key_pools,
+            http_client,
+            cloud_tokens,
         }))
     }
 }
@@ -647,7 +693,7 @@ fn compile_provider(
                 session_token,
                 service,
             } => {
-                let region = cfg
+                let raw_region = cfg
                     .region
                     .as_deref()
                     .map(str::trim)
@@ -657,8 +703,13 @@ fn compile_provider(
                         message: format!(
                             "`{prefix}.region` is required when using `auth.type = \"aws_sigv4\"`"
                         ),
-                    })?
-                    .to_owned();
+                    })?;
+                let region = resolve_env_secret(raw_region).map_err(|msg| {
+                    PluginBuildError::BuildFailed {
+                        plugin: plugin.to_owned(),
+                        message: format!("{prefix}.region: {msg}"),
+                    }
+                })?;
                 let ak = resolve_env_secret(&access_key_id).map_err(|msg| {
                     PluginBuildError::BuildFailed {
                         plugin: plugin.to_owned(),
@@ -728,6 +779,51 @@ fn compile_provider(
                     target_header,
                     target_prefix,
                 }
+            }
+            ProviderAuthConfig::AwsIam(aws_cfg) => {
+                let raw_region = cfg
+                    .region
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|r| !r.is_empty())
+                    .ok_or_else(|| PluginBuildError::BuildFailed {
+                        plugin: plugin.to_owned(),
+                        message: format!(
+                            "`{prefix}.region` is required when using `auth.type = \"aws_iam\"`"
+                        ),
+                    })?;
+                let region = resolve_env_secret(raw_region).map_err(|msg| {
+                    PluginBuildError::BuildFailed {
+                        plugin: plugin.to_owned(),
+                        message: format!("{prefix}.region: {msg}"),
+                    }
+                })?;
+                let compiled = CompiledCloudAuth::compile_aws(provider_name, region, aws_cfg)
+                    .map_err(|e| PluginBuildError::BuildFailed {
+                        plugin: plugin.to_owned(),
+                        message: format!("{prefix}.auth: {e}"),
+                    })?;
+                CompiledAuth::CloudIam(Arc::new(compiled))
+            }
+            ProviderAuthConfig::GcpIam(gcp_cfg) => {
+                let compiled =
+                    CompiledCloudAuth::compile_gcp(provider_name, gcp_cfg).map_err(|e| {
+                        PluginBuildError::BuildFailed {
+                            plugin: plugin.to_owned(),
+                            message: format!("{prefix}.auth: {e}"),
+                        }
+                    })?;
+                CompiledAuth::CloudIam(Arc::new(compiled))
+            }
+            ProviderAuthConfig::AzureAd(azure_cfg) => {
+                let compiled =
+                    CompiledCloudAuth::compile_azure(provider_name, azure_cfg).map_err(|e| {
+                        PluginBuildError::BuildFailed {
+                            plugin: plugin.to_owned(),
+                            message: format!("{prefix}.auth: {e}"),
+                        }
+                    })?;
+                CompiledAuth::CloudIam(Arc::new(compiled))
             }
         }
     };
@@ -907,8 +1003,11 @@ pub struct AiProviderAdapterPlugin {
     response_headers: bool,
     max_non_stream_response_bytes: usize,
     has_key_pools: bool,
+    has_dynamic_auth: bool,
     clock: Arc<dyn Clock>,
     key_pools: Option<Arc<KeyPoolTable>>,
+    http_client: Option<Arc<dyn HttpClient>>,
+    cloud_tokens: Option<Arc<CloudTokenCache>>,
 }
 
 impl HttpPlugin for AiProviderAdapterPlugin {
@@ -920,7 +1019,7 @@ impl HttpPlugin for AiProviderAdapterPlugin {
         let mut mask = HookMask::ON_UPSTREAM_REQUEST
             | HookMask::ON_RESPONSE_HEADERS
             | HookMask::RESPONSE_BODY_STREAM;
-        if self.has_key_pools {
+        if self.has_key_pools || self.has_dynamic_auth {
             mask |= HookMask::ON_ROUTE;
         }
         mask
@@ -931,7 +1030,7 @@ impl HttpPlugin for AiProviderAdapterPlugin {
         ctx: &'a mut RequestCtx,
         decision: &'a mut RouteDecision,
     ) -> HookResult<'a, Flow> {
-        if self.has_key_pools
+        if (self.has_key_pools || self.has_dynamic_auth)
             && let Some(meta) = ctx.get_ext::<AiRequestMeta>()
         {
             let needed: usize = meta
@@ -940,7 +1039,13 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                 .map(|t| {
                     self.providers
                         .get(&t.provider)
-                        .map(|p| p.auth.pool_len())
+                        .map(|p| {
+                            if p.auth.is_cloud_iam() {
+                                2
+                            } else {
+                                p.auth.pool_len()
+                            }
+                        })
                         .unwrap_or(1)
                 })
                 .sum::<usize>()
@@ -1074,9 +1179,9 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             HeaderValue::from_static("application/json"),
         );
 
-        // Apply static, pooled, or BYOK auth headers upfront (SigV4 signing happens after path/body translation).
+        // Apply static, pooled, or BYOK auth headers upfront (SigV4 & dynamic cloud IAM finalize after path/body translation).
         match &provider.auth {
-            CompiledAuth::None | CompiledAuth::AwsSigV4(_) => {}
+            CompiledAuth::None | CompiledAuth::AwsSigV4(_) | CompiledAuth::CloudIam(_) => {}
             CompiledAuth::StaticHeader(name, val) => {
                 req.headers.insert(name.clone(), val.clone());
             }
@@ -1158,7 +1263,7 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                         }
                     }
                 }
-                return finalize_sigv4_if_needed(endpoint, provider, req);
+                return self.finalize_upstream_auth(endpoint, provider, req);
             }
 
             req.uri = provider.chat_path.clone();
@@ -1192,7 +1297,7 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                     Err(err) => return HookResult::Ready(bad_request_translation(endpoint, &err)),
                 }
             }
-            return finalize_sigv4_if_needed(endpoint, provider, req);
+            return self.finalize_upstream_auth(endpoint, provider, req);
         }
 
         // Fast path 2: Native OpenAI Responses `/v1/responses` -> provider with `responses_path`.
@@ -1234,7 +1339,7 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                     Err(err) => return HookResult::Ready(bad_request_translation(endpoint, &err)),
                 }
             }
-            return finalize_sigv4_if_needed(endpoint, provider, req);
+            return self.finalize_upstream_auth(endpoint, provider, req);
         }
 
         // Hub-and-spoke ingress normalization: translate non-Chat conversational requests into
@@ -1509,7 +1614,7 @@ impl HttpPlugin for AiProviderAdapterPlugin {
                         }
                     }
                     req.body = Some(Bytes::from(translated));
-                    return finalize_sigv4_if_needed(endpoint, provider, req);
+                    return self.finalize_upstream_auth(endpoint, provider, req);
                 }
 
                 let path_str = bedrock_converse_path(&target.model, stream_requested);
@@ -1534,7 +1639,7 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             }
         }
 
-        finalize_sigv4_if_needed(endpoint, provider, req)
+        self.finalize_upstream_auth(endpoint, provider, req)
     }
 
     fn on_response_headers<'a>(
@@ -1555,6 +1660,40 @@ impl HttpPlugin for AiProviderAdapterPlugin {
             ctx.insert_ext(AdapterResponseState::Passthrough);
             return HookResult::Ready(Flow::Continue);
         };
+
+        // Reactive dynamic cloud IAM token invalidation + single automatic refresh retry on
+        // upstream 401 (or 403 for AWS SigV4 expired session tokens).
+        if let CompiledAuth::CloudIam(ref cloud_auth) = provider.auth
+            && let Some(ref cloud_tokens) = self.cloud_tokens
+        {
+            let status_code = res.status.as_u16();
+            let token_rejected =
+                status_code == 401 || (status_code == 403 && cloud_auth.is_aws_sigv4());
+            if token_rejected {
+                cloud_tokens.invalidate(&cloud_auth.cache_key);
+                let already_retried = ctx
+                    .get_ext::<CloudAuthRefreshedProviders>()
+                    .is_some_and(|s| s.0.contains(&target.provider));
+                if !already_retried && ctx.attempt < max_attempts {
+                    let mut set = ctx
+                        .get_ext::<CloudAuthRefreshedProviders>()
+                        .cloned()
+                        .unwrap_or_default();
+                    set.0.insert(target.provider.clone());
+                    ctx.insert_ext(set);
+                    ctx.insert_ext(IntraProviderKeyRetry);
+                    info!(
+                        request_id = ctx.request_id,
+                        provider = %target.provider,
+                        auth_kind = cloud_auth.auth_kind_label(),
+                        status = status_code,
+                        attempt = ctx.attempt,
+                        "invalidated cached cloud IAM token after upstream rejection; retrying with fresh credential"
+                    );
+                    return HookResult::Ready(Flow::RetryUpstream);
+                }
+            }
+        }
 
         // Multi-key pool health tracking & intra-provider key rotation on rotatable errors.
         if let Some(active_key) = ctx.get_ext::<ActiveProviderKey>().cloned()
@@ -1855,24 +1994,121 @@ impl HttpPlugin for AiProviderAdapterPlugin {
     }
 }
 
-fn finalize_sigv4_if_needed<'a>(
-    endpoint: AiEndpointKind,
-    provider: &CompiledProvider,
-    req: &mut UpstreamRequest,
-) -> HookResult<'a, Flow> {
-    if let CompiledAuth::AwsSigV4(ref creds) = provider.auth
-        && let Err(err) = sign_upstream_request(req, creds, None)
-    {
-        let resp = endpoint_error_response(
-            endpoint,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            Some("aws_sigv4_signing_failed"),
-            &err,
-        );
-        return HookResult::Ready(Flow::Respond(resp));
+impl AiProviderAdapterPlugin {
+    fn finalize_upstream_auth<'a>(
+        &'a self,
+        endpoint: AiEndpointKind,
+        provider: &'a CompiledProvider,
+        req: &'a mut UpstreamRequest,
+    ) -> HookResult<'a, Flow> {
+        match &provider.auth {
+            CompiledAuth::AwsSigV4(creds) => {
+                if let Err(err) = sign_upstream_request(req, creds, None) {
+                    let resp = endpoint_error_response(
+                        endpoint,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "server_error",
+                        Some("aws_sigv4_signing_failed"),
+                        &err,
+                    );
+                    return HookResult::Ready(Flow::Respond(resp));
+                }
+                HookResult::Ready(Flow::Continue)
+            }
+            CompiledAuth::CloudIam(cloud_auth) => {
+                let (Some(cache), Some(http_client)) = (&self.cloud_tokens, &self.http_client)
+                else {
+                    let resp = endpoint_error_response(
+                        endpoint,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "server_error",
+                        Some("cloud_auth_unavailable"),
+                        "Dynamic cloud IAM auth is not initialized",
+                    );
+                    return HookResult::Ready(Flow::Respond(resp));
+                };
+
+                // Zero-allocation synchronous fast path when cached token is fresh.
+                if let CacheLookup::Fresh(cred) =
+                    cache.lookup(&cloud_auth.cache_key, self.clock.now())
+                {
+                    return HookResult::Ready(apply_resolved_cloud_credential(
+                        endpoint, req, &cred,
+                    ));
+                }
+
+                let cache = Arc::clone(cache);
+                let http_client = Arc::clone(http_client);
+                let clock = Arc::clone(&self.clock);
+                let cloud_auth = Arc::clone(cloud_auth);
+
+                HookResult::Pending(Box::pin(async move {
+                    match cache
+                        .get_or_refresh(&cloud_auth, http_client.as_ref(), clock.as_ref())
+                        .await
+                    {
+                        Ok(cred) => apply_resolved_cloud_credential(endpoint, req, &cred),
+                        Err(err) => {
+                            warn!(
+                                provider = %cloud_auth.provider_name,
+                                auth_kind = cloud_auth.auth_kind_label(),
+                                error = %err,
+                                "dynamic cloud IAM credential acquisition failed"
+                            );
+                            Flow::Respond(endpoint_error_response(
+                                endpoint,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "server_error",
+                                Some("cloud_auth_failed"),
+                                &format!(
+                                    "Failed to acquire cloud IAM credentials for provider `{}`: {err}",
+                                    cloud_auth.provider_name
+                                ),
+                            ))
+                        }
+                    }
+                }))
+            }
+            _ => HookResult::Ready(Flow::Continue),
+        }
     }
-    HookResult::Ready(Flow::Continue)
+}
+
+fn apply_resolved_cloud_credential(
+    endpoint: AiEndpointKind,
+    req: &mut UpstreamRequest,
+    cred: &ResolvedCloudCredential,
+) -> Flow {
+    match cred {
+        ResolvedCloudCredential::AwsSigV4(creds) => {
+            if let Err(err) = sign_upstream_request(req, creds, None) {
+                return Flow::Respond(endpoint_error_response(
+                    endpoint,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    Some("aws_sigv4_signing_failed"),
+                    &err,
+                ));
+            }
+            Flow::Continue
+        }
+        ResolvedCloudCredential::BearerToken(token) => {
+            let full = format!("Bearer {token}");
+            match HeaderValue::from_str(&full) {
+                Ok(hv) => {
+                    req.headers.insert(header::AUTHORIZATION, hv);
+                    Flow::Continue
+                }
+                Err(e) => Flow::Respond(endpoint_error_response(
+                    endpoint,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    Some("cloud_auth_failed"),
+                    &format!("Cloud IAM token contains invalid HTTP header characters: {e}"),
+                )),
+            }
+        }
+    }
 }
 
 fn concat_bytes(first: Bytes, second: Bytes) -> Bytes {

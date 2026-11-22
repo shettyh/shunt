@@ -1034,6 +1034,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "proptest",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

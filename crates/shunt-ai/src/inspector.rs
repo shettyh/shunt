@@ -2,6 +2,7 @@ use serde::Serialize;
 use shunt_plugin_sdk::{Clock, StateStore};
 
 use crate::cache::AiCacheTable;
+use crate::cloud_auth::{CloudTokenCache, CloudTokenSnapshot};
 use crate::failover::{CooldownSnapshot, FailoverCircuitState};
 use crate::presets::{KeyPoolSnapshot, KeyPoolTable};
 use crate::routing::{LatencyEntrySnapshot, TargetLatencyTable};
@@ -12,6 +13,13 @@ pub struct ScopedKeyPoolSnapshot {
     pub scope: String,
     #[serde(flatten)]
     pub entry: KeyPoolSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopedCloudTokenSnapshot {
+    pub scope: String,
+    #[serde(flatten)]
+    pub entry: CloudTokenSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,6 +52,7 @@ pub struct AiRuntimeInspect {
     pub latency_targets: Vec<ScopedLatencySnapshot>,
     pub caches: Vec<ScopedCacheSnapshot>,
     pub key_pools: Vec<ScopedKeyPoolSnapshot>,
+    pub cloud_tokens: Vec<ScopedCloudTokenSnapshot>,
 }
 
 /// Collects a point-in-time read-only inspection payload covering AI usage totals,
@@ -100,6 +109,16 @@ pub fn inspect_ai_runtime(
         }
     }
 
+    let mut cloud_tokens = Vec::new();
+    for (scope, _key, cache) in state_store.collect_by_type::<CloudTokenCache>() {
+        for entry in cache.snapshot_entries(now) {
+            cloud_tokens.push(ScopedCloudTokenSnapshot {
+                scope: scope.clone(),
+                entry,
+            });
+        }
+    }
+
     let report = AiRuntimeInspect {
         totals: detailed.totals,
         models: detailed.models,
@@ -107,6 +126,7 @@ pub fn inspect_ai_runtime(
         latency_targets,
         caches,
         key_pools,
+        cloud_tokens,
     };
 
     serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({}))

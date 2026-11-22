@@ -7,6 +7,7 @@ use thiserror::Error;
 
 use crate::clock::{Clock, SystemClock};
 use crate::distributed::DistributedStore;
+use crate::http_client::HttpClient;
 use crate::plugin::HttpPlugin;
 use crate::telemetry::TelemetrySink;
 
@@ -265,6 +266,7 @@ pub struct BuildContext {
     clock: Arc<dyn Clock>,
     distributed_store: Option<Arc<dyn DistributedStore>>,
     telemetry_sink: Option<Arc<dyn TelemetrySink>>,
+    http_client: Option<Arc<dyn HttpClient>>,
 }
 
 impl BuildContext {
@@ -281,6 +283,7 @@ impl BuildContext {
             clock: SystemClock::shared(),
             distributed_store: None,
             telemetry_sink: None,
+            http_client: None,
         }
     }
 
@@ -300,6 +303,7 @@ impl BuildContext {
             clock,
             distributed_store: None,
             telemetry_sink: None,
+            http_client: None,
         }
     }
 
@@ -324,6 +328,12 @@ impl BuildContext {
         self
     }
 
+    /// Attaches an optional shared outbound [`HttpClient`] for sideband HTTP calls.
+    pub fn with_http_client(mut self, http_client: Option<Arc<dyn HttpClient>>) -> Self {
+        self.http_client = http_client;
+        self
+    }
+
     /// Stable identifier for this plugin attachment (e.g., `route:<id>:plugin:<name>`).
     pub fn scope_id(&self) -> &str {
         &self.scope_id
@@ -345,6 +355,12 @@ impl BuildContext {
     /// Optional shared [`TelemetrySink`] configured at the gateway level (`[telemetry]`).
     pub fn telemetry_sink(&self) -> Option<Arc<dyn TelemetrySink>> {
         self.telemetry_sink.as_ref().map(Arc::clone)
+    }
+
+    /// Optional shared outbound [`HttpClient`] provided by the runtime for sideband HTTP calls
+    /// (e.g., cloud IAM token exchange, JWKS fetches, webhooks).
+    pub fn http_client(&self) -> Option<Arc<dyn HttpClient>> {
+        self.http_client.as_ref().map(Arc::clone)
     }
 
     /// Requests a scoped [`StateHandle`] whose entries will survive snapshot reloads

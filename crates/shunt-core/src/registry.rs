@@ -1,14 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use shunt_plugin_sdk::state::StagedStateMap;
 use shunt_plugin_sdk::{
-    BuildContext, Clock, DistributedStore, StateStore, SystemClock, TelemetrySink,
+    BuildContext, Clock, DistributedStore, HttpClient, StateStore, SystemClock, TelemetrySink,
 };
 
 use crate::error::CoreError;
+use crate::http_client::CoreHttpClient;
 use crate::otlp::{OtlpExporterConfig, OtlpHttpExporter};
 use crate::redis::{RedisStateStore, RedisStoreConfig};
 use crate::upstream::{UpstreamConfig, UpstreamPool, UpstreamPoolKey};
@@ -27,6 +28,7 @@ pub struct RuntimeRegistry {
     pools: RwLock<HashMap<UpstreamPoolKey, Arc<UpstreamPool>>>,
     redis_stores: RwLock<HashMap<RedisStoreConfig, Arc<RedisStateStore>>>,
     otlp_exporters: RwLock<HashMap<OtlpExporterConfig, Arc<OtlpHttpExporter>>>,
+    http_client: OnceLock<Arc<dyn HttpClient>>,
     state_store: Arc<StateStore>,
     clock: Arc<dyn Clock>,
 }
@@ -50,9 +52,27 @@ impl RuntimeRegistry {
             pools: RwLock::new(HashMap::new()),
             redis_stores: RwLock::new(HashMap::new()),
             otlp_exporters: RwLock::new(HashMap::new()),
+            http_client: OnceLock::new(),
             state_store: Arc::new(StateStore::new()),
             clock,
         }
+    }
+
+    /// Injects a custom outbound [`HttpClient`] (primarily for deterministic testing).
+    pub fn with_http_client(self, client: Arc<dyn HttpClient>) -> Self {
+        let _ = self.http_client.set(client);
+        self
+    }
+
+    /// Returns the shared, reload-persistent outbound [`HttpClient`], lazily initializing
+    /// [`CoreHttpClient`] on first access.
+    pub fn http_client(&self) -> Arc<dyn HttpClient> {
+        Arc::clone(self.http_client.get_or_init(|| {
+            Arc::new(
+                CoreHttpClient::new_default()
+                    .expect("failed to initialize default CoreHttpClient TLS configuration"),
+            )
+        }))
     }
 
     /// Returns a cached warm [`OtlpHttpExporter`] matching `config`, or creates and caches one.
@@ -304,6 +324,7 @@ impl RuntimeRegistry {
             clock: Arc::clone(&self.clock),
             distributed_store,
             telemetry_sink,
+            http_client: self.http_client(),
         }
     }
 }
@@ -319,6 +340,7 @@ pub struct BuildSession {
     clock: Arc<dyn Clock>,
     distributed_store: Option<Arc<dyn DistributedStore>>,
     telemetry_sink: Option<Arc<dyn TelemetrySink>>,
+    http_client: Arc<dyn HttpClient>,
 }
 
 impl BuildSession {
@@ -332,6 +354,7 @@ impl BuildSession {
         )
         .with_distributed_store(self.distributed_store.as_ref().map(Arc::clone))
         .with_telemetry_sink(self.telemetry_sink.as_ref().map(Arc::clone))
+        .with_http_client(Some(Arc::clone(&self.http_client)))
     }
 
     /// Atomically commits all newly staged state entries into [`StateStore`] and

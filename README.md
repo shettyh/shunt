@@ -245,6 +245,8 @@ impl HttpPlugin for PoweredByPlugin {
   - [RFC 0010](rfcs/0010-smart-routing-and-active-health-checks.md) — Smart Routing & Active Upstream Health Checks
   - [RFC 0011](rfcs/0011-otlp-observability-and-ai-cache.md) — OTLP/HTTP Observability & Exact-Match AI Response Cache
   - [RFC 0012](rfcs/0012-admin-inspector-ui.md) — Admin Read-Only Inspector UI (`--ui`)
+  - [RFC 0013](rfcs/0013-protocol-parity-and-provider-presets.md) — Deep Protocol Parity, Provider Presets & Multi-Key Pools
+  - [RFC 0014](rfcs/0014-cloud-iam-and-http-client.md) — Dynamic Cloud IAM Auth & Outbound `HttpClient` Primitive
 
 ---
 

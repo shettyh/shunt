@@ -7,6 +7,7 @@ pub mod clock;
 pub mod context;
 pub mod distributed;
 pub mod flow;
+pub mod http_client;
 pub mod http_types;
 pub mod mask;
 pub mod plugin;
@@ -21,6 +22,7 @@ pub use distributed::{
 };
 pub use flow::{BoxFuture, BufferedResponse, Flow, HookResult, StreamFlow};
 pub use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version, header};
+pub use http_client::{HttpClient, HttpClientError, HttpRequest, HttpResponse};
 pub use http_types::{
     HookTiming, RequestHead, RequestSummary, ResponseHead, RouteDecision, UpstreamRequest,
     UpstreamSelection,

@@ -1370,3 +1370,31 @@ fn example_shunt_ai_presets_and_parity_toml_compiles_and_verifies_cleanly() {
         report.diagnostics
     );
 }
+
+#[test]
+fn example_shunt_ai_cloud_iam_toml_compiles_and_verifies_cleanly() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/shunt-ai-cloud-iam.toml");
+    let provider = shunt_config::FileConfigProvider::new(&path);
+    let loaded = provider
+        .load()
+        .expect("examples/shunt-ai-cloud-iam.toml should parse");
+
+    let mut reg = PluginRegistry::new();
+    let prom = Arc::new(PrometheusMetrics::new());
+    let ai_metrics = Arc::new(AiMetrics::new());
+    register_builtin_plugins(&mut reg, prom);
+    register_ai_plugins(&mut reg, ai_metrics);
+
+    let compiler = SnapshotCompiler::new(Arc::new(reg), Arc::new(RuntimeRegistry::new()));
+    let bundle = compiler
+        .compile(&loaded)
+        .expect("examples/shunt-ai-cloud-iam.toml should compile cleanly");
+
+    let report = shunt_config::verify_bundle(&bundle, None, true);
+    assert!(
+        report.passed,
+        "cloud-iam example failed verify: {:?}",
+        report.diagnostics
+    );
+}
