@@ -474,6 +474,44 @@ impl QuotaWindowTable {
             .map(|e| (e.requests, e.tokens))
             .unwrap_or((0, 0))
     }
+
+    /// Sums actual entries across all shards to verify `entry_count` atomic accounting never drifts.
+    #[doc(hidden)]
+    pub fn actual_shard_entry_count(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|s| {
+                s.lock()
+                    .expect("QuotaWindowTable shard lock poisoned")
+                    .len()
+            })
+            .sum()
+    }
+
+    /// Test-only entrypoint exposing local fixed-window reservation for stateful property tests.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_reserve_for_test(
+        &self,
+        subject: &str,
+        rpm_limit: Option<u64>,
+        tpm_limit: Option<u64>,
+        estimated_tokens: u64,
+        now_ms: u64,
+        window_ms: u64,
+        max_entries: usize,
+    ) -> bool {
+        self.try_reserve(
+            subject,
+            rpm_limit,
+            tpm_limit,
+            estimated_tokens,
+            now_ms,
+            window_ms,
+            max_entries,
+        )
+        .is_ok()
+    }
 }
 
 pub(crate) fn apply_signed_delta(base: u64, delta: i64) -> u64 {

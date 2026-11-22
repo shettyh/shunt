@@ -454,6 +454,19 @@ impl AiCacheTable {
         (guard.map.len(), guard.total_bytes)
     }
 
+    /// Returns internal `(map_len, order_len, total_bytes, actual_sum_bytes)` for structural invariant tests.
+    #[doc(hidden)]
+    pub fn internal_counts(&self) -> (usize, usize, usize, usize) {
+        let guard = self.inner.lock().expect("AiCacheTable lock poisoned");
+        let actual_sum: usize = guard.map.values().map(|e| e.byte_len).sum();
+        (
+            guard.map.len(),
+            guard.order.len(),
+            guard.total_bytes,
+            actual_sum,
+        )
+    }
+
     fn evict_to_fit(
         guard: &mut LruInner,
         now: Duration,

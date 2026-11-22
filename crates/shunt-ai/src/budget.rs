@@ -175,15 +175,61 @@ struct LedgerEntry {
     spent_nano_usd: u64,
 }
 
-/// Persistent in-memory spend ledger stored in `StateStore` across hot reloads.
-#[derive(Debug, Default)]
+/// Default maximum number of budget keys retained in [`SpendLedgerTable`].
+pub const DEFAULT_MAX_LEDGER_ENTRIES: usize = 65_536;
+
+/// Persistent, bounded-cardinality in-memory spend ledger stored in `StateStore` across hot reloads.
+#[derive(Debug)]
 pub struct SpendLedgerTable {
     entries: RwLock<HashMap<String, LedgerEntry>>,
+    max_entries: usize,
+}
+
+impl Default for SpendLedgerTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SpendLedgerTable {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_max_entries(DEFAULT_MAX_LEDGER_ENTRIES)
+    }
+
+    pub fn with_max_entries(max_entries: usize) -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+            max_entries: max_entries.max(1),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries
+            .read()
+            .expect("SpendLedgerTable poisoned")
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn ensure_capacity(guard: &mut HashMap<String, LedgerEntry>, key: &str, max_entries: usize) {
+        if guard.contains_key(key) || guard.len() < max_entries {
+            return;
+        }
+        // First reclaim zero-spend entries (e.g., fully refunded pre-flight holds).
+        guard.retain(|_, e| e.spent_nano_usd > 0);
+        while guard.len() >= max_entries {
+            let Some(evict_key) = guard
+                .iter()
+                .min_by_key(|(_, e)| (e.window_id, e.spent_nano_usd))
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            guard.remove(&evict_key);
+        }
     }
 
     pub fn current_spend(&self, key: &str, window_id: u64) -> u64 {
@@ -198,6 +244,7 @@ impl SpendLedgerTable {
 
     pub fn add_spend(&self, key: &str, window_id: u64, delta_nano: u64) -> u64 {
         let mut guard = self.entries.write().expect("SpendLedgerTable poisoned");
+        Self::ensure_capacity(&mut guard, key, self.max_entries);
         let entry = guard.entry(key.to_owned()).or_insert(LedgerEntry {
             window_id,
             spent_nano_usd: 0,
@@ -213,6 +260,7 @@ impl SpendLedgerTable {
     /// Atomically adjusts spend for `key` in `window_id` by a signed nano-USD delta (clamped at 0).
     pub fn adjust_spend(&self, key: &str, window_id: u64, delta_nano: i64) -> u64 {
         let mut guard = self.entries.write().expect("SpendLedgerTable poisoned");
+        Self::ensure_capacity(&mut guard, key, self.max_entries);
         let entry = guard.entry(key.to_owned()).or_insert(LedgerEntry {
             window_id,
             spent_nano_usd: 0,
@@ -237,6 +285,7 @@ impl SpendLedgerTable {
         enforce_hard: bool,
     ) -> Result<u64, u64> {
         let mut guard = self.entries.write().expect("SpendLedgerTable poisoned");
+        Self::ensure_capacity(&mut guard, key, self.max_entries);
         let entry = guard.entry(key.to_owned()).or_insert(LedgerEntry {
             window_id,
             spent_nano_usd: 0,

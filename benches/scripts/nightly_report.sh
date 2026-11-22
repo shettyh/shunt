@@ -17,6 +17,7 @@ HTTP_CONCURRENCY="${HTTP_CONCURRENCY:-64}"
 SSE_CONCURRENCY="${SSE_CONCURRENCY:-500}"
 SSE_CHUNKS="${SSE_CHUNKS:-20}"
 SSE_INTERVAL_MS="${SSE_INTERVAL_MS:-25}"
+MAX_RSS_GROWTH_MB="${MAX_RSS_GROWTH_MB:-20.0}"
 
 UPSTREAM_PORT="${UPSTREAM_PORT:-18080}"
 GATEWAY_PORT="${GATEWAY_PORT:-18081}"
@@ -295,6 +296,49 @@ row["rss_mb"] = float(sys.argv[4])
 print(json.dumps(row))
 ' "$raw_json" "sse_ai_cache_hit" "Shunt-AI Streaming SSE Cache Replay Hit (\`ai-cache\`, zero upstream I/O)" "$rss" >>"$RESULTS_JSONL"
 
+# Steady-state memory growth soak check: run two consecutive identical bursts on the SAME
+# 8-plugin governed Shunt process and verify post-warmup RSS delta stays bounded.
+echo "==> Running [rss_soak] Shunt-AI Governed Steady-State RSS Guardrail..." >&2
+wait_for_port_free "$GATEWAY_PORT"
+: >"$GW_LOG"
+RUST_LOG=error "$SHUNT_BIN" run --no-watch -c "$CONFIG_DIR/shunt-ai-governed.toml" >"$GW_LOG" 2>&1 &
+GW_PID=$!
+wait_for_port_and_pid "$GATEWAY_PORT" "$GW_PID" "$GW_LOG"
+soak_b1_json="$("$BENCH_BIN" http \
+    --url "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" \
+    --method POST \
+    --body '{"model":"gpt-bench","stream":false,"messages":[{"role":"user","content":"hi"}]}' \
+    -c "$HTTP_CONCURRENCY" -d "$DURATION_SECS" --warmup-secs "$WARMUP_SECS" \
+    -H "Authorization: Bearer sk-bench-virtual-key" --json)"
+rss_burst1="$(rss_mb "$GW_PID")"
+soak_b2_json="$("$BENCH_BIN" http \
+    --url "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" \
+    --method POST \
+    --body '{"model":"claude-bench","stream":false,"messages":[{"role":"user","content":"hi"}]}' \
+    -c "$HTTP_CONCURRENCY" -d "$DURATION_SECS" --warmup-secs 0 \
+    -H "Authorization: Bearer sk-bench-virtual-key" --json)"
+rss_burst2="$(rss_mb "$GW_PID")"
+stop_gw
+python3 -c '
+import json, sys
+b1 = json.loads(sys.argv[1])
+b2 = json.loads(sys.argv[2])
+r1 = float(sys.argv[3])
+r2 = float(sys.argv[4])
+row = {
+    "workload": "rss_soak",
+    "id": "ai_governed_rss_soak",
+    "label": "Shunt-AI 8-Plugin Governed (Burst 1 OpenAI -> Burst 2 Anthropic on same PID)",
+    "requests_burst1": int(b1["ok"]),
+    "requests_burst2": int(b2["ok"]),
+    "errors": int(b1["errors"]) + int(b2["errors"]),
+    "rss_burst1_mb": r1,
+    "rss_burst2_mb": r2,
+    "rss_delta_mb": round(r2 - r1, 1),
+}
+print(json.dumps(row))
+' "$soak_b1_json" "$soak_b2_json" "$rss_burst1" "$rss_burst2" >>"$RESULTS_JSONL"
+
 # Collect host / runner environment metadata.
 RUN_UTC="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 GIT_SHA="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -313,7 +357,7 @@ mkdir -p "$(dirname "$OUTPUT_FILE")"
 
 python3 - "$RESULTS_JSONL" "$OUTPUT_FILE" \
     "$RUN_UTC" "$GIT_SHA" "$GIT_FULL_SHA" "$RUST_VER" "$OS_INFO" "$CPU_MODEL" "$CPU_CORES" \
-    "$DURATION_SECS" "$WARMUP_SECS" "$HTTP_CONCURRENCY" "$SSE_CONCURRENCY" "$SSE_CHUNKS" "$SSE_INTERVAL_MS" <<'PY'
+    "$DURATION_SECS" "$WARMUP_SECS" "$HTTP_CONCURRENCY" "$SSE_CONCURRENCY" "$SSE_CHUNKS" "$SSE_INTERVAL_MS" "$MAX_RSS_GROWTH_MB" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -334,11 +378,14 @@ from pathlib import Path
     sse_c,
     sse_chunks,
     sse_interval_ms,
+    max_rss_growth_mb_s,
 ) = sys.argv[1:]
 
+max_rss_growth_mb = float(max_rss_growth_mb_s)
 rows = [json.loads(line) for line in Path(jsonl_path).read_text().splitlines() if line.strip()]
 http_rows = [r for r in rows if r["workload"] == "http"]
 sse_rows = [r for r in rows if r["workload"] == "sse"]
+soak_rows = [r for r in rows if r["workload"] == "rss_soak"]
 
 def fmt_us(us: int) -> str:
     if us >= 1000:
@@ -398,12 +445,33 @@ for r in sse_rows:
         f"{r['wall_s']:.2f}s | {r['rss_mb']:.1f} MB |"
     )
 
+if soak_rows:
+    lines += [
+        "",
+        f"## Memory Stability (Steady-State RSS Guardrail: delta <= {max_rss_growth_mb:.1f} MB)",
+        "",
+        "| Workload | Burst 1 Reqs / RSS | Burst 2 Reqs / RSS | RSS Delta | Status |",
+        "| --- | ---: | ---: | ---: | :---: |",
+    ]
+    for r in soak_rows:
+        errs = int(r["errors"])
+        delta = float(r["rss_delta_mb"])
+        passed = errs == 0 and delta <= max_rss_growth_mb
+        if not passed:
+            has_failure = True
+        status = "PASS" if passed else "FAIL"
+        lines.append(
+            f"| {r['label']} | {r['requests_burst1']:,} / {r['rss_burst1_mb']:.1f} MB | "
+            f"{r['requests_burst2']:,} / {r['rss_burst2_mb']:.1f} MB | "
+            f"{delta:+.1f} MB | **{status}** |"
+        )
+
 lines.append("")
 report = "\n".join(lines)
 Path(output_path).write_text(report, encoding="utf-8")
 print(report)
 
 if has_failure:
-    print("error: one or more benchmark workloads reported errors/failed streams!", file=sys.stderr)
+    print("error: one or more benchmark workloads or RSS stability checks failed!", file=sys.stderr)
     sys.exit(1)
 PY
