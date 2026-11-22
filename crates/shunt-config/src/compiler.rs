@@ -5,10 +5,10 @@ use std::time::Duration;
 use http::Method;
 use serde::Serialize;
 use shunt_core::{
-    ActiveHealthCheckConfig, ActiveProbeKind, CertStore, GatewaySnapshot, OtlpExporterConfig,
-    PathMatch, RedisStoreConfig, RouteMatch, RouteSpec, RuntimeRegistry, SnapshotBuilder,
-    TimeoutConfig, TrafficMirrorSpec, UpstreamConfig, UpstreamEndpoint, UpstreamTlsConfig,
-    load_certified_key_pem,
+    ActiveHealthCheckConfig, ActiveProbeKind, CertStore, ClientAuthConfig, ClientAuthMode,
+    GatewaySnapshot, OtlpExporterConfig, PathMatch, RedisStoreConfig, RouteMatch, RouteSpec,
+    RuntimeRegistry, SnapshotBuilder, TimeoutConfig, TrafficMirrorSpec, UpstreamConfig,
+    UpstreamEndpoint, UpstreamTlsConfig, load_certified_key_pem,
 };
 use shunt_plugin_sdk::{
     DistributedStore, HookMask, HttpPlugin, PluginConfig, PluginRegistry, TelemetrySink,
@@ -16,8 +16,8 @@ use shunt_plugin_sdk::{
 
 use crate::error::ConfigError;
 use crate::ir::{
-    ActiveHealthCheckIr, ActiveProbeKindIr, GatewayConfig, PluginAttachment, RouteIr,
-    ServerTlsConfig, StateBackendKind, StateConfig, TelemetryBackendKind, TelemetryConfig,
+    ActiveHealthCheckIr, ActiveProbeKindIr, ClientAuthModeIr, GatewayConfig, PluginAttachment,
+    RouteIr, ServerTlsConfig, StateBackendKind, StateConfig, TelemetryBackendKind, TelemetryConfig,
     UpstreamIr, redact_secrets,
 };
 use crate::provider::LoadedConfig;
@@ -79,6 +79,7 @@ pub struct RouteInspect {
 pub struct CompiledBundle {
     pub snapshot: Arc<GatewaySnapshot>,
     pub cert_store: Option<CertStore>,
+    pub client_auth: Option<ClientAuthConfig>,
     pub inspect: SnapshotInspect,
     pub config: GatewayConfig,
 }
@@ -123,10 +124,10 @@ impl SnapshotCompiler {
     pub fn compile(&self, loaded: &LoadedConfig) -> Result<CompiledBundle, ConfigError> {
         loaded.config.validate()?;
 
-        // Load TLS certs upfront so invalid cert/key files fail before mutating any state.
-        let cert_store = match &loaded.config.server.tls {
-            Some(tls_cfg) => Some(load_cert_store(tls_cfg)?),
-            None => None,
+        // Load TLS certs and optional mTLS client CA upfront so invalid files fail before mutating state.
+        let (cert_store, client_auth) = match &loaded.config.server.tls {
+            Some(tls_cfg) => (Some(load_cert_store(tls_cfg)?), load_client_auth(tls_cfg)?),
+            None => (None, None),
         };
 
         // Resolve optional distributed state backend upfront so invalid env/URL fails cleanly.
@@ -289,6 +290,7 @@ impl SnapshotCompiler {
         Ok(CompiledBundle {
             snapshot,
             cert_store,
+            client_auth,
             inspect,
             config: loaded.config.clone(),
         })
@@ -477,10 +479,19 @@ fn compile_route_ir(ir: &RouteIr) -> Result<RouteSpec, ConfigError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let mut headers = Vec::with_capacity(ir.headers.len());
+    for (k, v) in &ir.headers {
+        let name = http::header::HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
+            ConfigError::Validation(vec![format!("invalid header matcher `{k}`: {e}")])
+        })?;
+        headers.push((name, v.clone()));
+    }
+
     let matcher = RouteMatch {
         hosts: ir.hosts.iter().map(|h| h.to_ascii_lowercase()).collect(),
         path,
         methods,
+        headers,
     };
 
     let mut spec = RouteSpec::new(ir.id.clone(), matcher, ir.upstream.clone())
@@ -521,7 +532,11 @@ fn compile_route_ir(ir: &RouteIr) -> Result<RouteSpec, ConfigError> {
 fn load_cert_store(tls: &ServerTlsConfig) -> Result<CertStore, ConfigError> {
     let mut store = CertStore::new();
 
-    if let (Some(cert_path), Some(key_path)) = (&tls.cert, &tls.key) {
+    if let (Some(cert_pem), Some(key_pem)) = (&tls.cert_pem, &tls.key_pem) {
+        let ck = load_certified_key_pem(cert_pem.as_bytes(), key_pem.as_bytes())
+            .map_err(|e| ConfigError::Tls(e.to_string()))?;
+        store = store.with_default(ck);
+    } else if let (Some(cert_path), Some(key_path)) = (&tls.cert, &tls.key) {
         let cert_pem = std::fs::read(cert_path).map_err(|source| ConfigError::ReadFile {
             path: cert_path.clone(),
             source,
@@ -536,18 +551,61 @@ fn load_cert_store(tls: &ServerTlsConfig) -> Result<CertStore, ConfigError> {
     }
 
     for sni in &tls.sni {
-        let cert_pem = std::fs::read(&sni.cert).map_err(|source| ConfigError::ReadFile {
-            path: sni.cert.clone(),
-            source,
-        })?;
-        let key_pem = std::fs::read(&sni.key).map_err(|source| ConfigError::ReadFile {
-            path: sni.key.clone(),
-            source,
-        })?;
+        let (cert_pem, key_pem) = match (&sni.cert_pem, &sni.key_pem) {
+            (Some(c), Some(k)) => (c.as_bytes().to_vec(), k.as_bytes().to_vec()),
+            _ => {
+                let cert_path = sni.cert.as_ref().ok_or_else(|| {
+                    ConfigError::Tls(format!("SNI `{}` missing cert path/PEM", sni.host))
+                })?;
+                let key_path = sni.key.as_ref().ok_or_else(|| {
+                    ConfigError::Tls(format!("SNI `{}` missing key path/PEM", sni.host))
+                })?;
+                let c = std::fs::read(cert_path).map_err(|source| ConfigError::ReadFile {
+                    path: cert_path.clone(),
+                    source,
+                })?;
+                let k = std::fs::read(key_path).map_err(|source| ConfigError::ReadFile {
+                    path: key_path.clone(),
+                    source,
+                })?;
+                (c, k)
+            }
+        };
         let ck = load_certified_key_pem(&cert_pem, &key_pem)
             .map_err(|e| ConfigError::Tls(format!("SNI `{}`: {e}", sni.host)))?;
         store = store.with_sni(sni.host.clone(), ck);
     }
 
     Ok(store)
+}
+
+fn load_client_auth(tls: &ServerTlsConfig) -> Result<Option<ClientAuthConfig>, ConfigError> {
+    let mode = match tls.effective_client_auth() {
+        ClientAuthModeIr::None => return Ok(None),
+        ClientAuthModeIr::Optional => ClientAuthMode::Optional,
+        ClientAuthModeIr::Required => ClientAuthMode::Required,
+    };
+
+    let ca_pem = if let Some(inline) = &tls.client_ca_pem {
+        inline.as_bytes().to_vec()
+    } else if let Some(path) = &tls.client_ca {
+        std::fs::read(path).map_err(|source| ConfigError::ReadFile {
+            path: path.clone(),
+            source,
+        })?
+    } else {
+        return Err(ConfigError::Tls(
+            "client_ca is required when client_auth is enabled".to_owned(),
+        ));
+    };
+
+    // Validate the CA bundle upfront so invalid PEM fails compilation cleanly.
+    let dummy_resolver = Arc::new(shunt_core::DynamicCertResolver::new(CertStore::new()));
+    let cfg = ClientAuthConfig { mode, ca_pem };
+    shunt_core::TlsListenerConfig::new(dummy_resolver)
+        .with_client_auth(Some(cfg.clone()))
+        .build_server_config()
+        .map_err(|e| ConfigError::Tls(e.to_string()))?;
+
+    Ok(Some(cfg))
 }

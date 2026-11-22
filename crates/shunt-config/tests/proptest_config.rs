@@ -370,6 +370,7 @@ fn arb_route_match() -> impl Strategy<Value = RouteMatch> {
             hosts,
             path,
             methods,
+            headers: Vec::new(),
         }
     })
 }

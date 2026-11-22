@@ -1,0 +1,228 @@
+[spec]
+name = "jwt-security-compression-and-routing"
+config_inline = """
+[server]
+listen = "127.0.0.1:0"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+[[upstreams]]
+name = "api_backend"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "canary_backend"
+endpoints = ["http://127.0.0.1:1"]
+
+[[routes]]
+id = "redirect_old"
+path_prefix = "/old"
+upstream = "api_backend"
+
+[[routes.plugins]]
+name = "redirect"
+[routes.plugins.config]
+status_code = 301
+scheme = "https"
+hostname = "api.shunt.dev"
+path_match_prefix = "/old"
+path_replace_prefix = "/v2"
+
+[[routes]]
+id = "canary_header_route"
+path_prefix = "/api"
+headers = { "x-track" = "canary" }
+upstream = "canary_backend"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+path_match_prefix = "/api"
+path_replace_prefix = "/internal"
+
+[[routes]]
+id = "protected_api"
+path_prefix = "/api"
+upstream = "api_backend"
+
+[[routes.plugins]]
+name = "ip-filter"
+[routes.plugins.config]
+allow = ["127.0.0.0/8", "10.0.0.0/8"]
+deny = ["10.50.0.0/16"]
+trusted_proxies = ["127.0.0.1/32"]
+use_forwarded_for = true
+
+[[routes.plugins]]
+name = "jwt-auth"
+[routes.plugins.config]
+algorithms = ["HS256"]
+keys = [{ kid = "k1", secret = "shunt-conformance-secret" }]
+issuer = "https://auth.shunt.dev"
+audience = "shunt-api"
+require_exp = false
+required_scopes = ["read", "write"]
+forward_claims = { "sub" = "x-user-id", "org.id" = "x-org-id" }
+strip_header = true
+
+[[routes.plugins]]
+name = "body-limit"
+[routes.plugins.config]
+max_bytes = 24
+
+[[routes.plugins]]
+name = "compression"
+[routes.plugins.config]
+encodings = ["zstd", "br", "gzip"]
+min_size_bytes = 32
+level = 3
+"""
+
+[[mocks]]
+upstream = "api_backend"
+name = "api_json"
+status = 200
+headers = { "content-type" = "application/json", "etag" = "\"abc123\"" }
+json = { ok = true, message = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+
+[[mocks]]
+upstream = "api_backend"
+name = "api_sse"
+status = 200
+headers = { "content-type" = "text/event-stream" }
+body = "data: {\"chunk\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n\n"
+
+[[mocks]]
+upstream = "canary_backend"
+name = "canary_ok"
+status = 200
+json = { track = "canary" }
+
+[[cases]]
+name = "valid JWT authenticates, strips spoofed claim headers, forwards verified claims, and compresses response"
+use_mocks = ["api_json"]
+
+[cases.request]
+method = "GET"
+path = "/api/items"
+headers = { "authorization" = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImsxIn0.eyJzdWIiOiJhbGljZSIsImlzcyI6Imh0dHBzOi8vYXV0aC5zaHVudC5kZXYiLCJhdWQiOiJzaHVudC1hcGkiLCJzY29wZSI6InJlYWQgd3JpdGUiLCJvcmciOnsiaWQiOiJhY21lIn19.t_7SCVmiwch8Vd33R3CoRX4zBD_t0E7sPLpc599hpic", "x-user-id" = "spoofed-evil", "accept-encoding" = "gzip" }
+
+[cases.expect]
+status = 200
+headers = { "content-encoding" = "gzip", "etag" = "W/\"abc123\"", "vary" = "Accept-Encoding" }
+
+[[cases.expect.upstream_calls]]
+upstream = "api_backend"
+count = 1
+headers = { "x-user-id" = "alice", "x-org-id" = "acme" }
+headers_absent = ["authorization"]
+
+[[cases]]
+name = "JWT with missing required scope returns 403 without hitting upstream"
+use_mocks = ["api_json"]
+
+[cases.request]
+method = "GET"
+path = "/api/items"
+headers = { "authorization" = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImsxIn0.eyJzdWIiOiJib2IiLCJpc3MiOiJodHRwczovL2F1dGguc2h1bnQuZGV2IiwiYXVkIjoic2h1bnQtYXBpIiwic2NvcGUiOiJyZWFkIiwib3JnIjp7ImlkIjoiYWNtZSJ9fQ.ahMd7S30cpuc7WhWGkUhi94ibWfI155Pm3ZNbKgresI" }
+
+[cases.expect]
+status = 403
+json_path = { "/error" = "insufficient_scope" }
+
+[[cases.expect.upstream_calls]]
+upstream = "api_backend"
+count = 0
+
+[[cases]]
+name = "JWT with invalid signature returns 401"
+use_mocks = ["api_json"]
+
+[cases.request]
+method = "GET"
+path = "/api/items"
+headers = { "authorization" = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImsxIn0.eyJzdWIiOiJldmUiLCJpc3MiOiJodHRwczovL2F1dGguc2h1bnQuZGV2IiwiYXVkIjoic2h1bnQtYXBpIiwic2NvcGUiOiJyZWFkIHdyaXRlIn0.6biUrFbEbMW8FhGpij5NRR-7vBmktAMQoan1O7rBxgI" }
+
+[cases.expect]
+status = 401
+json_path = { "/error" = "invalid_signature" }
+
+[[cases]]
+name = "ip-filter blocks denied CIDR resolved via trusted proxy X-Forwarded-For"
+use_mocks = ["api_json"]
+
+[cases.request]
+method = "GET"
+path = "/api/items"
+headers = { "x-forwarded-for" = "10.50.9.8" }
+
+[cases.expect]
+status = 403
+json_path = { "/error" = "ip_forbidden" }
+
+[[cases]]
+name = "body-limit rejects oversized request body with 413 before upstream"
+use_mocks = ["api_json"]
+
+[cases.request]
+method = "POST"
+path = "/api/items"
+headers = { "authorization" = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImsxIn0.eyJzdWIiOiJhbGljZSIsImlzcyI6Imh0dHBzOi8vYXV0aC5zaHVudC5kZXYiLCJhdWQiOiJzaHVudC1hcGkiLCJzY29wZSI6InJlYWQgd3JpdGUiLCJvcmciOnsiaWQiOiJhY21lIn19.t_7SCVmiwch8Vd33R3CoRX4zBD_t0E7sPLpc599hpic" }
+body = "this payload is definitely longer than twenty four bytes"
+
+[cases.expect]
+status = 413
+json_path = { "/error" = "payload_too_large" }
+
+[[cases.expect.upstream_calls]]
+upstream = "api_backend"
+count = 0
+
+[[cases]]
+name = "compression skips text/event-stream SSE responses"
+use_mocks = ["api_sse"]
+
+[cases.request]
+method = "GET"
+path = "/api/stream"
+headers = { "authorization" = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImsxIn0.eyJzdWIiOiJhbGljZSIsImlzcyI6Imh0dHBzOi8vYXV0aC5zaHVudC5kZXYiLCJhdWQiOiJzaHVudC1hcGkiLCJzY29wZSI6InJlYWQgd3JpdGUiLCJvcmciOnsiaWQiOiJhY21lIn19.t_7SCVmiwch8Vd33R3CoRX4zBD_t0E7sPLpc599hpic", "accept-encoding" = "zstd, br, gzip" }
+
+[cases.expect]
+status = 200
+headers_absent = ["content-encoding"]
+
+[[cases]]
+name = "header route matcher dispatches canary track and rewrites path prefix"
+use_mocks = ["canary_ok"]
+
+[cases.request]
+method = "GET"
+path = "/api/orders?id=7"
+headers = { "x-track" = "canary" }
+
+[cases.expect]
+status = 200
+json_path = { "/track" = "canary" }
+
+[[cases.expect.upstream_calls]]
+upstream = "canary_backend"
+count = 1
+path = "/internal/orders?id=7"
+
+[[cases]]
+name = "redirect plugin short-circuits with 301 and rewritten Location"
+use_mocks = ["api_json"]
+
+[cases.request]
+method = "GET"
+path = "/old/orders?limit=5"
+
+[cases.expect]
+status = 301
+headers = { "location" = "https://api.shunt.dev/v2/orders?limit=5" }
+
+[[cases.expect.upstream_calls]]
+upstream = "api_backend"
+count = 0

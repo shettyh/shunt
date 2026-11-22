@@ -1,4 +1,6 @@
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -18,6 +20,7 @@ pub enum ShuntBody {
     Empty,
     Full(Option<Bytes>),
     Passthrough(hyper::body::Incoming),
+    LimitedPassthrough(LimitedIncomingBody),
     IdleTimeout(IdleTimeoutBody<hyper::body::Incoming>),
     TrackedPassthrough(Box<TrackedPassthroughBody>),
     Channel(ChannelBody),
@@ -41,6 +44,15 @@ impl ShuntBody {
     #[inline]
     pub fn passthrough(incoming: hyper::body::Incoming) -> Self {
         Self::Passthrough(incoming)
+    }
+
+    #[inline]
+    pub fn limited_passthrough(
+        incoming: hyper::body::Incoming,
+        max_bytes: usize,
+        exceeded_flag: Arc<AtomicBool>,
+    ) -> Self {
+        Self::LimitedPassthrough(LimitedIncomingBody::new(incoming, max_bytes, exceeded_flag))
     }
 
     #[inline]
@@ -74,6 +86,7 @@ impl Body for ShuntBody {
                 Poll::Ready(None) => Poll::Ready(None),
                 Poll::Pending => Poll::Pending,
             },
+            ShuntBody::LimitedPassthrough(body) => Pin::new(body).poll_frame(cx),
             ShuntBody::IdleTimeout(body) => Pin::new(body).poll_frame(cx),
             ShuntBody::TrackedPassthrough(body) => Pin::new(body.as_mut()).poll_frame(cx),
             ShuntBody::Channel(body) => Pin::new(body).poll_frame(cx),
@@ -85,6 +98,7 @@ impl Body for ShuntBody {
             ShuntBody::Empty => true,
             ShuntBody::Full(opt) => opt.is_none(),
             ShuntBody::Passthrough(incoming) => incoming.is_end_stream(),
+            ShuntBody::LimitedPassthrough(body) => body.is_end_stream(),
             ShuntBody::IdleTimeout(body) => body.is_end_stream(),
             ShuntBody::TrackedPassthrough(body) => body.is_end_stream(),
             ShuntBody::Channel(_) => false,
@@ -97,10 +111,76 @@ impl Body for ShuntBody {
             ShuntBody::Full(Some(b)) => SizeHint::with_exact(b.len() as u64),
             ShuntBody::Full(None) => SizeHint::with_exact(0),
             ShuntBody::Passthrough(incoming) => incoming.size_hint(),
+            ShuntBody::LimitedPassthrough(body) => body.size_hint(),
             ShuntBody::IdleTimeout(body) => body.size_hint(),
             ShuntBody::TrackedPassthrough(body) => body.size_hint(),
             ShuntBody::Channel(_) => SizeHint::default(),
         }
+    }
+}
+
+/// Zero-copy streaming body wrapper enforcing an upper bound on total forwarded bytes
+/// without buffering the body or spawning an extra task.
+pub struct LimitedIncomingBody {
+    inner: hyper::body::Incoming,
+    max_bytes: usize,
+    bytes_read: usize,
+    exceeded: bool,
+    exceeded_flag: Arc<AtomicBool>,
+}
+
+impl LimitedIncomingBody {
+    pub fn new(
+        inner: hyper::body::Incoming,
+        max_bytes: usize,
+        exceeded_flag: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            inner,
+            max_bytes,
+            bytes_read: 0,
+            exceeded: false,
+            exceeded_flag,
+        }
+    }
+}
+
+impl Body for LimitedIncomingBody {
+    type Data = Bytes;
+    type Error = CoreError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if self.exceeded {
+            return Poll::Ready(None);
+        }
+        match Pin::new(&mut self.inner).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    let next = self.bytes_read.saturating_add(data.len());
+                    if next > self.max_bytes {
+                        self.exceeded = true;
+                        self.exceeded_flag.store(true, Ordering::Release);
+                        return Poll::Ready(Some(Err(CoreError::BodyTooLarge(self.max_bytes))));
+                    }
+                    self.bytes_read = next;
+                }
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(CoreError::Hyper(e)))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.exceeded || self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
     }
 }
 

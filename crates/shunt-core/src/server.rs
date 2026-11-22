@@ -10,6 +10,7 @@ use http::Request;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as AutoServerBuilder;
+use shunt_plugin_sdk::ClientCertInfo;
 use tokio::sync::{Notify, watch};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
@@ -18,7 +19,10 @@ use crate::error::CoreError;
 use crate::pipeline::execute_request;
 use crate::probe::ProbeSupervisor;
 use crate::snapshot::GatewaySnapshot;
-use crate::tls::{CertStore, DynamicCertResolver, TlsListenerConfig};
+use crate::tls::{
+    CertStore, ClientAuthConfig, DynamicCertResolver, TlsListenerConfig,
+    build_server_config_with_auth, parse_client_cert_info,
+};
 
 /// Core HTTP/1.1 + HTTP/2 + TLS + WebSocket gateway server backed by `ArcSwap<GatewaySnapshot>`.
 pub struct GatewayServer {
@@ -65,15 +69,18 @@ impl GatewayServer {
         let listener = socket.listen(4096)?;
         let local_addr = listener.local_addr()?;
 
-        let (tls_acceptor, tls_resolver) = match self.tls {
+        let (tls_acceptor, tls_resolver, tls_alpn) = match self.tls {
             Some(tls_cfg) => {
                 let server_cfg = tls_cfg.build_server_config()?;
                 (
-                    Some(TlsAcceptor::from(server_cfg)),
+                    Some(Arc::new(ArcSwap::from_pointee(TlsAcceptor::from(
+                        server_cfg,
+                    )))),
                     Some(Arc::clone(tls_cfg.resolver())),
+                    tls_cfg.alpn_protocols().to_vec(),
                 )
             }
-            None => (None, None),
+            None => (None, None, Vec::new()),
         };
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -84,6 +91,7 @@ impl GatewayServer {
         probes.reconcile(&self.snapshot.load());
 
         let snapshot_ref = Arc::clone(&self.snapshot);
+        let tls_acceptor_loop = tls_acceptor.clone();
         let active_conns_loop = Arc::clone(&active_conns);
         let drain_notify_loop = Arc::clone(&drain_notify);
         let trace_enabled_loop = Arc::clone(&self.trace_enabled);
@@ -113,7 +121,9 @@ impl GatewayServer {
                         let _ = tcp.set_nodelay(true);
 
                         let snapshot_conn = Arc::clone(&snapshot_ref);
-                        let tls_acceptor_conn = tls_acceptor.clone();
+                        let tls_acceptor_conn = tls_acceptor_loop
+                            .as_ref()
+                            .map(|swap| swap.load_full());
                         let active_conns_conn = Arc::clone(&active_conns_loop);
                         let drain_notify_conn = Arc::clone(&drain_notify_loop);
                         let next_req_id_conn = Arc::clone(&next_request_id);
@@ -131,15 +141,19 @@ impl GatewayServer {
                             if let Some(acceptor) = tls_acceptor_conn {
                                 match acceptor.accept(tcp).await {
                                     Ok(tls_stream) => {
-                                        let tls_sni = tls_stream
-                                            .get_ref()
-                                            .1
-                                            .server_name()
-                                            .map(str::to_owned);
+                                        let server_conn = tls_stream.get_ref().1;
+                                        let tls_sni =
+                                            server_conn.server_name().map(str::to_owned);
+                                        let client_cert = server_conn
+                                            .peer_certificates()
+                                            .and_then(|certs| certs.first())
+                                            .and_then(|leaf| parse_client_cert_info(leaf.as_ref()))
+                                            .map(Arc::new);
                                         serve_connection(
                                             TokioIo::new(tls_stream),
                                             peer_addr,
                                             tls_sni,
+                                            client_cert,
                                             snapshot_conn,
                                             next_req_id_conn,
                                             trace_enabled_conn,
@@ -155,6 +169,7 @@ impl GatewayServer {
                                 serve_connection(
                                     TokioIo::new(tcp),
                                     peer_addr,
+                                    None,
                                     None,
                                     snapshot_conn,
                                     next_req_id_conn,
@@ -173,6 +188,8 @@ impl GatewayServer {
             local_addr,
             snapshot: self.snapshot,
             tls_resolver,
+            tls_acceptor,
+            tls_alpn,
             trace_enabled: self.trace_enabled,
             probes,
             shutdown_tx,
@@ -184,10 +201,12 @@ impl GatewayServer {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_connection<I>(
     io: TokioIo<I>,
     peer_addr: SocketAddr,
     tls_sni: Option<String>,
+    client_cert: Option<Arc<ClientCertInfo>>,
     snapshot_swap: Arc<ArcSwap<GatewaySnapshot>>,
     next_request_id: Arc<AtomicU64>,
     trace_enabled: Arc<AtomicBool>,
@@ -201,10 +220,11 @@ async fn serve_connection<I>(
         let snapshot = snapshot_swap.load_full();
         let req_id = next_request_id.fetch_add(1, Ordering::Relaxed);
         let sni = tls_sni.clone();
+        let cert = client_cert.clone();
         let trace = trace_enabled.load(Ordering::Relaxed);
 
         async move {
-            let resp = execute_request(snapshot, req, req_id, peer_addr, sni, trace).await;
+            let resp = execute_request(snapshot, req, req_id, peer_addr, sni, cert, trace).await;
             Ok::<_, Infallible>(resp)
         }
     });
@@ -254,6 +274,8 @@ impl Drop for ActiveConnGuard {
 pub struct ServerReloader {
     snapshot: Arc<ArcSwap<GatewaySnapshot>>,
     tls_resolver: Option<Arc<DynamicCertResolver>>,
+    tls_acceptor: Option<Arc<ArcSwap<TlsAcceptor>>>,
+    tls_alpn: Vec<Vec<u8>>,
     probes: Arc<ProbeSupervisor>,
 }
 
@@ -272,6 +294,19 @@ impl ServerReloader {
             resolver.reload(next);
         }
     }
+
+    /// Atomically reloads the mTLS client certificate verifier for subsequent TLS handshakes
+    /// (no-op if this server is not a TLS listener).
+    pub fn reload_client_auth(
+        &self,
+        client_auth: Option<&ClientAuthConfig>,
+    ) -> Result<(), CoreError> {
+        if let (Some(resolver), Some(acceptor_swap)) = (&self.tls_resolver, &self.tls_acceptor) {
+            let server_cfg = build_server_config_with_auth(resolver, &self.tls_alpn, client_auth)?;
+            acceptor_swap.store(Arc::new(TlsAcceptor::from(server_cfg)));
+        }
+        Ok(())
+    }
 }
 
 /// Control handle for a running [`GatewayServer`].
@@ -279,6 +314,8 @@ pub struct ServerHandle {
     local_addr: SocketAddr,
     snapshot: Arc<ArcSwap<GatewaySnapshot>>,
     tls_resolver: Option<Arc<DynamicCertResolver>>,
+    tls_acceptor: Option<Arc<ArcSwap<TlsAcceptor>>>,
+    tls_alpn: Vec<Vec<u8>>,
     trace_enabled: Arc<AtomicBool>,
     probes: Arc<ProbeSupervisor>,
     shutdown_tx: watch::Sender<bool>,
@@ -299,6 +336,8 @@ impl ServerHandle {
         ServerReloader {
             snapshot: Arc::clone(&self.snapshot),
             tls_resolver: self.tls_resolver.clone(),
+            tls_acceptor: self.tls_acceptor.clone(),
+            tls_alpn: self.tls_alpn.clone(),
             probes: Arc::clone(&self.probes),
         }
     }
@@ -327,6 +366,18 @@ impl ServerHandle {
         if let Some(resolver) = &self.tls_resolver {
             resolver.reload(next);
         }
+    }
+
+    /// Hot-reloads mTLS client CA verification for subsequent handshakes (no-op if not TLS).
+    pub fn reload_client_auth(
+        &self,
+        client_auth: Option<&ClientAuthConfig>,
+    ) -> Result<(), CoreError> {
+        if let (Some(resolver), Some(acceptor_swap)) = (&self.tls_resolver, &self.tls_acceptor) {
+            let server_cfg = build_server_config_with_auth(resolver, &self.tls_alpn, client_auth)?;
+            acceptor_swap.store(Arc::new(TlsAcceptor::from(server_cfg)));
+        }
+        Ok(())
     }
 
     /// Enables or disables per-hook microsecond timing capture on subsequent requests.

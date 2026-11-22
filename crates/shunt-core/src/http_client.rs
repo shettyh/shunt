@@ -27,6 +27,8 @@ pub struct CoreHttpClientConfig {
     pub default_max_response_bytes: usize,
     pub pool_idle_timeout: Duration,
     pub pool_max_idle_per_host: usize,
+    /// Optional additional PEM-encoded root CA certificates (e.g. Kubernetes cluster CA).
+    pub extra_ca_pem: Option<Vec<u8>>,
     pub insecure_skip_verify: bool,
 }
 
@@ -38,6 +40,7 @@ impl Default for CoreHttpClientConfig {
             default_max_response_bytes: DEFAULT_HTTP_CLIENT_MAX_RESPONSE_BYTES,
             pool_idle_timeout: Duration::from_secs(60),
             pool_max_idle_per_host: 8,
+            extra_ca_pem: None,
             insecure_skip_verify: false,
         }
     }
@@ -64,7 +67,7 @@ impl CoreHttpClient {
     /// Builds a new [`CoreHttpClient`] with the provided configuration.
     pub fn new(config: CoreHttpClientConfig) -> Result<Self, CoreError> {
         let tls_cfg = UpstreamTlsConfig {
-            extra_ca_pem: None,
+            extra_ca_pem: config.extra_ca_pem.clone(),
             insecure_skip_verify: config.insecure_skip_verify,
             alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
         };

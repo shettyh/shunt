@@ -157,19 +157,66 @@ impl Default for ServerConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// Mutual TLS (mTLS) client certificate verification mode in `[server.tls]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientAuthModeIr {
+    #[default]
+    None,
+    Optional,
+    Required,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct ServerTlsConfig {
     pub cert: Option<PathBuf>,
     pub key: Option<PathBuf>,
+    /// Inline PEM-encoded default certificate chain (used by in-memory providers such as K8s Secrets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_pem: Option<String>,
+    /// Inline PEM-encoded default private key (redacted in `/snapshot`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_pem: Option<String>,
+    /// Optional path to PEM-encoded client CA root certificate(s) for mTLS verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_ca: Option<PathBuf>,
+    /// Optional inline PEM-encoded client CA root certificate(s) for mTLS verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_ca_pem: Option<String>,
+    /// mTLS client certificate policy (`none`, `optional`, or `required`).
+    /// Defaults to `required` when `client_ca`/`client_ca_pem` is configured, else `none`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_auth: Option<ClientAuthModeIr>,
     #[serde(default)]
     pub sni: Vec<SniCertConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+impl ServerTlsConfig {
+    /// Returns the effective mTLS verification mode.
+    pub fn effective_client_auth(&self) -> ClientAuthModeIr {
+        match self.client_auth {
+            Some(mode) => mode,
+            None if self.client_ca.is_some() || self.client_ca_pem.is_some() => {
+                ClientAuthModeIr::Required
+            }
+            None => ClientAuthModeIr::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct SniCertConfig {
     pub host: String,
-    pub cert: PathBuf,
-    pub key: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_pem: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_pem: Option<String>,
 }
 
 /// Default capacity of the in-memory trace ring buffer for the Admin Inspector UI.
@@ -390,6 +437,9 @@ pub struct RouteIr {
     pub path_exact: Option<String>,
     #[serde(default)]
     pub methods: Vec<String>,
+    /// Optional exact HTTP header matchers (all must match).
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
     pub upstream: String,
     pub strip_prefix: Option<String>,
     pub max_body_bytes: Option<usize>,
@@ -434,12 +484,21 @@ impl GatewayConfig {
             {
                 *key = base_dir.join(&*key);
             }
+            if let Some(ca) = &mut tls.client_ca
+                && ca.is_relative()
+            {
+                *ca = base_dir.join(&*ca);
+            }
             for sni in &mut tls.sni {
-                if sni.cert.is_relative() {
-                    sni.cert = base_dir.join(&sni.cert);
+                if let Some(cert) = &mut sni.cert
+                    && cert.is_relative()
+                {
+                    *cert = base_dir.join(&*cert);
                 }
-                if sni.key.is_relative() {
-                    sni.key = base_dir.join(&sni.key);
+                if let Some(key) = &mut sni.key
+                    && key.is_relative()
+                {
+                    *key = base_dir.join(&*key);
                 }
             }
         }
@@ -463,9 +522,16 @@ impl GatewayConfig {
             if let Some(k) = &tls.key {
                 paths.push(k.clone());
             }
+            if let Some(ca) = &tls.client_ca {
+                paths.push(ca.clone());
+            }
             for sni in &tls.sni {
-                paths.push(sni.cert.clone());
-                paths.push(sni.key.clone());
+                if let Some(c) = &sni.cert {
+                    paths.push(c.clone());
+                }
+                if let Some(k) = &sni.key {
+                    paths.push(k.clone());
+                }
             }
         }
         paths
@@ -517,12 +583,34 @@ impl GatewayConfig {
         }
 
         if let Some(tls) = &self.server.tls {
-            if tls.cert.is_some() != tls.key.is_some() {
+            let has_default_cert = tls.cert.is_some() || tls.cert_pem.is_some();
+            let has_default_key = tls.key.is_some() || tls.key_pem.is_some();
+            if has_default_cert != has_default_key {
                 errors.push("server.tls: both `cert` and `key` must be specified together".into());
             }
-            if tls.cert.is_none() && tls.sni.is_empty() {
+            if !has_default_cert && tls.sni.is_empty() {
                 errors.push(
                     "server.tls: specify a default `cert`/`key` pair or at least one `sni` entry"
+                        .into(),
+                );
+            }
+            for (idx, sni) in tls.sni.iter().enumerate() {
+                let s_cert = sni.cert.is_some() || sni.cert_pem.is_some();
+                let s_key = sni.key.is_some() || sni.key_pem.is_some();
+                if !s_cert || !s_key {
+                    errors.push(format!(
+                        "server.tls.sni[{idx}] (`{}`): both `cert` and `key` are required",
+                        sni.host
+                    ));
+                }
+            }
+            let auth_mode = tls.effective_client_auth();
+            if auth_mode != ClientAuthModeIr::None
+                && tls.client_ca.is_none()
+                && tls.client_ca_pem.is_none()
+            {
+                errors.push(
+                    "server.tls: `client_ca` (or `client_ca_pem`) is required when `client_auth` is `optional` or `required`"
                         .into(),
                 );
             }
@@ -748,6 +836,14 @@ impl GatewayConfig {
                     errors.push(format!("routes.{}: invalid HTTP method `{m}`", route.id));
                 }
             }
+            for k in route.headers.keys() {
+                if HeaderName::from_bytes(k.as_bytes()).is_err() {
+                    errors.push(format!(
+                        "routes.{}: invalid header matcher name `{k}`",
+                        route.id
+                    ));
+                }
+            }
             for (idx, mirror) in route.mirrors.iter().enumerate() {
                 if !upstream_names.contains(&mirror.upstream) {
                     errors.push(format!(
@@ -836,6 +932,7 @@ fn is_secret_key(key: &str) -> bool {
         "apikey",
         "authorization",
         "private_key",
+        "key_pem",
         "credential",
         "routing_key",
     ];

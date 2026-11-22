@@ -141,6 +141,12 @@ The read-only Admin API always binds to a separate listener (`127.0.0.1:9090` by
 | `request-id` | Generates or propagates `x-request-id` across request/response headers and context |
 | `access-log` | Structured `tracing` access logging in `on_complete` |
 | `bearer-auth` | Bearer token verification with subject injection into `RequestCtx` |
+| `jwt-auth` | Pure-Rust JWT/JWKS/OIDC verification (`HS*`/`RS*`/`PS*`/`ES*`/`EdDSA`), cached JWKS auto-refresh, scope/claim assertions, and anti-spoofing claim header forwarding |
+| `mtls-auth` | Mutual TLS client certificate authorization (CN, SAN DNS, SPIFFE SAN URI, SHA-256 fingerprint) and verified identity header injection |
+| `ip-filter` | IPv4/IPv6 CIDR allow/deny filtering with trusted-proxy right-to-left `X-Forwarded-For` resolution |
+| `body-limit` | Synchronous `Content-Length` and zero-copy streaming request body size enforcement (`413 Payload Too Large`) |
+| `compression` | Streaming-safe, SSE-aware response compression (`zstd`, `br`, `gzip`, `deflate`) with `Vary` and RFC 9110 `ETag` weakening |
+| `redirect` | Configurable HTTP redirects (`301`/`302`/`307`/`308`, scheme/host/port/path rewrites) |
 | `rate-limit` | Token-bucket rate limiting backed by reload-persistent `StateStore` (or Redis/Valkey) |
 | `header-rewrite` | Set/append/remove request and response headers |
 | `cors` | Configurable CORS preflight handling and response headers |
@@ -250,6 +256,7 @@ impl HttpPlugin for PoweredByPlugin {
   - [RFC 0015](rfcs/0015-guardrails-audit-and-webhooks.md) — Pluggable AI Guardrails (`ai-guardrails`), Redacted Audit Sinks (`ai-audit`) & Alert Webhooks (`ai-alerts`)
   - [RFC 0016](rfcs/0016-multimodal-endpoints-and-streaming-cache.md) — Multimodal Endpoints, Generation Lookup & Streaming/Singleflight/Semantic AI Cache
   - [RFC 0017](rfcs/0017-per-request-routing-quotas-and-advanced-failover.md) — Per-Request Routing, Concurrency Quotas & Advanced Failover
+  - [RFC 0018](rfcs/0018-jwt-http-security-compression-and-k8s-gateway.md) — JWT/OIDC Auth, HTTP Gateway Security, Response Compression & Kubernetes Gateway API
 
 ---
 

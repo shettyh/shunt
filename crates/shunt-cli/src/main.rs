@@ -7,9 +7,11 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 use shunt_ai::{AiMetrics, inspect_ai_runtime, register_ai_plugins};
 use shunt_config::{
-    AdminServer, ConfigProvider, FileConfigProvider, InspectorCapturePlugin, ReloadController,
-    Severity, SnapshotCompiler, SnapshotInspect, TraceRingBuffer, load_policy_file,
-    start_file_watcher, ui_feature_compiled, verify_bundle,
+    AdminServer, ConfigProvider, DEFAULT_K8S_CONTROLLER_NAME, FileConfigProvider,
+    InspectorCapturePlugin, K8sApiConfigProvider, K8sClientConfig, K8sGatewayOptions,
+    K8sManifestConfigProvider, ReloadController, Severity, SnapshotCompiler, SnapshotInspect,
+    TraceRingBuffer, load_policy_file, start_file_watcher, start_k8s_sync_loop,
+    ui_feature_compiled, verify_bundle,
 };
 use shunt_core::{DynamicCertResolver, GatewayServer, RuntimeRegistry, TlsListenerConfig};
 use shunt_plugin_sdk::PluginRegistry;
@@ -41,12 +43,30 @@ enum Commands {
         /// Path to shunt.toml (or .yaml/.yml).
         #[arg(short = 'c', long = "config", default_value = "shunt.toml")]
         config: PathBuf,
+        /// Optional path to Kubernetes Gateway API YAML manifest file or directory.
+        #[arg(long = "k8s-manifest")]
+        k8s_manifest: Option<PathBuf>,
+        /// Kubernetes GatewayClass controllerName filter (when using `--k8s-manifest`).
+        #[arg(long = "k8s-controller-name", default_value = DEFAULT_K8S_CONTROLLER_NAME)]
+        k8s_controller_name: String,
+        /// Optional Kubernetes namespace filter.
+        #[arg(long = "k8s-namespace")]
+        k8s_namespace: Option<String>,
     },
     /// Run static IR, route-shadowing, AI chain, and declarative policy verification.
     Verify {
         /// Path to shunt.toml (or .yaml/.yml).
         #[arg(short = 'c', long = "config", default_value = "shunt.toml")]
         config: PathBuf,
+        /// Optional path to Kubernetes Gateway API YAML manifest file or directory.
+        #[arg(long = "k8s-manifest")]
+        k8s_manifest: Option<PathBuf>,
+        /// Kubernetes GatewayClass controllerName filter.
+        #[arg(long = "k8s-controller-name", default_value = DEFAULT_K8S_CONTROLLER_NAME)]
+        k8s_controller_name: String,
+        /// Optional Kubernetes namespace filter.
+        #[arg(long = "k8s-namespace")]
+        k8s_namespace: Option<String>,
         /// Optional external policy TOML file overriding `[verify]` rules.
         #[arg(long = "policy")]
         policy: Option<PathBuf>,
@@ -83,6 +103,27 @@ enum Commands {
         /// Enable the read-only Admin Inspector Web UI and live trace waterfall on the Admin listener.
         #[arg(long = "ui")]
         ui: bool,
+        /// Optional path to Kubernetes Gateway API YAML manifest file or directory.
+        #[arg(long = "k8s-manifest")]
+        k8s_manifest: Option<PathBuf>,
+        /// Enable live Kubernetes Gateway API sync from cluster API server (in-cluster or `--k8s-api-server`).
+        #[arg(long = "k8s-gateway")]
+        k8s_gateway: bool,
+        /// Explicit Kubernetes API server URL (defaults to in-cluster `KUBERNETES_SERVICE_HOST`).
+        #[arg(long = "k8s-api-server")]
+        k8s_api_server: Option<String>,
+        /// Optional Kubernetes namespace filter.
+        #[arg(long = "k8s-namespace")]
+        k8s_namespace: Option<String>,
+        /// Kubernetes GatewayClass controllerName filter.
+        #[arg(long = "k8s-controller-name", default_value = DEFAULT_K8S_CONTROLLER_NAME)]
+        k8s_controller_name: String,
+        /// Poll interval in milliseconds for live `--k8s-gateway` sync (default: 5000).
+        #[arg(long = "k8s-poll-interval-ms", default_value_t = 5_000)]
+        k8s_poll_interval_ms: u64,
+        /// Gateway listener address override when using `--k8s-manifest` or `--k8s-gateway`.
+        #[arg(long = "listen", default_value = "0.0.0.0:8080")]
+        listen: String,
     },
     /// Run in developer mode with auto file-watch reload and live per-hook µs trace waterfalls.
     Dev {
@@ -92,6 +133,28 @@ enum Commands {
         /// Enable the read-only Admin Inspector Web UI and live trace waterfall on the Admin listener.
         #[arg(long = "ui")]
         ui: bool,
+        /// Optional path to Kubernetes Gateway API YAML manifest file or directory.
+        #[arg(long = "k8s-manifest")]
+        k8s_manifest: Option<PathBuf>,
+        /// Kubernetes GatewayClass controllerName filter.
+        #[arg(long = "k8s-controller-name", default_value = DEFAULT_K8S_CONTROLLER_NAME)]
+        k8s_controller_name: String,
+        /// Optional Kubernetes namespace filter.
+        #[arg(long = "k8s-namespace")]
+        k8s_namespace: Option<String>,
+    },
+}
+
+enum ServerSource {
+    File(PathBuf),
+    K8sManifest {
+        path: PathBuf,
+        options: K8sGatewayOptions,
+    },
+    K8sApi {
+        api_server: Option<String>,
+        poll_interval_ms: u64,
+        options: K8sGatewayOptions,
     },
 }
 
@@ -100,13 +163,47 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Check { config } => run_check(config),
+        Commands::Check {
+            config,
+            k8s_manifest,
+            k8s_controller_name,
+            k8s_namespace,
+        } => {
+            let provider: Box<dyn ConfigProvider> = match k8s_manifest {
+                Some(path) => Box::new(K8sManifestConfigProvider::new(
+                    path,
+                    K8sGatewayOptions {
+                        controller_name: k8s_controller_name,
+                        namespace: k8s_namespace,
+                        ..K8sGatewayOptions::default()
+                    },
+                )),
+                None => Box::new(FileConfigProvider::new(config)),
+            };
+            run_check(provider.as_ref())
+        }
         Commands::Verify {
             config,
+            k8s_manifest,
+            k8s_controller_name,
+            k8s_namespace,
             policy,
             format,
             strict,
-        } => run_verify(config, policy, format, strict),
+        } => {
+            let provider: Box<dyn ConfigProvider> = match k8s_manifest {
+                Some(path) => Box::new(K8sManifestConfigProvider::new(
+                    path,
+                    K8sGatewayOptions {
+                        controller_name: k8s_controller_name,
+                        namespace: k8s_namespace,
+                        ..K8sGatewayOptions::default()
+                    },
+                )),
+                None => Box::new(FileConfigProvider::new(config)),
+            };
+            run_verify(provider.as_ref(), policy, format, strict)
+        }
         Commands::Test {
             config,
             spec,
@@ -117,13 +214,64 @@ async fn main() -> ExitCode {
             config,
             no_watch,
             ui,
+            k8s_manifest,
+            k8s_gateway,
+            k8s_api_server,
+            k8s_namespace,
+            k8s_controller_name,
+            k8s_poll_interval_ms,
+            listen,
         } => {
             init_tracing("info");
-            run_server(config, false, !no_watch, ui).await
+            let source = if k8s_gateway {
+                ServerSource::K8sApi {
+                    api_server: k8s_api_server,
+                    poll_interval_ms: k8s_poll_interval_ms,
+                    options: K8sGatewayOptions {
+                        controller_name: k8s_controller_name,
+                        namespace: k8s_namespace,
+                        listen,
+                        admin_ui: ui,
+                        ..K8sGatewayOptions::default()
+                    },
+                }
+            } else if let Some(path) = k8s_manifest {
+                ServerSource::K8sManifest {
+                    path,
+                    options: K8sGatewayOptions {
+                        controller_name: k8s_controller_name,
+                        namespace: k8s_namespace,
+                        listen,
+                        admin_ui: ui,
+                        ..K8sGatewayOptions::default()
+                    },
+                }
+            } else {
+                ServerSource::File(config)
+            };
+            run_server(source, false, !no_watch, ui).await
         }
-        Commands::Dev { config, ui } => {
+        Commands::Dev {
+            config,
+            ui,
+            k8s_manifest,
+            k8s_controller_name,
+            k8s_namespace,
+        } => {
             init_tracing("warn,shunt_cli=info,shunt_config=info");
-            run_server(config, true, true, ui).await
+            let source = match k8s_manifest {
+                Some(path) => ServerSource::K8sManifest {
+                    path,
+                    options: K8sGatewayOptions {
+                        controller_name: k8s_controller_name,
+                        namespace: k8s_namespace,
+                        admin_ui: ui,
+                        ..K8sGatewayOptions::default()
+                    },
+                },
+                None => ServerSource::File(config),
+            };
+            run_server(source, true, true, ui).await
         }
     }
 }
@@ -157,8 +305,7 @@ fn build_registries() -> (
     )
 }
 
-fn run_check(config_path: PathBuf) -> ExitCode {
-    let provider = FileConfigProvider::new(&config_path);
+fn run_check(provider: &dyn ConfigProvider) -> ExitCode {
     let loaded = match provider.load() {
         Ok(l) => l,
         Err(err) => {
@@ -171,7 +318,7 @@ fn run_check(config_path: PathBuf) -> ExitCode {
     let compiler = SnapshotCompiler::new(plugins, runtime);
     match compiler.compile(&loaded) {
         Ok(bundle) => {
-            println!("Configuration valid: {}", config_path.display());
+            println!("Configuration valid: {}", provider.source_name());
             print_snapshot_table(&bundle.inspect);
             ExitCode::SUCCESS
         }
@@ -183,12 +330,11 @@ fn run_check(config_path: PathBuf) -> ExitCode {
 }
 
 fn run_verify(
-    config_path: PathBuf,
+    provider: &dyn ConfigProvider,
     policy_path: Option<PathBuf>,
     format: OutputFormat,
     strict: bool,
 ) -> ExitCode {
-    let provider = FileConfigProvider::new(&config_path);
     let loaded = match provider.load() {
         Ok(l) => l,
         Err(err) => {
@@ -230,7 +376,7 @@ fn run_verify(
             if report.diagnostics.is_empty() {
                 println!(
                     "Verification passed: {} (0 errors, 0 warnings)",
-                    config_path.display()
+                    provider.source_name()
                 );
             } else {
                 for d in &report.diagnostics {
@@ -313,12 +459,70 @@ async fn run_test(
 }
 
 async fn run_server(
-    config_path: PathBuf,
+    source: ServerSource,
     dev_mode: bool,
     watch_files: bool,
     cli_ui: bool,
 ) -> ExitCode {
-    let provider = Arc::new(FileConfigProvider::new(&config_path));
+    let mut watched_root: Option<PathBuf> = None;
+    let mut k8s_api_provider: Option<Arc<K8sApiConfigProvider>> = None;
+
+    let provider: Arc<dyn ConfigProvider> = match source {
+        ServerSource::File(path) => {
+            watched_root = Some(path.clone());
+            Arc::new(FileConfigProvider::new(path))
+        }
+        ServerSource::K8sManifest { path, options } => {
+            watched_root = Some(path.clone());
+            Arc::new(K8sManifestConfigProvider::new(path, options))
+        }
+        ServerSource::K8sApi {
+            api_server,
+            poll_interval_ms,
+            options,
+        } => {
+            let mut client_cfg = match api_server {
+                Some(url) => K8sClientConfig {
+                    api_server: url,
+                    bearer_token: std::env::var("K8S_BEARER_TOKEN").ok(),
+                    ca_cert_pem: None,
+                    insecure_skip_verify: false,
+                    request_timeout: Duration::from_secs(10),
+                    poll_interval: Duration::from_millis(poll_interval_ms.max(200)),
+                },
+                None => match K8sClientConfig::from_in_cluster() {
+                    Ok(mut cfg) => {
+                        cfg.poll_interval = Duration::from_millis(poll_interval_ms.max(200));
+                        cfg
+                    }
+                    Err(err) => {
+                        eprintln!("error: {err}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+            };
+            if let Ok(tok) = std::env::var("K8S_BEARER_TOKEN")
+                && !tok.is_empty()
+            {
+                client_cfg.bearer_token = Some(tok);
+            }
+            let api_prov = match K8sApiConfigProvider::new(client_cfg, options) {
+                Ok(p) => Arc::new(p),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Err(err) = api_prov.sync_once().await {
+                eprintln!("error: initial Kubernetes Gateway API sync failed: {err}");
+                return ExitCode::FAILURE;
+            }
+            k8s_api_provider = Some(Arc::clone(&api_prov));
+            api_prov
+        }
+    };
+
+    let source_label = provider.source_name();
     let loaded = match provider.load() {
         Ok(l) => l,
         Err(err) => {
@@ -378,7 +582,7 @@ async fn run_server(
 
     if let Some(certs) = bundle.cert_store {
         let resolver = Arc::new(DynamicCertResolver::new(certs));
-        gw = gw.with_tls(TlsListenerConfig::new(resolver));
+        gw = gw.with_tls(TlsListenerConfig::new(resolver).with_client_auth(bundle.client_auth));
     }
 
     let server_handle = match gw.bind(listen_addr).await {
@@ -473,8 +677,8 @@ async fn run_server(
         None
     };
 
-    let watcher_handle = if watch_files {
-        let mut files = vec![config_path.clone()];
+    let watcher_handle = if watch_files && let Some(root_path) = watched_root {
+        let mut files = vec![root_path];
         files.extend(bundle.config.referenced_tls_files());
         match start_file_watcher(files, Arc::clone(&controller), Duration::from_millis(150)) {
             Ok(h) => Some(h),
@@ -486,6 +690,9 @@ async fn run_server(
     } else {
         None
     };
+
+    let k8s_sync_handle =
+        k8s_api_provider.map(|api_prov| start_k8s_sync_loop(api_prov, Arc::clone(&controller)));
 
     if dev_mode {
         eprintln!(
@@ -503,7 +710,7 @@ async fn run_server(
             );
         }
         print_snapshot_table(&bundle.inspect);
-        eprintln!("Watching {} for live reloads...\n", config_path.display());
+        eprintln!("Watching {source_label} for live reloads...\n");
     } else {
         info!(
             listen = %server_handle.local_addr(),
@@ -528,6 +735,9 @@ async fn run_server(
     wait_for_signals(Arc::clone(&controller)).await;
 
     info!("shutdown signal received; draining in-flight connections");
+    if let Some(k8s_sync) = k8s_sync_handle {
+        k8s_sync.stop();
+    }
     if let Some(watcher) = watcher_handle {
         watcher.stop();
     }

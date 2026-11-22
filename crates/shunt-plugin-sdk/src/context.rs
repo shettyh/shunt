@@ -1,11 +1,36 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use http::{Extensions, StatusCode};
 
 use crate::http_types::HookTiming;
 use crate::telemetry::{SpanHandle, SpanValue, TraceAnnotations, current_unix_nanos};
+
+/// Verified peer client TLS certificate metadata extracted during an mTLS handshake.
+///
+/// Populated once per TLS connection on [`RequestCtx::client_cert`] and shared cheaply
+/// via [`Arc`] across pipelined/multiplexed requests with zero heap allocation per request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientCertInfo {
+    /// Subject Common Name (`CN`, OID `2.5.4.3`) if present.
+    pub subject_cn: Option<String>,
+    /// Canonical formatted Subject Distinguished Name (e.g. `"CN=svc-a,O=Acme"`).
+    pub subject_dn: String,
+    /// Canonical formatted Issuer Distinguished Name.
+    pub issuer_dn: String,
+    /// Subject Alternative Name DNS entries (`dNSName`).
+    pub san_dns: Vec<String>,
+    /// Subject Alternative Name URI entries (`uniformResourceIdentifier`, e.g. SPIFFE IDs).
+    pub san_uris: Vec<String>,
+    /// Subject Alternative Name RFC822 email entries (`rfc822Name`).
+    pub san_emails: Vec<String>,
+    /// Lowercase hexadecimal certificate serial number.
+    pub serial_hex: String,
+    /// Lowercase SHA-256 hex digest of the DER-encoded leaf certificate.
+    pub sha256_fingerprint: String,
+}
 
 /// Per-request context threaded through every lifecycle hook.
 ///
@@ -16,6 +41,8 @@ pub struct RequestCtx {
     pub request_id: u64,
     pub client_addr: SocketAddr,
     pub tls_sni: Option<String>,
+    /// Verified peer client certificate metadata when presented over an mTLS listener.
+    pub client_cert: Option<Arc<ClientCertInfo>>,
     pub route_id: Option<String>,
     pub attempt: usize,
     pub started_at: Instant,
@@ -32,6 +59,7 @@ impl RequestCtx {
             request_id,
             client_addr,
             tls_sni,
+            client_cert: None,
             route_id: None,
             attempt: 0,
             started_at: Instant::now(),
@@ -41,6 +69,13 @@ impl RequestCtx {
             last_upstream_error: None,
             last_upstream_status: None,
         }
+    }
+
+    /// Attaches verified peer client TLS certificate metadata to this request context.
+    #[inline]
+    pub fn with_client_cert(mut self, client_cert: Option<Arc<ClientCertInfo>>) -> Self {
+        self.client_cert = client_cert;
+        self
     }
 
     /// Inserts a typed value into the per-request extension map.

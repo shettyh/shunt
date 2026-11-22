@@ -27,8 +27,10 @@ shunt-config = { version = "0.0.1", path = "crates/shunt-config" } # x-release-p
 shunt-test = { version = "0.0.1", path = "crates/shunt-test" } # x-release-please-version
 
 arc-swap = "1"
+brotli = "7"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
@@ -53,6 +55,7 @@ tower-service = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 webpki-roots = "0.26"
+zstd = { version = "0.13", default-features = false }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(loom)"] }
