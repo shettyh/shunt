@@ -25,20 +25,33 @@ A tiny, zero-allocation-fast-path data plane (`shunt-core`) pairs with a strict 
 
 ## Benchmarks at a Glance
 
-Unified local loopback suite ([`bench.sh`](benches/scripts/bench.sh), [RFC 0020](rfcs/0020-unified-comprehensive-benchmarks.md)) on Apple M5 Pro (`c=64` HTTP / `c=1,000` SSE) comparing a single Shunt release binary against **Envoy 1.40.2**, **Caddy v2.11.9**, and **LiteLLM Proxy 1.110.2** (stateless, 4 workers):
+Unified local loopback suite ([`bench.sh`](benches/scripts/bench.sh), [RFC 0020](rfcs/0020-unified-comprehensive-benchmarks.md)) on Apple M5 Pro (`c=64` HTTP / `c=1,000` SSE) comparing a single Shunt release binary against **Envoy 1.40.2**, **Caddy v2.11.9**, and **LiteLLM Proxy 1.110.2** (4 workers, stateless no-DB). **Bold** marks the best result in each row.
 
-| Suite / Workload | Shunt | Comparison |
-| --- | --- | --- |
-| **API · HTTP/1.1 Passthrough** (`0` plugins) | **84,771 req/s** · p99 **1.02 ms** · 22.5 MB RSS | Envoy: 78.3k req/s · 53.6 MB · Caddy: 69.9k req/s · 72.9 MB |
-| **API · TLS 1.3 + HTTP/2 / mTLS** | **90.9k** (TLS/H2) · **89.6k** (mTLS) · p99 **962 µs** | Envoy (TLS/H2): 99.9k · p99 1.41 ms · Caddy: 67.0k · p99 2.24 ms |
-| **API · JWT HS256 + Security + `zstd`** | **68,664 req/s** · p99 **1.27 ms** · 38.5 MB RSS | Envoy (`jwt_authn+zstd`): 66.3k · 84.4 MB · Caddy (`zstd`): 62.8k · 252.7 MB |
-| **API · 200-Route Table + Weighted LB** | **78,900 req/s** · p99 **1.06 ms** · 23.6 MB RSS | Envoy: 62.0k req/s · p99 1.24 ms · 56.4 MB |
-| **API · Open-Loop 25k RPS Tail Latency** | p99 **3.37 ms** · p99.9 **4.22 ms** · **46.2 ms** CPU/1k | Envoy: p99 5.81 ms · p99.9 16.2 ms · Caddy: p99 4.69 ms |
-| **AI · 4 KB Multi-Turn Translate** *(8-plugin governed)* | **56,296 req/s** · p99 **1.57 ms** · **31.8 MB RSS** | LiteLLM (4w): 598 req/s · p99 117.4 ms · 2,071 MB |
-| **AI · 1,000 Concurrent SSE Translation** *(governed)* | **1,000/0** · **31.1k ch/s** · TTFC p99 **131.6 ms** | LiteLLM (4w): 3.3k ch/s · TTFC p99 6.07 s · 2,165 MB |
-| **AI · Cold Start, Bedrock SigV4 & Cache Hit** | **32–37 ms** start · **60.4k** SigV4 · **141.3k** cache hit | LiteLLM (4w): 15,207 ms start · 1,873 MB idle |
-| **MCP · 5-Plugin Governed `tools/call` & Loop Breaker** | **77,069 req/s** governed · **160.0k req/s** loop-break | 200 concurrent SSE tool calls: 200/0 · 7.4k ch/s |
-| **Soak · Live `POST /reload` Under Load** | **84,760 req/s** · **9/0 reloads** · **0 errors** | RSS soak delta across 672k AI reqs: **+1.0 MB** |
+### API Gateway vs. Envoy & Caddy
+
+| Workload | Metric | Shunt | Envoy 1.40 | Caddy 2.11 |
+| --- | --- | ---: | ---: | ---: |
+| **HTTP/1.1 Passthrough** *(0 plugins)* | RPS / p99 / RSS | **84.8k** / **1.02 ms** / **22.5 MB** | 78.3k / 1.15 ms / 53.6 MB | 69.9k / 2.28 ms / 72.9 MB |
+| **TLS 1.3 + HTTP/2** | RPS / p99 / RSS | 90.9k / **0.96 ms** / **22.6 MB** | **99.9k** / 1.41 ms / 53.2 MB | 67.0k / 2.24 ms / 77.0 MB |
+| **JWT HS256 + `zstd`** | RPS / p99 / RSS | **68.7k** / **1.27 ms** / **38.5 MB** | 66.3k / 1.42 ms / 84.4 MB | 62.8k* / 1.98 ms / 252.7 MB |
+| **200-Route Table + Weighted LB** | RPS / p99 / RSS | **78.9k** / **1.06 ms** / **23.6 MB** | 62.0k / 1.24 ms / 56.4 MB | — |
+| **Open-Loop 25k RPS** *(tail latency)* | p99 / p99.9 | **3.37 ms** / **4.22 ms** | 5.81 ms / 16.2 ms | 4.69 ms / 6.25 ms |
+
+<sub>*Caddy tested with `zstd` only (no JWT). Higher RPS is better; lower latency & RSS are better.</sub>
+
+### AI Gateway vs. LiteLLM (4 Workers)
+
+| Workload | Shunt *(8-plugin governed)* | LiteLLM *(4w, stateless)* | Shunt Advantage |
+| --- | ---: | ---: | ---: |
+| **4 KB Multi-Turn Translate** *(throughput / p99)* | **56.3k req/s** *(1.57 ms)* | 598 req/s *(117.4 ms)* | **94× faster** · **65× less RAM** *(32 vs 2,071 MB)* |
+| **1,000 Concurrent SSE Streams** *(chunks/s / TTFC p99)* | **31.1k ch/s** *(132 ms)* | 3.3k ch/s *(6,070 ms)* | **9.4× throughput** · **46× lower TTFC** |
+| **Cold Start & Idle Memory** | **32–37 ms** · **11–13 MB** | 15,207 ms · 1,873 MB | **>400× faster start** · **~150× less RAM** |
+
+### MCP, Fast-Paths & Stability Highlights
+
+- **MCP 5-plugin governance:** **77.1k req/s** (`tools/call`, p99 1.17 ms), **160.0k req/s** loop-breaker fast-path, **200/200** concurrent SSE tool calls (`7.4k ch/s`).
+- **Gateway fast-paths:** **141.3k req/s** exact-match AI cache hit, **89.6k req/s** mTLS + HTTP/2 (p99 0.98 ms), **60.4k req/s** AWS Bedrock SigV4 signing.
+- **Zero-downtime reloads & soak:** **84.8k req/s** during live `POST /reload` (**9/9** reloads, **0** errors); **+1.0 MB** RSS delta across 672k AI requests.
 
 See [`benches/README.md`](benches/README.md) for full tables, methodology, and reproduction commands.
 
