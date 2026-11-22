@@ -1693,14 +1693,14 @@ fn base64_decode_std(input: &str) -> Result<Vec<u8>, &'static str> {
         }
     };
     let mut out = Vec::with_capacity((trimmed.len() * 3) / 4);
-    let mut chunks = trimmed.chunks_exact(4);
-    for c in &mut chunks {
+    let (chunks, rem) = trimmed.as_chunks::<4>();
+    for c in chunks {
         let (a, b, c2, d) = (val(c[0])?, val(c[1])?, val(c[2])?, val(c[3])?);
         out.push((a << 2) | (b >> 4));
         out.push((b << 4) | (c2 >> 2));
         out.push((c2 << 6) | d);
     }
-    match chunks.remainder() {
+    match rem {
         [] => {}
         [x, y] => {
             let (a, b) = (val(*x)?, val(*y)?);

@@ -1561,8 +1561,8 @@ pub fn base64url_decode(input: &str) -> Result<Vec<u8>, &'static str> {
         return Err("invalid base64url length");
     }
     let mut out = Vec::with_capacity((bytes.len() * 3) / 4);
-    let mut chunks = bytes.chunks_exact(4);
-    for chunk in &mut chunks {
+    let (chunks, rem) = bytes.as_chunks::<4>();
+    for chunk in chunks {
         let a = b64url_val(chunk[0])?;
         let b = b64url_val(chunk[1])?;
         let c = b64url_val(chunk[2])?;
@@ -1571,7 +1571,6 @@ pub fn base64url_decode(input: &str) -> Result<Vec<u8>, &'static str> {
         out.push((b << 4) | (c >> 2));
         out.push((c << 6) | d);
     }
-    let rem = chunks.remainder();
     match rem.len() {
         0 => {}
         2 => {
@@ -1595,15 +1594,15 @@ pub fn base64url_decode(input: &str) -> Result<Vec<u8>, &'static str> {
 pub fn base64url_encode(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    let mut chunks = data.chunks_exact(3);
-    for c in &mut chunks {
+    let (chunks, rem) = data.as_chunks::<3>();
+    for c in chunks {
         let n = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32);
         out.push(TABLE[((n >> 18) & 63) as usize] as char);
         out.push(TABLE[((n >> 12) & 63) as usize] as char);
         out.push(TABLE[((n >> 6) & 63) as usize] as char);
         out.push(TABLE[(n & 63) as usize] as char);
     }
-    match chunks.remainder() {
+    match rem {
         [a] => {
             let n = (*a as u32) << 16;
             out.push(TABLE[((n >> 18) & 63) as usize] as char);

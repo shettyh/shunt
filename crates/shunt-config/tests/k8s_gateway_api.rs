@@ -25,15 +25,15 @@ use tokio::net::TcpListener;
 fn b64_std(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
-    let mut chunks = data.chunks_exact(3);
-    for c in &mut chunks {
+    let (chunks, rem) = data.as_chunks::<3>();
+    for c in chunks {
         let n = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32);
         out.push(TABLE[((n >> 18) & 63) as usize] as char);
         out.push(TABLE[((n >> 12) & 63) as usize] as char);
         out.push(TABLE[((n >> 6) & 63) as usize] as char);
         out.push(TABLE[(n & 63) as usize] as char);
     }
-    match chunks.remainder() {
+    match rem {
         [a] => {
             let n = (*a as u32) << 16;
             out.push(TABLE[((n >> 18) & 63) as usize] as char);

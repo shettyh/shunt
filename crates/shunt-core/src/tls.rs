@@ -422,10 +422,8 @@ fn decode_der_string(tag: u8, bytes: &[u8]) -> Option<String> {
         0x0C | 0x13 | 0x16 | 0x14 | 0x1A => String::from_utf8(bytes.to_vec()).ok(),
         // BMPString (UTF-16BE)
         0x1E if bytes.len().is_multiple_of(2) => {
-            let units: Vec<u16> = bytes
-                .chunks_exact(2)
-                .map(|c| u16::from_be_bytes([c[0], c[1]]))
-                .collect();
+            let (chunks, _) = bytes.as_chunks::<2>();
+            let units: Vec<u16> = chunks.iter().map(|&c| u16::from_be_bytes(c)).collect();
             String::from_utf16(&units).ok()
         }
         _ => None,
