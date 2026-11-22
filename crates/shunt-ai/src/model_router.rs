@@ -1,31 +1,40 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use shunt_plugin_sdk::{
-    BufferedResponse, BuildContext, Bytes, Clock, Flow, HeaderName, HeaderValue, HookMask,
-    HookResult, HttpPlugin, Method, PluginBuildError, PluginConfig, PluginFactory, RequestCtx,
-    RequestHead, RequestSummary, ResponseHead, RouteDecision, StatusCode, UpstreamSelection,
-    header,
+    BufferedResponse, BuildContext, Bytes, Clock, Flow, HeaderMap, HeaderName, HeaderValue,
+    HookMask, HookResult, HttpClient, HttpPlugin, HttpRequest, Method, PluginBuildError,
+    PluginConfig, PluginFactory, RequestCtx, RequestHead, RequestSummary, ResponseHead,
+    RouteDecision, StatusCode, UpstreamSelection, Uri, header,
 };
+use tokio::sync::Semaphore;
 
 use crate::multimodal::extract_query_param;
 use crate::multipart::{extract_multipart_text_field, parse_multipart_boundary};
 use crate::pricing::{ModelPricing, PricingCatalog};
 use crate::routing::{
-    LatencyRoutingConfig, RoutingCursorTable, TargetLatencyTable, UnknownCostPolicy,
-    detect_required_capabilities, order_cost_targets, order_weighted_targets,
+    LatencyRoutingConfig, ProviderRoutingPreferences, RoutingCursorTable, TargetHeadroomTable,
+    TargetLatencyTable, TargetThroughputTable, ThroughputRoutingConfig, UnknownCostPolicy,
+    apply_provider_preferences, detect_required_capabilities, extract_end_user_from_body,
+    filter_targets_by_context_window, order_cost_targets, order_weighted_targets,
 };
 use crate::tokens::estimate_request_tokens;
 use crate::types::{
-    AiCapability, AiEndpointKind, AiFailoverHistory, AiKeyPolicy, AiRequestMeta, AiTarget, AiUsage,
-    DetectedEndpoint, IntraProviderKeyRetry, RoutingStrategy, endpoint_error_response,
-    openai_error_response, percent_decode, wildcard_match,
+    AiCapability, AiEndUser, AiEndpointKind, AiFailoverHistory, AiKeyPolicy, AiRequestMeta,
+    AiTarget, AiUsage, ContextOverflowFloor, DetectedEndpoint, IntraProviderKeyRetry,
+    RoutingStrategy, endpoint_error_response, openai_error_response, percent_decode,
+    resolve_env_secret, wildcard_match,
 };
 
 const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
 const DEFAULT_COST_OUTPUT_TOKENS: u64 = 256;
+const DEFAULT_SHADOW_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_SHADOW_MAX_IN_FLIGHT: usize = 64;
 
 fn default_weight() -> u32 {
     1
@@ -39,6 +48,18 @@ fn default_cost_output_tokens() -> u64 {
     DEFAULT_COST_OUTPUT_TOKENS
 }
 
+fn default_shadow_sample_rate() -> f64 {
+    1.0
+}
+
+fn default_shadow_timeout_ms() -> u64 {
+    DEFAULT_SHADOW_TIMEOUT_MS
+}
+
+fn default_shadow_max_in_flight() -> usize {
+    DEFAULT_SHADOW_MAX_IN_FLIGHT
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct TargetSpec {
     /// Named provider ID matching an entry in `ai-provider-adapter`'s `providers` map.
@@ -50,7 +71,7 @@ pub struct TargetSpec {
     /// Optional explicit endpoint override passed to `UpstreamSelection::endpoint_override`.
     #[serde(default)]
     pub endpoint_override: Option<String>,
-    /// Optional capability tags (`chat`, `streaming`, `tools`, `vision`, `json_schema`, `reasoning`, `embeddings`).
+    /// Optional capability tags (`chat`, `streaming`, `tools`, `vision`, `json_schema`, `reasoning`, `embeddings`, ...).
     #[serde(default)]
     pub capabilities: Vec<AiCapability>,
     /// Relative traffic weight used by `strategy = "weighted"` (default: `1`, must be `>= 1`).
@@ -62,10 +83,34 @@ pub struct TargetSpec {
     /// Optional per-target JSON parameter overrides injected unconditionally before translation.
     #[serde(default)]
     pub override_params: BTreeMap<String, Value>,
+    /// Optional explicit input context window length in tokens.
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    /// Optional explicit maximum output tokens advertised in `GET /v1/models`.
+    #[serde(default)]
+    pub max_output_tokens: Option<u64>,
+    /// Zero Data Retention compliance flag (`provider.data_collection = "deny"` / `zdr = true`).
+    #[serde(default)]
+    pub zdr: bool,
+    /// Compliance / geographic region tags (e.g., `["eu", "us-east"]`).
+    #[serde(default)]
+    pub regions: Vec<String>,
+    /// Arbitrary compliance / deployment tags (e.g., `["hipaa", "soc2"]`).
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Optional declared upstream provider RPM limit for `strategy = "headroom"`.
+    #[serde(default)]
+    pub upstream_rpm: Option<u64>,
+    /// Optional declared upstream provider TPM limit for `strategy = "headroom"`.
+    #[serde(default)]
+    pub upstream_tpm: Option<u64>,
+    /// Optional per-target TTFT / response-headers timeout override in milliseconds.
+    #[serde(default)]
+    pub ttft_timeout_ms: Option<u64>,
 }
 
 impl TargetSpec {
-    fn resolve(&self, requested_model: &str) -> AiTarget {
+    pub fn resolve(&self, requested_model: &str) -> AiTarget {
         AiTarget {
             provider: self.provider.clone(),
             upstream: self.upstream.clone(),
@@ -78,6 +123,110 @@ impl TargetSpec {
             weight: self.weight.max(1),
             default_params: self.default_params.clone(),
             override_params: self.override_params.clone(),
+            context_window: self.context_window,
+            max_output_tokens: self.max_output_tokens,
+            zdr: self.zdr,
+            regions: self.regions.clone(),
+            tags: self.tags.clone(),
+            upstream_rpm: self.upstream_rpm,
+            upstream_tpm: self.upstream_tpm,
+            ttft_timeout_ms: self.ttft_timeout_ms,
+        }
+    }
+}
+
+/// Optional off-path AI traffic shadow target dispatched via [`HttpClient`] without blocking
+/// or altering the primary response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ShadowTargetSpec {
+    /// Human-readable shadow target name for diagnostics/metrics.
+    pub name: String,
+    /// Full HTTP/HTTPS URL to receive shadowed AI JSON requests.
+    pub url: String,
+    /// Optional model name to substitute into the shadowed JSON request's `"model"` field.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Fraction of matching requests to shadow in `[0.0, 1.0]` (default: `1.0`).
+    #[serde(default = "default_shadow_sample_rate")]
+    pub sample_rate: f64,
+    /// Per-shadow request timeout in milliseconds (default: `5000`).
+    #[serde(default = "default_shadow_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Maximum concurrent in-flight shadow requests (default: `64`).
+    #[serde(default = "default_shadow_max_in_flight")]
+    pub max_in_flight: usize,
+    /// Optional extra HTTP headers (values support `env:VAR_NAME`).
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// Optional model glob filters limiting which requested models are shadowed (empty = all).
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+struct CompiledShadowTarget {
+    name: String,
+    uri: Uri,
+    model: Option<String>,
+    sample_rate_bps: u32,
+    timeout: Duration,
+    headers: Vec<(HeaderName, HeaderValue)>,
+    models: Vec<String>,
+    semaphore: Arc<Semaphore>,
+    cursor: AtomicU64,
+}
+
+impl CompiledShadowTarget {
+    fn should_sample(&self) -> bool {
+        if self.sample_rate_bps == 0 {
+            return false;
+        }
+        if self.sample_rate_bps >= 10_000 {
+            return true;
+        }
+        let n = self.cursor.fetch_add(1, Ordering::Relaxed);
+        let rate = self.sample_rate_bps as u64;
+        ((n.wrapping_add(1)).wrapping_mul(rate) / 10_000) > (n.wrapping_mul(rate) / 10_000)
+    }
+
+    fn matches_model(&self, model: &str) -> bool {
+        self.models.is_empty() || self.models.iter().any(|p| wildcard_match(p, model))
+    }
+}
+
+/// Read-only snapshot of AI shadow traffic counters for Admin Inspector APIs.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AiShadowStatsSnapshot {
+    pub sent: u64,
+    pub dropped: u64,
+    pub errors: u64,
+}
+
+/// `StateStore`-backed AI shadow traffic counter table.
+#[derive(Debug, Default)]
+pub struct AiShadowStatsTable {
+    sent: AtomicU64,
+    dropped: AtomicU64,
+    errors: AtomicU64,
+}
+
+impl AiShadowStatsTable {
+    pub fn record_sent(&self) {
+        self.sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_dropped(&self) {
+        self.dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_error(&self) {
+        self.errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> AiShadowStatsSnapshot {
+        AiShadowStatsSnapshot {
+            sent: self.sent.load(Ordering::Relaxed),
+            dropped: self.dropped.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
         }
     }
 }
@@ -151,9 +300,15 @@ struct AiModelRouterConfig {
     /// Tuning parameters for `strategy = "latency"`.
     #[serde(default)]
     latency: LatencyRoutingConfig,
+    /// Tuning parameters for `strategy = "throughput"`.
+    #[serde(default)]
+    throughput: ThroughputRoutingConfig,
     /// Custom per-model pricing overrides for `strategy = "cost"`.
     #[serde(default)]
     pricing: HashMap<String, ModelPricing>,
+    /// Optional path to an external JSON pricing catalog (Shunt or LiteLLM format).
+    #[serde(default)]
+    pricing_file: Option<PathBuf>,
     /// Include Shunt's built-in reference model pricing catalog for `strategy = "cost"` (default: true).
     #[serde(default = "default_true")]
     use_builtin_pricing: bool,
@@ -166,6 +321,25 @@ struct AiModelRouterConfig {
     /// Estimated output tokens used when ranking targets by `strategy = "cost"` (default: 256).
     #[serde(default = "default_cost_output_tokens")]
     cost_estimated_output_tokens: u64,
+    /// Enable OpenRouter-style per-request `models[]` and `provider: { ... }` routing overrides
+    /// (default: false). Overrides are strictly bounded by virtual-key ACLs and stripped before
+    /// forwarding upstream.
+    #[serde(default)]
+    allow_request_routing_overrides: bool,
+    /// Filter out targets whose declared or catalog `context_window` cannot fit the estimated
+    /// input token count (default: true).
+    #[serde(default = "default_true")]
+    enforce_context_window: bool,
+    /// Extra safety buffer tokens added to estimated input tokens during context-window checks (default: 0).
+    #[serde(default)]
+    context_window_safety_margin_tokens: u64,
+    /// Optional incoming HTTP header to extract an end-user identifier (`AiEndUser`) from,
+    /// taking precedence over JSON `user` / `metadata.user_id`.
+    #[serde(default)]
+    end_user_header: Option<String>,
+    /// Optional off-path AI shadow targets dispatched asynchronously via `HttpClient`.
+    #[serde(default)]
+    shadow_targets: Vec<ShadowTargetSpec>,
     /// Additional concrete model IDs to advertise on `GET /v1/models` (useful for
     /// wildcard-routed models like `"claude-3-5-sonnet-20241022"` or `"gemini-2.5-flash"`).
     exposed_models: Vec<String>,
@@ -194,11 +368,18 @@ impl Default for AiModelRouterConfig {
             default_strategy: None,
             include_routing_headers: false,
             latency: LatencyRoutingConfig::default(),
+            throughput: ThroughputRoutingConfig::default(),
             pricing: HashMap::new(),
+            pricing_file: None,
             use_builtin_pricing: true,
             default_pricing: None,
             unknown_cost_policy: UnknownCostPolicy::Last,
             cost_estimated_output_tokens: DEFAULT_COST_OUTPUT_TOKENS,
+            allow_request_routing_overrides: false,
+            enforce_context_window: true,
+            context_window_safety_margin_tokens: 0,
+            end_user_header: None,
+            shadow_targets: Vec::new(),
             exposed_models: Vec::new(),
             models: HashMap::new(),
             rules: Vec::new(),
@@ -247,6 +428,102 @@ impl PluginFactory for AiModelRouterFactory {
                 message: msg,
             });
         }
+        if let Err(msg) = cfg.throughput.validate() {
+            return Err(PluginBuildError::BuildFailed {
+                plugin: self.name().to_owned(),
+                message: msg,
+            });
+        }
+
+        let end_user_header = match &cfg.end_user_header {
+            Some(raw) => Some(HeaderName::from_bytes(raw.as_bytes()).map_err(|e| {
+                PluginBuildError::BuildFailed {
+                    plugin: self.name().to_owned(),
+                    message: format!("invalid `end_user_header` `{raw}`: {e}"),
+                }
+            })?),
+            None => None,
+        };
+
+        let mut compiled_shadows = Vec::with_capacity(cfg.shadow_targets.len());
+        for (idx, s) in cfg.shadow_targets.into_iter().enumerate() {
+            if s.name.trim().is_empty() {
+                return Err(PluginBuildError::BuildFailed {
+                    plugin: self.name().to_owned(),
+                    message: format!("`shadow_targets[{idx}].name` cannot be empty"),
+                });
+            }
+            if !s.url.starts_with("http://") && !s.url.starts_with("https://") {
+                return Err(PluginBuildError::BuildFailed {
+                    plugin: self.name().to_owned(),
+                    message: format!(
+                        "`shadow_targets[{idx}].url` (`{}`) must use http:// or https://",
+                        s.url
+                    ),
+                });
+            }
+            if !s.sample_rate.is_finite() || s.sample_rate < 0.0 || s.sample_rate > 1.0 {
+                return Err(PluginBuildError::BuildFailed {
+                    plugin: self.name().to_owned(),
+                    message: format!("`shadow_targets[{idx}].sample_rate` must be in [0.0, 1.0]"),
+                });
+            }
+            if s.timeout_ms == 0 {
+                return Err(PluginBuildError::BuildFailed {
+                    plugin: self.name().to_owned(),
+                    message: format!("`shadow_targets[{idx}].timeout_ms` must be >= 1"),
+                });
+            }
+            if s.max_in_flight == 0 {
+                return Err(PluginBuildError::BuildFailed {
+                    plugin: self.name().to_owned(),
+                    message: format!("`shadow_targets[{idx}].max_in_flight` must be >= 1"),
+                });
+            }
+            let mut headers = Vec::with_capacity(s.headers.len());
+            for (k, v) in s.headers {
+                let resolved =
+                    resolve_env_secret(&v).map_err(|msg| PluginBuildError::BuildFailed {
+                        plugin: self.name().to_owned(),
+                        message: format!("`shadow_targets[{idx}].headers.{k}`: {msg}"),
+                    })?;
+                let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
+                    PluginBuildError::BuildFailed {
+                        plugin: self.name().to_owned(),
+                        message: format!(
+                            "`shadow_targets[{idx}].headers`: invalid name `{k}`: {e}"
+                        ),
+                    }
+                })?;
+                let val = HeaderValue::from_str(&resolved).map_err(|e| {
+                    PluginBuildError::BuildFailed {
+                        plugin: self.name().to_owned(),
+                        message: format!(
+                            "`shadow_targets[{idx}].headers.{k}`: invalid header value: {e}"
+                        ),
+                    }
+                })?;
+                headers.push((name, val));
+            }
+            let parsed_uri: Uri = s.url.parse().map_err(|e| PluginBuildError::BuildFailed {
+                plugin: self.name().to_owned(),
+                message: format!(
+                    "`shadow_targets[{idx}].url` (`{}`): invalid URI: {e}",
+                    s.url
+                ),
+            })?;
+            compiled_shadows.push(Arc::new(CompiledShadowTarget {
+                name: s.name,
+                uri: parsed_uri,
+                model: s.model,
+                sample_rate_bps: (s.sample_rate.clamp(0.0, 1.0) * 10_000.0).round() as u32,
+                timeout: Duration::from_millis(s.timeout_ms),
+                headers,
+                models: s.models,
+                semaphore: Arc::new(Semaphore::new(s.max_in_flight.max(1))),
+                cursor: AtomicU64::new(0),
+            }));
+        }
 
         if cfg.models.is_empty()
             && cfg.rules.is_empty()
@@ -287,35 +564,38 @@ impl PluginFactory for AiModelRouterFactory {
             validate_targets(self.name(), "batches_targets", &cfg.batches_targets)?;
         }
 
-        let pricing_catalog =
-            PricingCatalog::new(cfg.pricing, cfg.use_builtin_pricing, cfg.default_pricing)
-                .map_err(|message| PluginBuildError::BuildFailed {
-                    plugin: self.name().to_owned(),
-                    message,
-                })?;
+        let pricing_catalog = PricingCatalog::new_with_file(
+            cfg.pricing,
+            cfg.use_builtin_pricing,
+            cfg.default_pricing,
+            cfg.pricing_file.as_deref(),
+        )
+        .map_err(|message| PluginBuildError::BuildFailed {
+            plugin: self.name().to_owned(),
+            message,
+        })?;
 
-        let uses_latency = cfg.strategy == RoutingStrategy::Latency
-            || cfg.default_strategy == Some(RoutingStrategy::Latency)
-            || cfg
-                .models
-                .values()
-                .any(|e| e.strategy(cfg.strategy) == RoutingStrategy::Latency)
-            || cfg
-                .rules
-                .iter()
-                .any(|r| r.strategy.unwrap_or(cfg.strategy) == RoutingStrategy::Latency);
+        let uses_strategy = |target: RoutingStrategy| -> bool {
+            cfg.strategy == target
+                || cfg.default_strategy == Some(target)
+                || cfg
+                    .models
+                    .values()
+                    .any(|e| e.strategy(cfg.strategy) == target)
+                || cfg
+                    .rules
+                    .iter()
+                    .any(|r| r.strategy.unwrap_or(cfg.strategy) == target)
+        };
 
-        let uses_cursors = uses_latency
-            || cfg.strategy == RoutingStrategy::Weighted
-            || cfg.default_strategy == Some(RoutingStrategy::Weighted)
-            || cfg
-                .models
-                .values()
-                .any(|e| e.strategy(cfg.strategy) == RoutingStrategy::Weighted)
-            || cfg
-                .rules
-                .iter()
-                .any(|r| r.strategy.unwrap_or(cfg.strategy) == RoutingStrategy::Weighted);
+        let uses_latency =
+            uses_strategy(RoutingStrategy::Latency) || cfg.allow_request_routing_overrides;
+        let uses_throughput =
+            uses_strategy(RoutingStrategy::Throughput) || cfg.allow_request_routing_overrides;
+        let uses_headroom =
+            uses_strategy(RoutingStrategy::Headroom) || cfg.allow_request_routing_overrides;
+        let uses_cursors =
+            uses_latency || uses_throughput || uses_strategy(RoutingStrategy::Weighted);
 
         let cursors = if uses_cursors {
             Some(
@@ -335,11 +615,39 @@ impl PluginFactory for AiModelRouterFactory {
             None
         };
 
+        let throughput_table = if uses_throughput {
+            Some(
+                ctx.state_handle()
+                    .get_or_init("routing_throughput", TargetThroughputTable::default),
+            )
+        } else {
+            None
+        };
+
+        let headroom_table = if uses_headroom {
+            Some(
+                ctx.state_handle()
+                    .get_or_init("routing_headroom", TargetHeadroomTable::default),
+            )
+        } else {
+            None
+        };
+
+        let shadow_stats = if !compiled_shadows.is_empty() {
+            Some(
+                ctx.state_handle()
+                    .get_or_init("ai_shadow_stats", AiShadowStatsTable::default),
+            )
+        } else {
+            None
+        };
+
         let (models_list_json, models_by_id, catalog_entries) = compile_models_catalog(
             &cfg.models,
             &cfg.rules,
             &cfg.default_targets,
             &cfg.exposed_models,
+            &pricing_catalog,
         );
 
         Ok(Arc::new(AiModelRouterPlugin {
@@ -350,13 +658,23 @@ impl PluginFactory for AiModelRouterFactory {
             default_router_strategy: cfg.strategy,
             default_targets_strategy: cfg.default_strategy.unwrap_or(cfg.strategy),
             include_routing_headers: cfg.include_routing_headers,
+            allow_request_routing_overrides: cfg.allow_request_routing_overrides,
+            enforce_context_window: cfg.enforce_context_window,
+            context_window_safety_margin_tokens: cfg.context_window_safety_margin_tokens,
+            end_user_header,
             latency_cfg: cfg.latency,
+            throughput_cfg: cfg.throughput,
             pricing_catalog,
             unknown_cost_policy: cfg.unknown_cost_policy,
             cost_estimated_output_tokens: cfg.cost_estimated_output_tokens,
             clock: ctx.clock(),
+            http_client: ctx.http_client(),
             cursors,
             latency_table,
+            throughput_table,
+            headroom_table,
+            shadow_targets: compiled_shadows,
+            shadow_stats,
             models: cfg.models,
             rules: cfg.rules,
             default_targets: cfg.default_targets,
@@ -403,25 +721,26 @@ fn validate_targets(
     Ok(())
 }
 
-/// Pre-serializes deterministic OpenAI `GET /v1/models` and `GET /v1/models/{id}` payloads
-/// once at snapshot compilation time (zero per-request sorting or serialization).
+/// Pre-serializes deterministic, enriched OpenAI `GET /v1/models` and `GET /v1/models/{id}`
+/// payloads once at snapshot compilation time (zero per-request sorting or serialization).
 fn compile_models_catalog(
     models: &HashMap<String, ModelEntryConfig>,
     rules: &[ModelRule],
     default_targets: &[TargetSpec],
     exposed_models: &[String],
-) -> (Bytes, HashMap<String, Bytes>, Vec<(String, String)>) {
+    pricing_catalog: &PricingCatalog,
+) -> (Bytes, HashMap<String, Bytes>, Vec<(String, Value)>) {
     // BTreeMap guarantees deterministic alphabetical ordering by model `id`.
-    let mut catalog: BTreeMap<String, String> = BTreeMap::new();
+    let mut catalog: BTreeMap<String, (String, Vec<TargetSpec>)> = BTreeMap::new();
 
     // 1. Explicit model aliases in `models`.
     for (alias, entry) in models {
-        let owner = entry
-            .targets()
+        let targets = entry.targets().to_vec();
+        let owner = targets
             .first()
             .map(|t| t.provider.clone())
             .unwrap_or_else(|| "shunt".to_owned());
-        catalog.insert(alias.clone(), owner);
+        catalog.insert(alias.clone(), (owner, targets));
     }
 
     // 2. Concrete `model` names referenced inside `rules` targets.
@@ -430,7 +749,7 @@ fn compile_models_catalog(
             if let Some(m) = t.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
                 catalog
                     .entry(m.to_owned())
-                    .or_insert_with(|| t.provider.clone());
+                    .or_insert_with(|| (t.provider.clone(), vec![t.clone()]));
             }
         }
     }
@@ -441,23 +760,21 @@ fn compile_models_catalog(
         if id.is_empty() {
             continue;
         }
-        let owner = resolve_owner_for_exposed(id, models, rules, default_targets);
-        catalog.entry(id.to_owned()).or_insert(owner);
+        let (owner, resolved_specs) =
+            resolve_owner_and_targets_for_exposed(id, models, rules, default_targets);
+        catalog
+            .entry(id.to_owned())
+            .or_insert((owner, resolved_specs));
     }
 
     let mut data_entries = Vec::with_capacity(catalog.len());
     let mut models_by_id = HashMap::with_capacity(catalog.len());
     let mut ordered_entries = Vec::with_capacity(catalog.len());
 
-    for (id, owned_by) in catalog {
-        let entry = json!({
-            "id": id,
-            "object": "model",
-            "created": 0,
-            "owned_by": owned_by,
-        });
+    for (id, (owned_by, specs)) in catalog {
+        let entry = build_enriched_model_entry(&id, &owned_by, &specs, pricing_catalog);
         let single_bytes = Bytes::from(serde_json::to_vec(&entry).unwrap_or_default());
-        ordered_entries.push((id.clone(), owned_by));
+        ordered_entries.push((id.clone(), entry.clone()));
         models_by_id.insert(id, single_bytes);
         data_entries.push(entry);
     }
@@ -471,34 +788,162 @@ fn compile_models_catalog(
     (list_bytes, models_by_id, ordered_entries)
 }
 
-fn resolve_owner_for_exposed(
+fn build_enriched_model_entry(
+    id: &str,
+    owned_by: &str,
+    specs: &[TargetSpec],
+    pricing_catalog: &PricingCatalog,
+) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("id".to_owned(), Value::String(id.to_owned()));
+    obj.insert("object".to_owned(), Value::String("model".to_owned()));
+    obj.insert("created".to_owned(), json!(0));
+    obj.insert("owned_by".to_owned(), Value::String(owned_by.to_owned()));
+
+    let primary_concrete_model = specs.first().and_then(|s| s.model.as_deref()).unwrap_or(id);
+    let pricing = pricing_catalog.lookup(primary_concrete_model, id);
+
+    let context_length = specs
+        .iter()
+        .filter_map(|s| {
+            let concrete = s.model.as_deref().unwrap_or(id);
+            s.context_window.or_else(|| {
+                pricing_catalog
+                    .lookup(concrete, id)
+                    .and_then(|p| p.max_input_tokens)
+            })
+        })
+        .max()
+        .or_else(|| pricing.and_then(|p| p.max_input_tokens));
+    if let Some(ctx_len) = context_length {
+        obj.insert("context_length".to_owned(), json!(ctx_len));
+    }
+
+    let max_output = specs
+        .iter()
+        .filter_map(|s| {
+            let concrete = s.model.as_deref().unwrap_or(id);
+            s.max_output_tokens.or_else(|| {
+                pricing_catalog
+                    .lookup(concrete, id)
+                    .and_then(|p| p.max_output_tokens)
+            })
+        })
+        .max()
+        .or_else(|| pricing.and_then(|p| p.max_output_tokens));
+    if let Some(max_out) = max_output {
+        obj.insert("max_output_tokens".to_owned(), json!(max_out));
+    }
+
+    if let Some(p) = pricing {
+        let mut p_obj = serde_json::Map::new();
+        p_obj.insert(
+            "prompt".to_owned(),
+            Value::String(format!("{:.10}", p.input_per_million_usd / 1_000_000.0)),
+        );
+        p_obj.insert(
+            "completion".to_owned(),
+            Value::String(format!("{:.10}", p.output_per_million_usd / 1_000_000.0)),
+        );
+        p_obj.insert(
+            "input_per_million_usd".to_owned(),
+            json!(p.input_per_million_usd),
+        );
+        p_obj.insert(
+            "output_per_million_usd".to_owned(),
+            json!(p.output_per_million_usd),
+        );
+        if let Some(cr) = p.cached_input_per_million_usd {
+            p_obj.insert(
+                "cache_read".to_owned(),
+                Value::String(format!("{:.10}", cr / 1_000_000.0)),
+            );
+            p_obj.insert("cached_input_per_million_usd".to_owned(), json!(cr));
+        }
+        if let Some(cw) = p.cache_write_per_million_usd {
+            p_obj.insert(
+                "cache_write".to_owned(),
+                Value::String(format!("{:.10}", cw / 1_000_000.0)),
+            );
+            p_obj.insert("cache_write_per_million_usd".to_owned(), json!(cw));
+        }
+        obj.insert("pricing".to_owned(), Value::Object(p_obj));
+    }
+
+    if !specs.is_empty() {
+        let mut providers = Vec::new();
+        let mut seen_providers = HashSet::new();
+        let mut caps = BTreeSet::new();
+        let mut regions = BTreeSet::new();
+        let mut any_zdr = false;
+        for s in specs {
+            if seen_providers.insert(s.provider.as_str()) {
+                providers.push(Value::String(s.provider.clone()));
+            }
+            for c in &s.capabilities {
+                caps.insert(c.as_str());
+            }
+            for r in &s.regions {
+                regions.insert(r.clone());
+            }
+            if s.zdr {
+                any_zdr = true;
+            }
+        }
+        obj.insert("providers".to_owned(), Value::Array(providers));
+        if !caps.is_empty() {
+            obj.insert(
+                "capabilities".to_owned(),
+                Value::Array(
+                    caps.into_iter()
+                        .map(|c| Value::String(c.to_owned()))
+                        .collect(),
+                ),
+            );
+        }
+        if any_zdr {
+            obj.insert("zdr".to_owned(), Value::Bool(true));
+        }
+        if !regions.is_empty() {
+            obj.insert(
+                "regions".to_owned(),
+                Value::Array(regions.into_iter().map(Value::String).collect()),
+            );
+        }
+    }
+
+    Value::Object(obj)
+}
+
+fn resolve_owner_and_targets_for_exposed(
     model_id: &str,
     models: &HashMap<String, ModelEntryConfig>,
     rules: &[ModelRule],
     default_targets: &[TargetSpec],
-) -> String {
+) -> (String, Vec<TargetSpec>) {
     if let Some(entry) = models.get(model_id)
         && let Some(first) = entry.targets().first()
     {
-        return first.provider.clone();
+        return (first.provider.clone(), entry.targets().to_vec());
     }
     for rule in rules {
         if wildcard_match(&rule.pattern, model_id)
             && let Some(first) = rule.targets.first()
         {
-            return first.provider.clone();
+            return (first.provider.clone(), rule.targets.clone());
         }
     }
     if let Some(first) = default_targets.first() {
-        return first.provider.clone();
+        return (first.provider.clone(), default_targets.to_vec());
     }
-    "shunt".to_owned()
+    ("shunt".to_owned(), Vec::new())
 }
 
 /// Parses incoming AI requests (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`,
 /// `/v1/embeddings`, `GET /v1/models`, `POST /v1/messages/count_tokens`), enforces capability
-/// guards, applies smart routing strategies (`priority`, `weighted`, `latency`, `cost`),
-/// and stores typed [`AiRequestMeta`] in `ctx.extensions`.
+/// and context-window guards, applies per-request routing overrides and smart routing strategies
+/// (`priority`, `weighted`, `latency`, `cost`, `throughput`, `headroom`), optionally dispatches
+/// sampled AI shadow requests, and stores typed [`AiRequestMeta`] in `ctx.extensions`.
 pub struct AiModelRouterPlugin {
     max_body_bytes: usize,
     auto_max_attempts: bool,
@@ -507,13 +952,23 @@ pub struct AiModelRouterPlugin {
     default_router_strategy: RoutingStrategy,
     default_targets_strategy: RoutingStrategy,
     include_routing_headers: bool,
+    allow_request_routing_overrides: bool,
+    enforce_context_window: bool,
+    context_window_safety_margin_tokens: u64,
+    end_user_header: Option<HeaderName>,
     latency_cfg: LatencyRoutingConfig,
+    throughput_cfg: ThroughputRoutingConfig,
     pricing_catalog: PricingCatalog,
     unknown_cost_policy: UnknownCostPolicy,
     cost_estimated_output_tokens: u64,
     clock: Arc<dyn Clock>,
+    http_client: Option<Arc<dyn HttpClient>>,
     cursors: Option<Arc<RoutingCursorTable>>,
     latency_table: Option<Arc<TargetLatencyTable>>,
+    throughput_table: Option<Arc<TargetThroughputTable>>,
+    headroom_table: Option<Arc<TargetHeadroomTable>>,
+    shadow_targets: Vec<Arc<CompiledShadowTarget>>,
+    shadow_stats: Option<Arc<AiShadowStatsTable>>,
     models: HashMap<String, ModelEntryConfig>,
     rules: Vec<ModelRule>,
     default_targets: Vec<TargetSpec>,
@@ -521,7 +976,7 @@ pub struct AiModelRouterPlugin {
     batches_targets: Vec<TargetSpec>,
     models_list_json: Bytes,
     models_by_id: HashMap<String, Bytes>,
-    catalog_entries: Vec<(String, String)>,
+    catalog_entries: Vec<(String, Value)>,
 }
 
 impl AiModelRouterPlugin {
@@ -603,33 +1058,142 @@ impl AiModelRouterPlugin {
                 self.cost_estimated_output_tokens,
                 self.unknown_cost_policy,
             ),
+            RoutingStrategy::Throughput => {
+                let Some(table) = &self.throughput_table else {
+                    return targets;
+                };
+                let cursor = self
+                    .cursors
+                    .as_ref()
+                    .map(|c| c.next(group_key))
+                    .unwrap_or(0);
+                let now_ms = self.clock.now_ms();
+                table.order_targets(targets, &self.throughput_cfg, now_ms, cursor)
+            }
+            RoutingStrategy::Headroom => {
+                let Some(table) = &self.headroom_table else {
+                    return targets;
+                };
+                let now_ms = self.clock.now_ms();
+                table.order_targets(targets, now_ms)
+            }
         }
     }
 
+    fn dispatch_ai_shadows(&self, requested_model: &str, raw_body: &Bytes) {
+        if self.shadow_targets.is_empty() {
+            return;
+        }
+        let Some(client) = &self.http_client else {
+            return;
+        };
+
+        for shadow in &self.shadow_targets {
+            if !shadow.matches_model(requested_model) || !shadow.should_sample() {
+                continue;
+            }
+            let Ok(permit) = shadow.semaphore.clone().try_acquire_owned() else {
+                if let Some(stats) = &self.shadow_stats {
+                    stats.record_dropped();
+                }
+                continue;
+            };
+
+            let shadow_body = if let Some(override_model) = &shadow.model {
+                match serde_json::from_slice::<Value>(raw_body) {
+                    Ok(mut v) => {
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert("model".to_owned(), Value::String(override_model.clone()));
+                        }
+                        Bytes::from(serde_json::to_vec(&v).unwrap_or_else(|_| raw_body.to_vec()))
+                    }
+                    Err(_) => raw_body.clone(),
+                }
+            } else {
+                raw_body.clone()
+            };
+
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            headers.insert(
+                HeaderName::from_static("x-shunt-shadow"),
+                HeaderValue::from_static("true"),
+            );
+            if let Ok(v) = HeaderValue::from_str(&shadow.name) {
+                headers.insert(HeaderName::from_static("x-shunt-shadow-target"), v);
+            }
+            for (k, v) in &shadow.headers {
+                headers.insert(k.clone(), v.clone());
+            }
+
+            let req = HttpRequest {
+                method: Method::POST,
+                uri: shadow.uri.clone(),
+                headers,
+                body: shadow_body,
+                timeout: Some(shadow.timeout),
+                max_response_bytes: Some(1024 * 1024),
+            };
+            let client = Arc::clone(client);
+            let stats = self.shadow_stats.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                match client.send(req).await {
+                    Ok(resp) if resp.status.is_success() => {
+                        if let Some(s) = stats {
+                            s.record_sent();
+                        }
+                    }
+                    Ok(_) | Err(_) => {
+                        if let Some(s) = stats {
+                            s.record_error();
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn finish_model_routing<'a>(
         &'a self,
         ctx: &'a mut RequestCtx,
         endpoint: AiEndpointKind,
         model: String,
+        extra_models: Vec<String>,
+        provider_prefs: Option<ProviderRoutingPreferences>,
         probe_stream: bool,
         parsed: &Value,
-        raw_body: &[u8],
+        raw_body: &Bytes,
     ) -> HookResult<'a, Flow> {
-        // Enforce virtual key model ACL before routing or local count_tokens.
-        if let Some(policy) = ctx.get_ext::<AiKeyPolicy>()
-            && !policy.allows_model(&model)
-        {
-            let resp = endpoint_error_response(
-                endpoint,
-                StatusCode::FORBIDDEN,
-                "permission_error",
-                Some("model_not_allowed"),
-                &format!(
-                    "Virtual key `{}` is not allowed to access model `{model}`",
-                    policy.key_id
-                ),
-            );
-            return HookResult::Ready(Flow::Respond(resp));
+        let mut all_requested_models = Vec::with_capacity(1 + extra_models.len());
+        all_requested_models.push(model.clone());
+        for m in extra_models {
+            if !all_requested_models.contains(&m) {
+                all_requested_models.push(m);
+            }
+        }
+
+        // Enforce virtual key model ACL across EVERY requested model before routing or count_tokens.
+        if let Some(policy) = ctx.get_ext::<AiKeyPolicy>() {
+            for req_model in &all_requested_models {
+                if !policy.allows_model(req_model) {
+                    let resp = endpoint_error_response(
+                        endpoint,
+                        StatusCode::FORBIDDEN,
+                        "permission_error",
+                        Some("model_not_allowed"),
+                        &format!(
+                            "Virtual key `{}` is not allowed to access model `{req_model}`",
+                            policy.key_id
+                        ),
+                    );
+                    return HookResult::Ready(Flow::Respond(resp));
+                }
+            }
         }
 
         // Local Anthropic `POST /v1/messages/count_tokens` estimation fast path.
@@ -640,15 +1204,41 @@ impl AiModelRouterPlugin {
             return HookResult::Ready(Flow::Respond(BufferedResponse::json(StatusCode::OK, bytes)));
         }
 
-        // Apply per-key provider overrides if present, else resolve from route rules.
-        let override_targets = ctx
-            .get_ext::<AiKeyPolicy>()
-            .and_then(|p| p.override_targets(&model));
+        // Resolve targets across primary model and any per-request fallback `models[]`.
+        let mut combined_targets: Vec<AiTarget> = Vec::new();
+        let mut seen_targets: HashSet<(String, String, String)> = HashSet::new();
+        let mut primary_group_key: Option<String> = None;
+        let mut primary_strategy: Option<RoutingStrategy> = None;
 
-        let Some((group_key, strategy, all_targets)) = override_targets
-            .map(|t| (format!("override:{model}"), RoutingStrategy::Priority, t))
-            .or_else(|| self.resolve_targets_with_strategy(&model))
-        else {
+        for req_model in &all_requested_models {
+            let override_targets = ctx
+                .get_ext::<AiKeyPolicy>()
+                .and_then(|p| p.override_targets(req_model));
+            let resolved = override_targets
+                .map(|t| {
+                    (
+                        format!("override:{req_model}"),
+                        RoutingStrategy::Priority,
+                        t,
+                    )
+                })
+                .or_else(|| self.resolve_targets_with_strategy(req_model));
+
+            if let Some((gkey, strat, targets)) = resolved {
+                if primary_group_key.is_none() {
+                    primary_group_key = Some(gkey);
+                    primary_strategy = Some(strat);
+                }
+                for t in targets {
+                    let dedup_key = (t.provider.clone(), t.upstream.clone(), t.model.clone());
+                    if seen_targets.insert(dedup_key) {
+                        combined_targets.push(t);
+                    }
+                }
+            }
+        }
+
+        if combined_targets.is_empty() {
             let resp = endpoint_error_response(
                 endpoint,
                 StatusCode::NOT_FOUND,
@@ -657,15 +1247,18 @@ impl AiModelRouterPlugin {
                 &format!("The model `{model}` is not configured on this gateway"),
             );
             return HookResult::Ready(Flow::Respond(resp));
-        };
+        }
 
-        // Filter targets by virtual key `allowed_providers` if configured.
+        let group_key = primary_group_key.unwrap_or_else(|| format!("model:{model}"));
+        let mut strategy = primary_strategy.unwrap_or(self.default_router_strategy);
+
+        // Filter targets by virtual key `allowed_providers` if configured (strictly before client prefs).
         let allowed_targets: Vec<AiTarget> = match ctx.get_ext::<AiKeyPolicy>() {
-            Some(policy) if !policy.allowed_providers.is_empty() => all_targets
+            Some(policy) if !policy.allowed_providers.is_empty() => combined_targets
                 .into_iter()
                 .filter(|t| policy.allows_provider(&t.provider))
                 .collect(),
-            _ => all_targets,
+            _ => combined_targets,
         };
 
         if allowed_targets.is_empty() {
@@ -683,12 +1276,42 @@ impl AiModelRouterPlugin {
             return HookResult::Ready(Flow::Respond(resp));
         }
 
+        // Apply per-request OpenRouter-style `provider: { ... }` preferences (strictly narrows ACLs).
+        let allow_fallbacks = provider_prefs
+            .as_ref()
+            .and_then(|p| p.allow_fallbacks)
+            .unwrap_or(true);
+        let has_explicit_order = provider_prefs.as_ref().is_some_and(|p| !p.order.is_empty());
+        let sort_override = provider_prefs
+            .as_ref()
+            .and_then(ProviderRoutingPreferences::sort_strategy);
+
+        let pref_targets = match &provider_prefs {
+            Some(prefs) => {
+                let filtered = apply_provider_preferences(allowed_targets, prefs);
+                if filtered.is_empty() {
+                    let resp = endpoint_error_response(
+                        endpoint,
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        Some("no_matching_provider"),
+                        &format!(
+                            "No permitted targets for model `{model}` satisfied the requested `provider` constraints"
+                        ),
+                    );
+                    return HookResult::Ready(Flow::Respond(resp));
+                }
+                filtered
+            }
+            None => allowed_targets,
+        };
+
         // Enforce multi-protocol capability guards before ordering/failover.
         let required_caps = detect_required_capabilities(endpoint, parsed);
         let capable_targets: Vec<AiTarget> = if required_caps.is_empty() {
-            allowed_targets
+            pref_targets
         } else {
-            allowed_targets
+            pref_targets
                 .into_iter()
                 .filter(|t| t.supports_all(&required_caps))
                 .collect()
@@ -731,15 +1354,57 @@ impl AiModelRouterPlugin {
             return HookResult::Ready(Flow::Respond(resp));
         }
 
-        // Rank/order eligible targets according to the active smart routing strategy.
-        let targets = self.apply_strategy(
+        // Enforce context-window capability guards when enabled.
+        let context_eligible_targets = if self.enforce_context_window && !raw_body.is_empty() {
+            let est = estimate_request_tokens(endpoint, raw_body);
+            let filtered = filter_targets_by_context_window(
+                capable_targets,
+                &self.pricing_catalog,
+                &model,
+                est.input_tokens,
+                self.context_window_safety_margin_tokens,
+            );
+            if filtered.is_empty() {
+                let resp = endpoint_error_response(
+                    endpoint,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    Some("context_length_exceeded"),
+                    &format!(
+                        "Estimated request input (~{} tokens) exceeds the context window of all eligible targets for model `{model}`",
+                        est.input_tokens
+                    ),
+                );
+                return HookResult::Ready(Flow::Respond(resp));
+            }
+            filtered
+        } else {
+            capable_targets
+        };
+
+        // Rank/order eligible targets according to per-request sort override, explicit order,
+        // or the active smart routing strategy.
+        if let Some(s) = sort_override {
+            strategy = s;
+        } else if has_explicit_order {
+            strategy = RoutingStrategy::Priority;
+        }
+
+        let mut targets = self.apply_strategy(
             &group_key,
             strategy,
-            capable_targets,
+            context_eligible_targets,
             endpoint,
             &model,
             raw_body,
         );
+
+        if !allow_fallbacks && targets.len() > 1 {
+            targets.truncate(1);
+        }
+
+        // Dispatch sampled off-path AI shadow requests without delaying the primary request.
+        self.dispatch_ai_shadows(&model, raw_body);
 
         let effective_stream = if endpoint.supports_sse_streaming() {
             probe_stream
@@ -835,10 +1500,13 @@ impl HttpPlugin for AiModelRouterPlugin {
             | HookMask::REQUEST_BODY_BUFFERED
             | HookMask::ON_ROUTE
             | HookMask::ON_UPSTREAM_SELECT;
-        if self.include_routing_headers {
+        if self.include_routing_headers || self.headroom_table.is_some() {
             mask |= HookMask::ON_RESPONSE_HEADERS;
         }
-        if self.latency_table.is_some() {
+        if self.latency_table.is_some()
+            || self.throughput_table.is_some()
+            || self.headroom_table.is_some()
+        {
             mask |= HookMask::ON_COMPLETE;
         }
         mask
@@ -869,14 +1537,7 @@ impl HttpPlugin for AiModelRouterPlugin {
                             .catalog_entries
                             .iter()
                             .filter(|(id, _)| policy.allows_model(id))
-                            .map(|(id, owned_by)| {
-                                json!({
-                                    "id": id,
-                                    "object": "model",
-                                    "created": 0,
-                                    "owned_by": owned_by,
-                                })
-                            })
+                            .map(|(_, entry)| entry.clone())
                             .collect();
                         let list = json!({ "object": "list", "data": filtered });
                         Bytes::from(serde_json::to_vec(&list).unwrap_or_default())
@@ -943,6 +1604,17 @@ impl HttpPlugin for AiModelRouterPlugin {
             .filter(|s| !s.is_empty())
         {
             ctx.insert_ext(RequestedProviderHeader(prov.to_owned()));
+        }
+
+        if let Some(hdr) = &self.end_user_header
+            && let Some(val) = req
+                .headers
+                .get(hdr)
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        {
+            ctx.insert_ext(AiEndUser(val.to_owned()));
         }
 
         let endpoint = classify_ai_endpoint(&req.method, path);
@@ -1160,10 +1832,19 @@ impl HttpPlugin for AiModelRouterPlugin {
                 return HookResult::Ready(Flow::Respond(resp));
             };
 
-            return self.finish_model_routing(ctx, endpoint, model, false, &Value::Null, body);
+            return self.finish_model_routing(
+                ctx,
+                endpoint,
+                model,
+                Vec::new(),
+                None,
+                false,
+                &Value::Null,
+                body,
+            );
         }
 
-        let parsed: Value = match serde_json::from_slice(body) {
+        let mut parsed: Value = match serde_json::from_slice(body) {
             Ok(v) => v,
             Err(err) => {
                 let resp = endpoint_error_response(
@@ -1177,12 +1858,84 @@ impl HttpPlugin for AiModelRouterPlugin {
             }
         };
 
-        let Some(model) = parsed
+        // Extract end-user identifier (`user` or `metadata.user_id`) if not already set from header.
+        if ctx.get_ext::<AiEndUser>().is_none()
+            && let Some(end_user) = extract_end_user_from_body(&parsed)
+        {
+            ctx.insert_ext(AiEndUser(end_user));
+        }
+
+        let mut extra_models: Vec<String> = Vec::new();
+        let mut provider_prefs: Option<ProviderRoutingPreferences> = None;
+        let mut needs_body_rewrite = false;
+
+        if self.allow_request_routing_overrides
+            && let Some(obj) = parsed.as_object_mut()
+        {
+            if let Some(raw_models) = obj.remove("models") {
+                needs_body_rewrite = true;
+                match raw_models {
+                    Value::Array(arr) => {
+                        for item in arr {
+                            if let Some(m) = item.as_str().map(str::trim).filter(|s| !s.is_empty())
+                            {
+                                extra_models.push(m.to_owned());
+                            }
+                        }
+                    }
+                    Value::Null => {}
+                    _ => {
+                        let resp = endpoint_error_response(
+                            endpoint,
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request_error",
+                            Some("invalid_models_override"),
+                            "`models` routing override must be an array of model strings",
+                        );
+                        return HookResult::Ready(Flow::Respond(resp));
+                    }
+                }
+            }
+            if let Some(raw_provider) = obj.remove("provider") {
+                needs_body_rewrite = true;
+                if !raw_provider.is_null() {
+                    match serde_json::from_value::<ProviderRoutingPreferences>(raw_provider) {
+                        Ok(p) => provider_prefs = Some(p),
+                        Err(err) => {
+                            let resp = endpoint_error_response(
+                                endpoint,
+                                StatusCode::BAD_REQUEST,
+                                "invalid_request_error",
+                                Some("invalid_provider_override"),
+                                &format!("Invalid `provider` routing override: {err}"),
+                            );
+                            return HookResult::Ready(Flow::Respond(resp));
+                        }
+                    }
+                }
+            }
+        }
+
+        let primary_model = parsed
             .get("model")
             .and_then(Value::as_str)
-            .filter(|m| !m.trim().is_empty())
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
             .map(str::to_owned)
-        else {
+            .or_else(|| {
+                if !extra_models.is_empty() {
+                    let first = extra_models.remove(0);
+                    if let Some(obj) = parsed.as_object_mut() {
+                        obj.insert("model".to_owned(), Value::String(first.clone()));
+                        needs_body_rewrite = true;
+                    }
+                    Some(first)
+                } else {
+                    None
+                }
+            });
+
+        let Some(model) = primary_model else {
             let resp = endpoint_error_response(
                 endpoint,
                 StatusCode::BAD_REQUEST,
@@ -1193,12 +1946,25 @@ impl HttpPlugin for AiModelRouterPlugin {
             return HookResult::Ready(Flow::Respond(resp));
         };
 
+        if needs_body_rewrite && let Ok(stripped) = serde_json::to_vec(&parsed) {
+            *body = Bytes::from(stripped);
+        }
+
         let probe_stream = parsed
             .get("stream")
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
-        self.finish_model_routing(ctx, endpoint, model, probe_stream, &parsed, body)
+        self.finish_model_routing(
+            ctx,
+            endpoint,
+            model,
+            extra_models,
+            provider_prefs,
+            probe_stream,
+            &parsed,
+            body,
+        )
     }
 
     fn on_route<'a>(
@@ -1223,11 +1989,33 @@ impl HttpPlugin for AiModelRouterPlugin {
         selection: &'a mut UpstreamSelection,
     ) -> HookResult<'a, Flow> {
         let keep_current = ctx.remove_ext::<IntraProviderKeyRetry>().is_some();
+        let overflow_floor = ctx.get_ext::<ContextOverflowFloor>().map(|f| f.0);
         if let Some(meta) = ctx.get_ext_mut::<AiRequestMeta>() {
             meta.max_attempts = selection.max_attempts;
             if let Some(target) = meta.select_next_target(keep_current) {
-                selection.upstream = target.upstream.clone();
-                selection.endpoint_override = target.endpoint_override.clone();
+                let mut chosen = target.clone();
+                // If an earlier attempt failed with context-window overflow, skip targets whose
+                // known context window is <= the failed floor when a larger target exists.
+                if let Some(floor) = overflow_floor
+                    && !keep_current
+                    && chosen.context_window.is_some_and(|w| w <= floor)
+                {
+                    let len = meta.targets.len();
+                    let start = meta.active_target_index;
+                    for offset in 1..len {
+                        let idx = (start + offset) % len;
+                        let cand = &meta.targets[idx];
+                        if cand.context_window.is_none_or(|w| w > floor) {
+                            meta.active_target_index = idx;
+                            chosen = cand.clone();
+                            break;
+                        }
+                    }
+                }
+                selection.upstream = chosen.upstream;
+                selection.endpoint_override = chosen.endpoint_override;
+                selection.response_headers_timeout_override =
+                    chosen.ttft_timeout_ms.map(Duration::from_millis);
             }
         }
         HookResult::Ready(Flow::Continue)
@@ -1238,6 +2026,52 @@ impl HttpPlugin for AiModelRouterPlugin {
         ctx: &'a mut RequestCtx,
         res: &'a mut ResponseHead,
     ) -> HookResult<'a, Flow> {
+        if let Some(headroom) = &self.headroom_table
+            && let Some(target) = ctx
+                .get_ext::<AiRequestMeta>()
+                .and_then(AiRequestMeta::active_target)
+        {
+            let parse_hdr = |names: &[&str]| -> Option<u64> {
+                for n in names {
+                    if let Some(v) = res
+                        .headers
+                        .get(*n)
+                        .and_then(|h| h.to_str().ok())
+                        .and_then(|s| s.trim().parse::<u64>().ok())
+                    {
+                        return Some(v);
+                    }
+                }
+                None
+            };
+            let rpm_lim = parse_hdr(&[
+                "x-ratelimit-limit-requests",
+                "anthropic-ratelimit-requests-limit",
+            ]);
+            let rpm_rem = parse_hdr(&[
+                "x-ratelimit-remaining-requests",
+                "anthropic-ratelimit-requests-remaining",
+            ]);
+            let tpm_lim = parse_hdr(&[
+                "x-ratelimit-limit-tokens",
+                "anthropic-ratelimit-tokens-limit",
+            ]);
+            let tpm_rem = parse_hdr(&[
+                "x-ratelimit-remaining-tokens",
+                "anthropic-ratelimit-tokens-remaining",
+            ]);
+            let key =
+                TargetHeadroomTable::target_key(&target.provider, &target.upstream, &target.model);
+            headroom.record_upstream_headers(
+                &key,
+                rpm_lim,
+                rpm_rem,
+                tpm_lim,
+                tpm_rem,
+                self.clock.now_ms(),
+            );
+        }
+
         if self.include_routing_headers
             && let Some(meta) = ctx.get_ext::<AiRequestMeta>()
         {
@@ -1264,9 +2098,12 @@ impl HttpPlugin for AiModelRouterPlugin {
         ctx: &'a RequestCtx,
         summary: &'a RequestSummary,
     ) -> HookResult<'a, ()> {
-        let Some(table) = &self.latency_table else {
+        if self.latency_table.is_none()
+            && self.throughput_table.is_none()
+            && self.headroom_table.is_none()
+        {
             return HookResult::Ready(());
-        };
+        }
         if summary.attempts == 0 {
             return HookResult::Ready(());
         }
@@ -1275,36 +2112,92 @@ impl HttpPlugin for AiModelRouterPlugin {
         };
 
         let now_ms = self.clock.now_ms();
-        let alpha = self.latency_cfg.ewma_alpha;
 
         // Penalize every target that failed during failover attempts.
         if let Some(history) = ctx.get_ext::<AiFailoverHistory>() {
             for ev in &history.events {
-                let key = TargetLatencyTable::target_key(&ev.provider, &ev.upstream, &ev.model);
-                table.record_error(&key, alpha, now_ms);
+                if let Some(table) = &self.latency_table {
+                    let key = TargetLatencyTable::target_key(&ev.provider, &ev.upstream, &ev.model);
+                    table.record_error(&key, self.latency_cfg.ewma_alpha, now_ms);
+                }
+                if let Some(table) = &self.throughput_table {
+                    let key =
+                        TargetThroughputTable::target_key(&ev.provider, &ev.upstream, &ev.model);
+                    table.record_error(&key, self.throughput_cfg.ewma_alpha, now_ms);
+                }
+                if let Some(table) = &self.headroom_table {
+                    let key =
+                        TargetHeadroomTable::target_key(&ev.provider, &ev.upstream, &ev.model);
+                    table.record_usage(&key, 1, 0, now_ms);
+                }
             }
         }
 
-        // Record final attempt outcome and latency (prefer true TTFT -> TTFB -> total_duration).
+        // Record final attempt outcome across active routing tables.
         if let Some(target) = meta.active_target() {
-            let key =
-                TargetLatencyTable::target_key(&target.provider, &target.upstream, &target.model);
             let status_code = summary.status.map(|s| s.as_u16());
             let is_error = summary.error.is_some()
                 || summary.aborted_mid_stream
                 || matches!(status_code, None | Some(429 | 500..=599));
 
-            if is_error {
-                table.record_error(&key, alpha, now_ms);
-            } else {
-                let ttft = ctx
+            if let Some(table) = &self.headroom_table {
+                let key = TargetHeadroomTable::target_key(
+                    &target.provider,
+                    &target.upstream,
+                    &target.model,
+                );
+                let tokens = ctx
                     .get_ext::<AiUsage>()
-                    .and_then(|u| u.first_token_at)
-                    .map(|t| t.saturating_duration_since(ctx.started_at))
-                    .or(summary.ttfb)
-                    .unwrap_or(summary.total_duration);
-                let latency_ms = ttft.as_secs_f64() * 1_000.0;
-                table.record_success(&key, latency_ms, alpha, now_ms);
+                    .and_then(AiUsage::effective_total_tokens)
+                    .unwrap_or(0);
+                table.record_usage(&key, 1, tokens, now_ms);
+            }
+
+            if let Some(table) = &self.latency_table {
+                let key = TargetLatencyTable::target_key(
+                    &target.provider,
+                    &target.upstream,
+                    &target.model,
+                );
+                if is_error {
+                    table.record_error(&key, self.latency_cfg.ewma_alpha, now_ms);
+                } else {
+                    let ttft = ctx
+                        .get_ext::<AiUsage>()
+                        .and_then(|u| u.first_token_at)
+                        .map(|t| t.saturating_duration_since(ctx.started_at))
+                        .or(summary.ttfb)
+                        .unwrap_or(summary.total_duration);
+                    let latency_ms = ttft.as_secs_f64() * 1_000.0;
+                    table.record_success(&key, latency_ms, self.latency_cfg.ewma_alpha, now_ms);
+                }
+            }
+
+            if let Some(table) = &self.throughput_table {
+                let key = TargetThroughputTable::target_key(
+                    &target.provider,
+                    &target.upstream,
+                    &target.model,
+                );
+                if is_error {
+                    table.record_error(&key, self.throughput_cfg.ewma_alpha, now_ms);
+                } else if let Some(completion_tokens) =
+                    ctx.get_ext::<AiUsage>().and_then(|u| u.completion_tokens)
+                    && completion_tokens > 0
+                {
+                    let gen_dur = ctx
+                        .get_ext::<AiUsage>()
+                        .and_then(|u| u.first_token_at)
+                        .map(|ft| {
+                            let ttft = ft.saturating_duration_since(ctx.started_at);
+                            summary.total_duration.saturating_sub(ttft)
+                        })
+                        .filter(|d| !d.is_zero())
+                        .unwrap_or(summary.total_duration)
+                        .max(Duration::from_millis(1));
+                    let tps = (completion_tokens as f64) / gen_dur.as_secs_f64();
+                    table.record_success(&key, tps, self.throughput_cfg.ewma_alpha, now_ms);
+                }
             }
         }
 
@@ -1329,53 +2222,47 @@ mod tests {
 
     #[test]
     fn models_catalog_is_sorted_and_deduplicated() {
+        let mk_spec =
+            |provider: &str, upstream: &str, model: Option<&str>, weight: u32| TargetSpec {
+                provider: provider.to_owned(),
+                upstream: upstream.to_owned(),
+                model: model.map(str::to_owned),
+                endpoint_override: None,
+                capabilities: Vec::new(),
+                weight,
+                default_params: BTreeMap::new(),
+                override_params: BTreeMap::new(),
+                context_window: None,
+                max_output_tokens: None,
+                zdr: false,
+                regions: Vec::new(),
+                tags: Vec::new(),
+                upstream_rpm: None,
+                upstream_tpm: None,
+                ttft_timeout_ms: None,
+            };
         let mut models = HashMap::new();
         models.insert(
             "smart".to_owned(),
-            ModelEntryConfig::Targets(vec![TargetSpec {
-                provider: "openai".to_owned(),
-                upstream: "openai".to_owned(),
-                model: Some("gpt-4o".to_owned()),
-                endpoint_override: None,
-                capabilities: Vec::new(),
-                weight: 1,
-                default_params: BTreeMap::new(),
-                override_params: BTreeMap::new(),
-            }]),
+            ModelEntryConfig::Targets(vec![mk_spec("openai", "openai", Some("gpt-4o"), 1)]),
         );
         models.insert(
             "fast".to_owned(),
             ModelEntryConfig::Detailed {
                 strategy: Some(RoutingStrategy::Weighted),
-                targets: vec![TargetSpec {
-                    provider: "groq".to_owned(),
-                    upstream: "groq".to_owned(),
-                    model: Some("llama-3.3-70b".to_owned()),
-                    endpoint_override: None,
-                    capabilities: Vec::new(),
-                    weight: 5,
-                    default_params: BTreeMap::new(),
-                    override_params: BTreeMap::new(),
-                }],
+                targets: vec![mk_spec("groq", "groq", Some("llama-3.3-70b"), 5)],
             },
         );
         let rules = vec![ModelRule {
             pattern: "claude-*".to_owned(),
             strategy: None,
-            targets: vec![TargetSpec {
-                provider: "anthropic".to_owned(),
-                upstream: "anthropic".to_owned(),
-                model: None,
-                endpoint_override: None,
-                capabilities: Vec::new(),
-                weight: 1,
-                default_params: BTreeMap::new(),
-                override_params: BTreeMap::new(),
-            }],
+            targets: vec![mk_spec("anthropic", "anthropic", None, 1)],
         }];
         let exposed = vec!["claude-3-5-sonnet-20241022".to_owned(), "smart".to_owned()];
+        let pricing = PricingCatalog::new(HashMap::new(), true, None).unwrap();
 
-        let (list_bytes, by_id, entries) = compile_models_catalog(&models, &rules, &[], &exposed);
+        let (list_bytes, by_id, entries) =
+            compile_models_catalog(&models, &rules, &[], &exposed, &pricing);
         assert_eq!(entries.len(), 3);
         let list: Value = serde_json::from_slice(&list_bytes).unwrap();
         let data = list["data"].as_array().unwrap();
@@ -1384,6 +2271,8 @@ mod tests {
         assert_eq!(data[0]["owned_by"], "anthropic");
         assert_eq!(data[1]["owned_by"], "groq");
         assert_eq!(data[2]["owned_by"], "openai");
+        assert_eq!(data[2]["context_length"], 128_000);
+        assert_eq!(data[2]["pricing"]["input_per_million_usd"], 2.5);
         assert!(by_id.contains_key("claude-3-5-sonnet-20241022"));
         assert!(by_id.contains_key("fast"));
         assert!(by_id.contains_key("smart"));

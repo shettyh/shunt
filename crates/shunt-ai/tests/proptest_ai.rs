@@ -1137,6 +1137,14 @@ proptest! {
                 weight: w,
                 default_params: std::collections::BTreeMap::new(),
                 override_params: std::collections::BTreeMap::new(),
+                context_window: None,
+                max_output_tokens: None,
+                zdr: false,
+                regions: Vec::new(),
+                tags: Vec::new(),
+                upstream_rpm: None,
+                upstream_tpm: None,
+                ttft_timeout_ms: None,
             })
             .collect();
         let total_w: usize = weights.iter().map(|&w| w as usize).sum();
@@ -1180,6 +1188,14 @@ proptest! {
                 weight: 1,
                 default_params: std::collections::BTreeMap::new(),
                 override_params: std::collections::BTreeMap::new(),
+                context_window: None,
+                max_output_tokens: None,
+                zdr: false,
+                regions: Vec::new(),
+                tags: Vec::new(),
+                upstream_rpm: None,
+                upstream_tpm: None,
+                ttft_timeout_ms: None,
             });
         }
         let cat = shunt_ai::PricingCatalog::new(overrides, false, None).unwrap();
@@ -1634,5 +1650,162 @@ proptest! {
         let _ = shunt_ai::gemini_imagen_to_openai_response(&raw, shunt_plugin_sdk::StatusCode::OK);
         let _ = shunt_ai::parse_embedding_vector(&raw);
         let _ = shunt_ai::extract_query_param(Some(&s), "model");
+    }
+
+    #[test]
+    fn provider_preferences_only_narrow_targets_never_escalate(
+        providers in prop::collection::vec(prop::sample::select(vec!["openai", "anthropic", "gemini", "bedrock"]), 1..8),
+        zdr_flags in prop::collection::vec(any::<bool>(), 1..8),
+        req_zdr in any::<bool>(),
+        only_subset in prop::collection::vec(prop::sample::select(vec!["openai", "anthropic", "gemini", "bedrock", "rogue"]), 0..3),
+        ignore_subset in prop::collection::vec(prop::sample::select(vec!["openai", "anthropic", "gemini", "bedrock"]), 0..2),
+        order_list in prop::collection::vec(prop::sample::select(vec!["openai", "anthropic", "gemini", "bedrock"]), 0..4),
+    ) {
+        let len = providers.len().min(zdr_flags.len());
+        let allowed: Vec<shunt_ai::AiTarget> = (0..len)
+            .map(|i| shunt_ai::AiTarget {
+                provider: providers[i].to_owned(),
+                upstream: providers[i].to_owned(),
+                model: format!("m-{i}"),
+                endpoint_override: None,
+                capabilities: Vec::new(),
+                weight: 1,
+                default_params: std::collections::BTreeMap::new(),
+                override_params: std::collections::BTreeMap::new(),
+                context_window: Some(100_000),
+                max_output_tokens: None,
+                zdr: zdr_flags[i],
+                regions: vec!["us".to_owned()],
+                tags: Vec::new(),
+                upstream_rpm: None,
+                upstream_tpm: None,
+                ttft_timeout_ms: None,
+            })
+            .collect();
+        let allowed_providers: std::collections::HashSet<String> =
+            allowed.iter().map(|t| t.provider.clone()).collect();
+
+        let prefs = shunt_ai::ProviderRoutingPreferences {
+            order: order_list.into_iter().map(str::to_owned).collect(),
+            only: only_subset.iter().map(|s| (*s).to_owned()).collect(),
+            ignore: ignore_subset.iter().map(|s| (*s).to_owned()).collect(),
+            sort: None,
+            allow_fallbacks: None,
+            data_collection: if req_zdr { Some("deny".to_owned()) } else { None },
+            zdr: None,
+            regions: Vec::new(),
+            tags: Vec::new(),
+        };
+
+        let out = shunt_ai::apply_provider_preferences(allowed, &prefs);
+        for t in &out {
+            prop_assert!(allowed_providers.contains(&t.provider));
+            if req_zdr {
+                prop_assert!(t.zdr);
+            }
+            if !prefs.only.is_empty() {
+                prop_assert!(prefs.only.contains(&t.provider));
+            }
+            prop_assert!(!prefs.ignore.contains(&t.provider));
+        }
+    }
+
+    #[test]
+    fn context_window_guard_never_admits_undersized_targets(
+        windows in prop::collection::vec(100u64..500_000, 1..8),
+        estimated in 1u64..600_000,
+        margin in 0u64..10_000,
+    ) {
+        let targets: Vec<shunt_ai::AiTarget> = windows
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| shunt_ai::AiTarget {
+                provider: format!("p{i}"),
+                upstream: format!("u{i}"),
+                model: format!("m{i}"),
+                endpoint_override: None,
+                capabilities: Vec::new(),
+                weight: 1,
+                default_params: std::collections::BTreeMap::new(),
+                override_params: std::collections::BTreeMap::new(),
+                context_window: Some(w),
+                max_output_tokens: None,
+                zdr: false,
+                regions: Vec::new(),
+                tags: Vec::new(),
+                upstream_rpm: None,
+                upstream_tpm: None,
+                ttft_timeout_ms: None,
+            })
+            .collect();
+        let cat = shunt_ai::PricingCatalog::new(HashMap::new(), false, None).unwrap();
+        let filtered =
+            shunt_ai::filter_targets_by_context_window(targets, &cat, "alias", estimated, margin);
+        let req = estimated.saturating_add(margin);
+        for t in &filtered {
+            prop_assert!(t.context_window.unwrap() >= req);
+        }
+    }
+
+    #[test]
+    fn concurrency_table_enforces_limit_and_zero_leaks(
+        limit in 1u64..32,
+        attempts in 1usize..64,
+    ) {
+        let table = shunt_ai::ConcurrencyTable::new();
+        let mut acquired = 0u64;
+        for _ in 0..attempts {
+            match table.try_acquire("key:test", limit) {
+                Ok(rem) => {
+                    acquired += 1;
+                    prop_assert_eq!(rem, limit - acquired);
+                }
+                Err(cur) => {
+                    prop_assert_eq!(cur, limit);
+                }
+            }
+        }
+        prop_assert_eq!(acquired, (attempts as u64).min(limit));
+        prop_assert_eq!(table.current_active("key:test"), acquired);
+        for _ in 0..acquired {
+            table.release("key:test");
+        }
+        prop_assert_eq!(table.current_active("key:test"), 0);
+    }
+
+    #[test]
+    fn spend_ledger_preflight_reserve_and_reconcile_exactness(
+        limit in 10_000u64..1_000_000,
+        reserve in 1u64..50_000,
+        actual in 0u64..60_000,
+    ) {
+        let ledger = shunt_ai::SpendLedgerTable::new();
+        if reserve <= limit {
+            let after_hold = ledger
+                .try_reserve_spend("k", 1, reserve, limit, true)
+                .unwrap();
+            prop_assert_eq!(after_hold, reserve);
+            let delta = (actual as i64) - (reserve as i64);
+            let final_spend = ledger.adjust_spend("k", 1, delta);
+            prop_assert_eq!(final_spend, actual);
+        } else {
+            let err = ledger.try_reserve_spend("k", 1, reserve, limit, true);
+            prop_assert_eq!(err, Err(0));
+            prop_assert_eq!(ledger.current_spend("k", 1), 0);
+        }
+    }
+
+    #[test]
+    fn rfc0017_untrusted_parsers_never_panic(
+        raw in prop::collection::vec(any::<u8>(), 0..512),
+        status in any::<u16>(),
+    ) {
+        let s = String::from_utf8_lossy(&raw);
+        let _ = shunt_ai::parse_external_pricing_json(&s);
+        let _ = shunt_ai::is_context_overflow_error(status, &raw);
+        let _ = serde_json::from_slice::<shunt_ai::ProviderRoutingPreferences>(&raw);
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw) {
+            let _ = shunt_ai::extract_end_user_from_body(&v);
+        }
     }
 }

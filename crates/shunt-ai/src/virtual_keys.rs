@@ -4,19 +4,39 @@ use std::sync::Arc;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use shunt_plugin_sdk::{
-    BuildContext, Flow, HeaderName, HookMask, HookResult, HttpPlugin, PluginBuildError,
+    BuildContext, Clock, Flow, HeaderName, HookMask, HookResult, HttpPlugin, PluginBuildError,
     PluginConfig, PluginFactory, RequestCtx, RequestHead, StatusCode, header,
 };
 
+use crate::cloud_auth::parse_rfc3339_utc_secs;
 use crate::model_router::TargetSpec;
 use crate::multimodal::{extract_realtime_ws_subprotocol_key, strip_realtime_ws_key_subprotocol};
 use crate::types::{
-    AiEndpointKind, AiKeyPolicy, AiTarget, BudgetWindow, endpoint_error_response,
-    resolve_env_secret,
+    AiEndpointKind, AiKeyPolicy, AiTarget, BudgetWindow, ModelLimitOverride,
+    endpoint_error_response, resolve_env_secret,
 };
 
 fn default_true() -> bool {
     true
+}
+
+/// Virtual key expiration timestamp accepting either an RFC 3339 UTC string
+/// (e.g., `"2027-01-01T00:00:00Z"`) or a Unix epoch seconds integer.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ExpiresAtConfig {
+    UnixSecs(u64),
+    Rfc3339(String),
+}
+
+impl ExpiresAtConfig {
+    fn to_unix_secs(&self) -> Result<u64, String> {
+        match self {
+            ExpiresAtConfig::UnixSecs(s) => Ok(*s),
+            ExpiresAtConfig::Rfc3339(raw) => parse_rfc3339_utc_secs(raw)
+                .map_err(|e| format!("invalid `expires_at` timestamp `{raw}`: {e}")),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -26,12 +46,18 @@ struct VirtualKeyEntryConfig {
     /// Client secret key: plaintext, `"env:VAR_NAME"`, or `"sha256:<64-hex-chars>"`.
     /// Named `api_key` so `GET /snapshot` redacts it automatically.
     api_key: String,
+    /// Optional organization name for org-level attribution & budgets.
+    #[serde(default)]
+    org: Option<String>,
     /// Optional team / project name for team-level attribution & budgets.
     #[serde(default)]
     team: Option<String>,
     /// Set to `false` to disable a key without removing it from config (default: true).
     #[serde(default = "default_true")]
     enabled: bool,
+    /// Optional UTC expiration timestamp (RFC 3339 string or Unix epoch seconds).
+    #[serde(default)]
+    expires_at: Option<ExpiresAtConfig>,
     /// Optional glob list of allowed model aliases/names (empty = all allowed).
     #[serde(default)]
     allowed_models: Vec<String>,
@@ -47,6 +73,9 @@ struct VirtualKeyEntryConfig {
     /// Optional per-key TPM override consumed by `ai-token-rate-limit`.
     #[serde(default)]
     tpm: Option<u64>,
+    /// Optional per-key max concurrent in-flight requests consumed by `ai-token-rate-limit`.
+    #[serde(default)]
+    max_parallel_requests: Option<u64>,
     /// Optional per-key hard spend budget (USD) consumed by `ai-budget`.
     #[serde(default)]
     budget_usd: Option<f64>,
@@ -56,6 +85,9 @@ struct VirtualKeyEntryConfig {
     /// Optional per-key budget window override consumed by `ai-budget`.
     #[serde(default)]
     budget_window: Option<BudgetWindow>,
+    /// Optional per-model quota/budget overrides (`model_or_glob -> ModelLimitOverride`).
+    #[serde(default)]
+    model_limits: HashMap<String, ModelLimitOverride>,
     /// Optional key metadata tags.
     #[serde(default)]
     metadata: BTreeMap<String, String>,
@@ -101,6 +133,7 @@ impl Default for AiVirtualKeysConfig {
 struct CompiledVirtualKey {
     digest: [u8; 32],
     enabled: bool,
+    expires_at_unix_secs: Option<u64>,
     policy: AiKeyPolicy,
 }
 
@@ -115,7 +148,7 @@ impl PluginFactory for AiVirtualKeysFactory {
     fn build(
         &self,
         config: &PluginConfig,
-        _ctx: &BuildContext,
+        ctx: &BuildContext,
     ) -> Result<Arc<dyn HttpPlugin>, PluginBuildError> {
         let cfg: AiVirtualKeysConfig = config.deserialize(self.name())?;
         if cfg.keys.is_empty() {
@@ -200,6 +233,72 @@ impl PluginFactory for AiVirtualKeysFactory {
                 });
             }
 
+            if let Some(mpr) = entry.max_parallel_requests
+                && mpr == 0
+            {
+                return Err(PluginBuildError::BuildFailed {
+                    plugin: self.name().to_owned(),
+                    message: format!(
+                        "virtual key `{}`: `max_parallel_requests` must be >= 1",
+                        entry.id
+                    ),
+                });
+            }
+            let expires_at_unix_secs = match &entry.expires_at {
+                Some(exp) => {
+                    Some(
+                        exp.to_unix_secs()
+                            .map_err(|msg| PluginBuildError::BuildFailed {
+                                plugin: self.name().to_owned(),
+                                message: format!("virtual key `{}`: {msg}", entry.id),
+                            })?,
+                    )
+                }
+                None => None,
+            };
+            for (pat, ml) in &entry.model_limits {
+                if pat.trim().is_empty() {
+                    return Err(PluginBuildError::BuildFailed {
+                        plugin: self.name().to_owned(),
+                        message: format!(
+                            "virtual key `{}`: `model_limits` pattern cannot be empty",
+                            entry.id
+                        ),
+                    });
+                }
+                if ml.rpm == Some(0) || ml.tpm == Some(0) || ml.max_parallel_requests == Some(0) {
+                    return Err(PluginBuildError::BuildFailed {
+                        plugin: self.name().to_owned(),
+                        message: format!(
+                            "virtual key `{}`: `model_limits.{pat}` rpm/tpm/max_parallel_requests must be >= 1",
+                            entry.id
+                        ),
+                    });
+                }
+                if let Some(b) = ml.budget_usd
+                    && (!b.is_finite() || b < 0.0)
+                {
+                    return Err(PluginBuildError::BuildFailed {
+                        plugin: self.name().to_owned(),
+                        message: format!(
+                            "virtual key `{}`: `model_limits.{pat}.budget_usd` must be non-negative finite",
+                            entry.id
+                        ),
+                    });
+                }
+                if let Some(sb) = ml.budget_soft_limit_usd
+                    && (!sb.is_finite() || sb < 0.0)
+                {
+                    return Err(PluginBuildError::BuildFailed {
+                        plugin: self.name().to_owned(),
+                        message: format!(
+                            "virtual key `{}`: `model_limits.{pat}.budget_soft_limit_usd` must be non-negative finite",
+                            entry.id
+                        ),
+                    });
+                }
+            }
+
             let digest = compile_key_digest(&entry.api_key).map_err(|msg| {
                 PluginBuildError::BuildFailed {
                     plugin: self.name().to_owned(),
@@ -218,36 +317,29 @@ impl PluginFactory for AiVirtualKeysFactory {
                         ),
                     });
                 }
-                let targets: Vec<AiTarget> = specs
-                    .into_iter()
-                    .map(|s| AiTarget {
-                        provider: s.provider,
-                        upstream: s.upstream,
-                        model: s.model.unwrap_or_else(|| model_pat.clone()),
-                        endpoint_override: s.endpoint_override,
-                        capabilities: s.capabilities,
-                        weight: s.weight.max(1),
-                        default_params: s.default_params,
-                        override_params: s.override_params,
-                    })
-                    .collect();
+                let targets: Vec<AiTarget> =
+                    specs.into_iter().map(|s| s.resolve(&model_pat)).collect();
                 overrides.insert(model_pat, targets);
             }
 
             compiled.push(CompiledVirtualKey {
                 digest,
                 enabled: entry.enabled,
+                expires_at_unix_secs,
                 policy: AiKeyPolicy {
                     key_id: entry.id,
+                    org: entry.org,
                     team: entry.team,
                     allowed_models: entry.allowed_models,
                     allowed_providers: entry.allowed_providers,
                     provider_overrides: overrides,
                     rpm: entry.rpm,
                     tpm: entry.tpm,
+                    max_parallel_requests: entry.max_parallel_requests,
                     budget_usd: entry.budget_usd,
                     budget_soft_limit_usd: entry.budget_soft_limit_usd,
                     budget_window: entry.budget_window,
+                    model_limits: entry.model_limits,
                     metadata: entry.metadata,
                 },
             });
@@ -259,6 +351,7 @@ impl PluginFactory for AiVirtualKeysFactory {
             accept_x_api_key: cfg.accept_x_api_key,
             accept_ws_subprotocol: cfg.accept_ws_subprotocol,
             custom_header,
+            clock: ctx.clock(),
             keys: compiled,
         }))
     }
@@ -355,6 +448,7 @@ pub struct AiVirtualKeysPlugin {
     accept_x_api_key: bool,
     accept_ws_subprotocol: bool,
     custom_header: Option<HeaderName>,
+    clock: Arc<dyn Clock>,
     keys: Vec<CompiledVirtualKey>,
 }
 
@@ -439,7 +533,31 @@ impl HttpPlugin for AiVirtualKeysPlugin {
         }
 
         match matched {
-            Some(key) if key.enabled => {
+            Some(key) if !key.enabled => {
+                let resp = endpoint_error_response(
+                    endpoint,
+                    StatusCode::FORBIDDEN,
+                    "permission_error",
+                    Some("api_key_disabled"),
+                    "Virtual API key is disabled",
+                );
+                HookResult::Ready(Flow::Respond(resp))
+            }
+            Some(key)
+                if key
+                    .expires_at_unix_secs
+                    .is_some_and(|exp| self.clock.unix_timestamp_secs() >= exp) =>
+            {
+                let resp = endpoint_error_response(
+                    endpoint,
+                    StatusCode::UNAUTHORIZED,
+                    "authentication_error",
+                    Some("api_key_expired"),
+                    "Virtual API key has expired",
+                );
+                HookResult::Ready(Flow::Respond(resp))
+            }
+            Some(key) => {
                 ctx.insert_ext(key.policy.clone());
                 if self.strip_key_header {
                     if self.accept_bearer {
@@ -456,16 +574,6 @@ impl HttpPlugin for AiVirtualKeysPlugin {
                     }
                 }
                 HookResult::Ready(Flow::Continue)
-            }
-            Some(_) => {
-                let resp = endpoint_error_response(
-                    endpoint,
-                    StatusCode::FORBIDDEN,
-                    "permission_error",
-                    Some("api_key_disabled"),
-                    "Virtual API key is disabled",
-                );
-                HookResult::Ready(Flow::Respond(resp))
             }
             None => {
                 let resp = endpoint_error_response(

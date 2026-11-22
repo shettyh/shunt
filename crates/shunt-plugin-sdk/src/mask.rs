@@ -21,6 +21,7 @@ impl HookMask {
     pub const ON_RESPONSE_HEADERS: Self = Self(1 << 6);
     pub const RESPONSE_BODY_STREAM: Self = Self(1 << 7);
     pub const ON_COMPLETE: Self = Self(1 << 8);
+    pub const ON_RESPONSE_BODY_INSPECTED: Self = Self(1 << 9);
 
     /// Creates a mask from raw bits.
     #[inline]
@@ -68,6 +69,10 @@ impl HookMask {
             (HookMask::ON_UPSTREAM_SELECT, "on_upstream_select"),
             (HookMask::ON_UPSTREAM_REQUEST, "on_upstream_request"),
             (HookMask::ON_RESPONSE_HEADERS, "on_response_headers"),
+            (
+                HookMask::ON_RESPONSE_BODY_INSPECTED,
+                "on_response_body_inspected",
+            ),
             (HookMask::RESPONSE_BODY_STREAM, "response_body_stream"),
             (HookMask::ON_COMPLETE, "on_complete"),
         ];

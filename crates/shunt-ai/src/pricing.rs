@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::types::wildcard_match;
 
@@ -61,6 +63,12 @@ pub struct ModelPricing {
     /// Optional long-context cache write token price in USD per 1M tokens.
     #[serde(default)]
     pub long_context_cache_write_per_million_usd: Option<f64>,
+    /// Optional model maximum input/context window length in tokens.
+    #[serde(default)]
+    pub max_input_tokens: Option<u64>,
+    /// Optional model maximum output/completion token limit.
+    #[serde(default)]
+    pub max_output_tokens: Option<u64>,
 }
 
 impl ModelPricing {
@@ -79,7 +87,19 @@ impl ModelPricing {
             long_context_output_per_million_usd: None,
             long_context_cached_input_per_million_usd: None,
             long_context_cache_write_per_million_usd: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
         }
+    }
+
+    pub const fn with_context_window(
+        mut self,
+        max_input_tokens: u64,
+        max_output_tokens: u64,
+    ) -> Self {
+        self.max_input_tokens = Some(max_input_tokens);
+        self.max_output_tokens = Some(max_output_tokens);
+        self
     }
 
     pub const fn with_cache_write(mut self, cache_write_per_million_usd: f64) -> Self {
@@ -229,83 +249,247 @@ fn usd_per_million_to_nano_per_token(usd_per_million: f64) -> u64 {
     }
 }
 
-/// Bundled reference model pricing table (USD per 1M tokens).
-/// Users can override any entry or disable built-ins via `use_builtin_pricing = false`.
+/// Bundled reference model pricing table (USD per 1M tokens) and context metadata.
+/// Users can override any entry, supply an external `pricing_file`, or disable built-ins via
+/// `use_builtin_pricing = false`.
 const BUILTIN_PRICING: &[(&str, ModelPricing)] = &[
     // OpenAI
-    ("gpt-4o", ModelPricing::new(2.50, 10.00, Some(1.25))),
-    ("gpt-4o-*", ModelPricing::new(2.50, 10.00, Some(1.25))),
-    ("gpt-4o-mini", ModelPricing::new(0.15, 0.60, Some(0.075))),
-    ("gpt-4o-mini-*", ModelPricing::new(0.15, 0.60, Some(0.075))),
-    ("gpt-4.1", ModelPricing::new(2.00, 8.00, Some(0.50))),
-    ("gpt-4.1-mini", ModelPricing::new(0.40, 1.60, Some(0.10))),
-    ("gpt-4.1-nano", ModelPricing::new(0.10, 0.40, Some(0.025))),
-    ("o3-mini", ModelPricing::new(1.10, 4.40, Some(0.55))),
-    ("o3-mini-*", ModelPricing::new(1.10, 4.40, Some(0.55))),
-    ("text-embedding-3-small", ModelPricing::new(0.02, 0.0, None)),
-    ("text-embedding-3-large", ModelPricing::new(0.13, 0.0, None)),
+    (
+        "gpt-4o",
+        ModelPricing::new(2.50, 10.00, Some(1.25)).with_context_window(128_000, 16_384),
+    ),
+    (
+        "gpt-4o-*",
+        ModelPricing::new(2.50, 10.00, Some(1.25)).with_context_window(128_000, 16_384),
+    ),
+    (
+        "gpt-4o-mini",
+        ModelPricing::new(0.15, 0.60, Some(0.075)).with_context_window(128_000, 16_384),
+    ),
+    (
+        "gpt-4o-mini-*",
+        ModelPricing::new(0.15, 0.60, Some(0.075)).with_context_window(128_000, 16_384),
+    ),
+    (
+        "gpt-4.1",
+        ModelPricing::new(2.00, 8.00, Some(0.50)).with_context_window(1_047_576, 32_768),
+    ),
+    (
+        "gpt-4.1-mini",
+        ModelPricing::new(0.40, 1.60, Some(0.10)).with_context_window(1_047_576, 32_768),
+    ),
+    (
+        "gpt-4.1-nano",
+        ModelPricing::new(0.10, 0.40, Some(0.025)).with_context_window(1_047_576, 32_768),
+    ),
+    (
+        "o3-mini",
+        ModelPricing::new(1.10, 4.40, Some(0.55)).with_context_window(200_000, 100_000),
+    ),
+    (
+        "o3-mini-*",
+        ModelPricing::new(1.10, 4.40, Some(0.55)).with_context_window(200_000, 100_000),
+    ),
+    (
+        "text-embedding-3-small",
+        ModelPricing::new(0.02, 0.0, None).with_context_window(8_191, 0),
+    ),
+    (
+        "text-embedding-3-large",
+        ModelPricing::new(0.13, 0.0, None).with_context_window(8_191, 0),
+    ),
     // Anthropic (direct + Bedrock + Vertex model IDs; 1.25x prompt-cache write, >200k tiered)
     (
         "claude-sonnet-4*",
         ModelPricing::new(3.00, 15.00, Some(0.30))
             .with_cache_write(3.75)
-            .with_long_context_tier(200_000, 6.00, 22.50, Some(0.60), Some(7.50)),
+            .with_long_context_tier(200_000, 6.00, 22.50, Some(0.60), Some(7.50))
+            .with_context_window(200_000, 64_000),
     ),
     (
         "claude-opus-4*",
         ModelPricing::new(15.00, 75.00, Some(1.50))
             .with_cache_write(18.75)
-            .with_long_context_tier(200_000, 30.00, 112.50, Some(3.00), Some(37.50)),
+            .with_long_context_tier(200_000, 30.00, 112.50, Some(3.00), Some(37.50))
+            .with_context_window(200_000, 32_000),
     ),
     (
         "claude-3-7-sonnet*",
-        ModelPricing::new(3.00, 15.00, Some(0.30)).with_cache_write(3.75),
+        ModelPricing::new(3.00, 15.00, Some(0.30))
+            .with_cache_write(3.75)
+            .with_context_window(200_000, 64_000),
     ),
     (
         "claude-3-5-sonnet*",
-        ModelPricing::new(3.00, 15.00, Some(0.30)).with_cache_write(3.75),
+        ModelPricing::new(3.00, 15.00, Some(0.30))
+            .with_cache_write(3.75)
+            .with_context_window(200_000, 8_192),
     ),
     (
         "claude-3-5-haiku*",
-        ModelPricing::new(0.80, 4.00, Some(0.08)).with_cache_write(1.00),
+        ModelPricing::new(0.80, 4.00, Some(0.08))
+            .with_cache_write(1.00)
+            .with_context_window(200_000, 8_192),
     ),
     (
         "anthropic.claude-3-5-sonnet*",
-        ModelPricing::new(3.00, 15.00, Some(0.30)).with_cache_write(3.75),
+        ModelPricing::new(3.00, 15.00, Some(0.30))
+            .with_cache_write(3.75)
+            .with_context_window(200_000, 8_192),
     ),
     (
         "anthropic.claude-3-5-haiku*",
-        ModelPricing::new(0.80, 4.00, Some(0.08)).with_cache_write(1.00),
+        ModelPricing::new(0.80, 4.00, Some(0.08))
+            .with_cache_write(1.00)
+            .with_context_window(200_000, 8_192),
     ),
     // Google Gemini (>200k tiered pricing for Gemini 2.5 Pro)
     (
         "gemini-2.5-pro*",
-        ModelPricing::new(1.25, 10.00, Some(0.3125)).with_long_context_tier(
-            200_000,
-            2.50,
-            15.00,
-            Some(0.625),
-            None,
-        ),
+        ModelPricing::new(1.25, 10.00, Some(0.3125))
+            .with_long_context_tier(200_000, 2.50, 15.00, Some(0.625), None)
+            .with_context_window(1_048_576, 65_536),
     ),
     (
         "gemini-2.5-flash*",
-        ModelPricing::new(0.15, 0.60, Some(0.0375)),
+        ModelPricing::new(0.15, 0.60, Some(0.0375)).with_context_window(1_048_576, 65_536),
     ),
     (
         "gemini-2.0-flash*",
-        ModelPricing::new(0.10, 0.40, Some(0.025)),
+        ModelPricing::new(0.10, 0.40, Some(0.025)).with_context_window(1_048_576, 8_192),
     ),
-    ("text-embedding-004", ModelPricing::new(0.00, 0.0, None)),
+    (
+        "text-embedding-004",
+        ModelPricing::new(0.00, 0.0, None).with_context_window(2_048, 0),
+    ),
     // DeepSeek
-    ("deepseek-chat", ModelPricing::new(0.27, 1.10, Some(0.07))),
+    (
+        "deepseek-chat",
+        ModelPricing::new(0.27, 1.10, Some(0.07)).with_context_window(128_000, 8_192),
+    ),
     (
         "deepseek-reasoner",
-        ModelPricing::new(0.55, 2.19, Some(0.14)),
+        ModelPricing::new(0.55, 2.19, Some(0.14)).with_context_window(128_000, 8_192),
     ),
 ];
 
-/// Compiled model pricing lookup catalog combining user overrides and optional built-in pricing.
+/// Parses an external JSON pricing catalog supporting both:
+/// 1. Shunt's canonical per-million format (`input_per_million_usd`, `output_per_million_usd`, ...)
+/// 2. LiteLLM's `model_prices_and_context_window.json` format (`input_cost_per_token`,
+///    `output_cost_per_token`, `cache_read_input_token_cost`, `cache_creation_input_token_cost`,
+///    `max_input_tokens` / `max_tokens`, `max_output_tokens`, and `*_above_200k_tokens` /
+///    `*_above_128k_tokens`).
+pub fn parse_external_pricing_json(raw: &str) -> Result<HashMap<String, ModelPricing>, String> {
+    let root: Value = serde_json::from_str(raw)
+        .map_err(|e| format!("failed to parse external pricing JSON: {e}"))?;
+    let Some(obj) = root.as_object() else {
+        return Err(
+            "external pricing JSON must be a top-level object mapping model IDs to pricing entries"
+                .to_owned(),
+        );
+    };
+
+    let mut out = HashMap::with_capacity(obj.len());
+    for (model_key, entry) in obj {
+        if model_key == "sample_spec" {
+            continue;
+        }
+        let Some(map) = entry.as_object() else {
+            continue;
+        };
+
+        let pricing = if map.contains_key("input_per_million_usd") {
+            let parsed: ModelPricing = serde_json::from_value(entry.clone()).map_err(|e| {
+                format!("pricing_file `{model_key}`: invalid Shunt pricing entry: {e}")
+            })?;
+            parsed.validate(model_key)?;
+            parsed
+        } else if let Some(in_per_tok) = map.get("input_cost_per_token").and_then(Value::as_f64) {
+            let out_per_tok = map
+                .get("output_cost_per_token")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            let cache_read = map
+                .get("cache_read_input_token_cost")
+                .and_then(Value::as_f64)
+                .map(|v| v * 1_000_000.0);
+            let cache_write = map
+                .get("cache_creation_input_token_cost")
+                .and_then(Value::as_f64)
+                .map(|v| v * 1_000_000.0);
+
+            let (lc_threshold, lc_in, lc_out, lc_read, lc_write) = if let Some(in_200k) = map
+                .get("input_cost_per_token_above_200k_tokens")
+                .and_then(Value::as_f64)
+            {
+                (
+                    Some(200_000),
+                    Some(in_200k * 1_000_000.0),
+                    map.get("output_cost_per_token_above_200k_tokens")
+                        .and_then(Value::as_f64)
+                        .map(|v| v * 1_000_000.0),
+                    map.get("cache_read_input_token_cost_above_200k_tokens")
+                        .and_then(Value::as_f64)
+                        .map(|v| v * 1_000_000.0),
+                    map.get("cache_creation_input_token_cost_above_200k_tokens")
+                        .and_then(Value::as_f64)
+                        .map(|v| v * 1_000_000.0),
+                )
+            } else if let Some(in_128k) = map
+                .get("input_cost_per_token_above_128k_tokens")
+                .and_then(Value::as_f64)
+            {
+                (
+                    Some(128_000),
+                    Some(in_128k * 1_000_000.0),
+                    map.get("output_cost_per_token_above_128k_tokens")
+                        .and_then(Value::as_f64)
+                        .map(|v| v * 1_000_000.0),
+                    map.get("cache_read_input_token_cost_above_128k_tokens")
+                        .and_then(Value::as_f64)
+                        .map(|v| v * 1_000_000.0),
+                    map.get("cache_creation_input_token_cost_above_128k_tokens")
+                        .and_then(Value::as_f64)
+                        .map(|v| v * 1_000_000.0),
+                )
+            } else {
+                (None, None, None, None, None)
+            };
+
+            let max_input_tokens = map
+                .get("max_input_tokens")
+                .and_then(Value::as_u64)
+                .or_else(|| map.get("max_tokens").and_then(Value::as_u64));
+            let max_output_tokens = map.get("max_output_tokens").and_then(Value::as_u64);
+
+            let parsed = ModelPricing {
+                input_per_million_usd: in_per_tok * 1_000_000.0,
+                output_per_million_usd: out_per_tok * 1_000_000.0,
+                cached_input_per_million_usd: cache_read,
+                cache_write_per_million_usd: cache_write,
+                long_context_threshold_tokens: lc_threshold,
+                long_context_input_per_million_usd: lc_in,
+                long_context_output_per_million_usd: lc_out,
+                long_context_cached_input_per_million_usd: lc_read,
+                long_context_cache_write_per_million_usd: lc_write,
+                max_input_tokens,
+                max_output_tokens,
+            };
+            parsed.validate(model_key)?;
+            parsed
+        } else {
+            // Skip metadata-only entries (e.g., image/audio-only LiteLLM rows without token costs).
+            continue;
+        };
+
+        out.insert(model_key.clone(), pricing);
+    }
+
+    Ok(out)
+}
+
+/// Compiled model pricing lookup catalog combining inline overrides, an optional external JSON
+/// pricing file, and optional built-in pricing.
 #[derive(Debug, Clone)]
 pub struct PricingCatalog {
     exact_overrides: HashMap<String, ModelPricing>,
@@ -320,9 +504,33 @@ impl PricingCatalog {
         use_builtin: bool,
         default_pricing: Option<ModelPricing>,
     ) -> Result<Self, String> {
+        Self::new_with_file(overrides, use_builtin, default_pricing, None)
+    }
+
+    /// Compiles a pricing catalog with optional external JSON pricing file (`pricing_file`).
+    /// Precedence: inline `overrides` > `pricing_file` > built-in table > `default_pricing`.
+    pub fn new_with_file(
+        overrides: HashMap<String, ModelPricing>,
+        use_builtin: bool,
+        default_pricing: Option<ModelPricing>,
+        pricing_file: Option<&Path>,
+    ) -> Result<Self, String> {
+        let mut merged = match pricing_file {
+            Some(path) => {
+                let raw = std::fs::read_to_string(path).map_err(|e| {
+                    format!("failed to read pricing_file `{}`: {e}", path.display())
+                })?;
+                parse_external_pricing_json(&raw)?
+            }
+            None => HashMap::new(),
+        };
+        for (k, v) in overrides {
+            merged.insert(k, v);
+        }
+
         let mut exact_overrides = HashMap::new();
         let mut wildcard_overrides = Vec::new();
-        for (pattern, pricing) in overrides {
+        for (pattern, pricing) in merged {
             pricing.validate(&pattern)?;
             if pattern.contains('*') {
                 wildcard_overrides.push((pattern, pricing));
@@ -470,5 +678,52 @@ mod tests {
         // total = 1_057_500_000 nano ($1.0575)
         let long_cost = p.cost_nano_usd_detailed(250_000, 100_000, 50_000, 1_000);
         assert_eq!(long_cost, 1_057_500_000);
+    }
+
+    #[test]
+    fn parses_shunt_and_litellm_external_pricing_json() {
+        let json = r#"{
+            "sample_spec": { "description": "ignored" },
+            "custom-shunt-model": {
+                "input_per_million_usd": 1.5,
+                "output_per_million_usd": 6.0,
+                "cached_input_per_million_usd": 0.15,
+                "max_input_tokens": 256000,
+                "max_output_tokens": 16384
+            },
+            "litellm-pro": {
+                "input_cost_per_token": 0.000003,
+                "output_cost_per_token": 0.000015,
+                "cache_read_input_token_cost": 0.0000003,
+                "cache_creation_input_token_cost": 0.00000375,
+                "input_cost_per_token_above_200k_tokens": 0.000006,
+                "output_cost_per_token_above_200k_tokens": 0.0000225,
+                "max_input_tokens": 200000,
+                "max_output_tokens": 64000
+            },
+            "image-only": {
+                "mode": "image_generation",
+                "output_cost_per_image": 0.04
+            }
+        }"#;
+
+        let parsed = parse_external_pricing_json(json).unwrap();
+        assert_eq!(parsed.len(), 2);
+
+        let s = parsed.get("custom-shunt-model").unwrap();
+        assert!((s.input_per_million_usd - 1.5).abs() < 1e-9);
+        assert!((s.output_per_million_usd - 6.0).abs() < 1e-9);
+        assert_eq!(s.max_input_tokens, Some(256_000));
+        assert_eq!(s.max_output_tokens, Some(16_384));
+
+        let l = parsed.get("litellm-pro").unwrap();
+        assert!((l.input_per_million_usd - 3.0).abs() < 1e-6);
+        assert!((l.output_per_million_usd - 15.0).abs() < 1e-6);
+        assert!((l.cached_input_per_million_usd.unwrap() - 0.3).abs() < 1e-6);
+        assert!((l.cache_write_per_million_usd.unwrap() - 3.75).abs() < 1e-6);
+        assert_eq!(l.long_context_threshold_tokens, Some(200_000));
+        assert!((l.long_context_input_per_million_usd.unwrap() - 6.0).abs() < 1e-6);
+        assert_eq!(l.max_input_tokens, Some(200_000));
+        assert_eq!(l.max_output_tokens, Some(64_000));
     }
 }

@@ -7,7 +7,8 @@ use serde::Serialize;
 use shunt_core::{
     ActiveHealthCheckConfig, ActiveProbeKind, CertStore, GatewaySnapshot, OtlpExporterConfig,
     PathMatch, RedisStoreConfig, RouteMatch, RouteSpec, RuntimeRegistry, SnapshotBuilder,
-    TimeoutConfig, UpstreamConfig, UpstreamEndpoint, UpstreamTlsConfig, load_certified_key_pem,
+    TimeoutConfig, TrafficMirrorSpec, UpstreamConfig, UpstreamEndpoint, UpstreamTlsConfig,
+    load_certified_key_pem,
 };
 use shunt_plugin_sdk::{
     DistributedStore, HookMask, HttpPlugin, PluginConfig, PluginRegistry, TelemetrySink,
@@ -495,6 +496,23 @@ fn compile_route_ir(ir: &RouteIr) -> Result<RouteSpec, ConfigError> {
     }
     if let Some(strip) = &ir.strip_prefix {
         spec = spec.with_strip_prefix(strip.clone());
+    }
+    for mirror in &ir.mirrors {
+        let mut headers = Vec::with_capacity(mirror.headers.len());
+        for (k, v) in &mirror.headers {
+            let name = http::header::HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
+                ConfigError::Validation(vec![format!("invalid mirror header `{k}`: {e}")])
+            })?;
+            let val = http::header::HeaderValue::from_str(v).map_err(|e| {
+                ConfigError::Validation(vec![format!("invalid mirror header value `{k}`: {e}")])
+            })?;
+            headers.push((name, val));
+        }
+        let mut m_spec = TrafficMirrorSpec::new(mirror.upstream.clone(), mirror.sample_rate);
+        m_spec.timeout = Duration::from_millis(mirror.timeout_ms.max(1));
+        m_spec.max_in_flight = mirror.max_in_flight.max(1);
+        m_spec.headers = headers;
+        spec = spec.with_mirror(m_spec);
     }
 
     Ok(spec)

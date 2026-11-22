@@ -79,10 +79,10 @@ pub async fn execute_request(
                 Ok(Flow::Respond(resp)) => {
                     return finish_short_circuit(&plugins, mask, ctx, &route.id, resp, 0, None);
                 }
-                Ok(Flow::RetryUpstream) => {
+                Ok(Flow::RetryUpstream) | Ok(Flow::InspectResponseBody { .. }) => {
                     warn!(
                         plugin = plugin.name(),
-                        "RetryUpstream ignored in on_request_headers"
+                        "RetryUpstream/InspectResponseBody ignored in on_request_headers"
                     );
                 }
                 Err(panic_msg) => {
@@ -109,13 +109,28 @@ pub async fn execute_request(
     }
 
     // -------------------------------------------------------------------------
-    // Stage 2: Optional Request Body Buffering (strictly opt-in via HookMask)
+    // Stage 2: Optional Request Body Buffering (strictly opt-in via HookMask or sampled mirror)
     // -------------------------------------------------------------------------
+    let sampled_mirrors: Vec<Arc<crate::snapshot::CompiledMirror>> =
+        if ws_upgrade.is_none() && !route.mirrors.is_empty() {
+            route
+                .mirrors
+                .iter()
+                .filter(|m| m.should_sample())
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+
     let mut buffered_body: Option<Bytes> = None;
     let mut unbuffered_incoming: Option<hyper::body::Incoming> = None;
     let mut request_bytes: u64 = 0;
 
-    if ws_upgrade.is_none() && mask.contains(HookMask::REQUEST_BODY_BUFFERED) {
+    let needs_buffer =
+        mask.contains(HookMask::REQUEST_BODY_BUFFERED) || !sampled_mirrors.is_empty();
+
+    if ws_upgrade.is_none() && needs_buffer {
         // Check Content-Length header upfront for fast 413 rejection.
         if let Some(cl) = req_head
             .headers
@@ -175,54 +190,57 @@ pub async fn execute_request(
 
         request_bytes = body_bytes.len() as u64;
 
-        for plugin in plugins.iter() {
-            if !plugin.hook_mask().contains(HookMask::REQUEST_BODY_BUFFERED) {
-                continue;
-            }
-            let start = ctx.trace_enabled.then(Instant::now);
-            let res =
-                run_hook_isolated(|| plugin.on_request_body_buffered(&mut ctx, &mut body_bytes))
-                    .await;
-            if let Some(s) = start {
-                ctx.record_timing(plugin.name(), "on_request_body_buffered", s.elapsed());
-            }
-            match res {
-                Ok(Flow::Continue) => {}
-                Ok(Flow::Respond(resp)) => {
-                    return finish_short_circuit(
-                        &plugins,
-                        mask,
-                        ctx,
-                        &route.id,
-                        resp,
-                        request_bytes,
-                        None,
-                    );
+        if mask.contains(HookMask::REQUEST_BODY_BUFFERED) {
+            for plugin in plugins.iter() {
+                if !plugin.hook_mask().contains(HookMask::REQUEST_BODY_BUFFERED) {
+                    continue;
                 }
-                Ok(Flow::RetryUpstream) => {
-                    warn!(
-                        plugin = plugin.name(),
-                        "RetryUpstream ignored in on_request_body_buffered"
-                    );
+                let start = ctx.trace_enabled.then(Instant::now);
+                let res = run_hook_isolated(|| {
+                    plugin.on_request_body_buffered(&mut ctx, &mut body_bytes)
+                })
+                .await;
+                if let Some(s) = start {
+                    ctx.record_timing(plugin.name(), "on_request_body_buffered", s.elapsed());
                 }
-                Err(panic_msg) => {
-                    warn!(plugin = plugin.name(), panic = %panic_msg, "plugin panicked in on_request_body_buffered");
-                    return finish_error(
-                        &plugins,
-                        mask,
-                        ctx,
-                        &route.id,
-                        None,
-                        None,
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "internal plugin error",
-                        format!(
-                            "plugin `{}` panicked in on_request_body_buffered: {panic_msg}",
-                            plugin.name()
-                        ),
-                        request_bytes,
-                        None,
-                    );
+                match res {
+                    Ok(Flow::Continue) => {}
+                    Ok(Flow::Respond(resp)) => {
+                        return finish_short_circuit(
+                            &plugins,
+                            mask,
+                            ctx,
+                            &route.id,
+                            resp,
+                            request_bytes,
+                            None,
+                        );
+                    }
+                    Ok(Flow::RetryUpstream) | Ok(Flow::InspectResponseBody { .. }) => {
+                        warn!(
+                            plugin = plugin.name(),
+                            "RetryUpstream/InspectResponseBody ignored in on_request_body_buffered"
+                        );
+                    }
+                    Err(panic_msg) => {
+                        warn!(plugin = plugin.name(), panic = %panic_msg, "plugin panicked in on_request_body_buffered");
+                        return finish_error(
+                            &plugins,
+                            mask,
+                            ctx,
+                            &route.id,
+                            None,
+                            None,
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "internal plugin error",
+                            format!(
+                                "plugin `{}` panicked in on_request_body_buffered: {panic_msg}",
+                                plugin.name()
+                            ),
+                            request_bytes,
+                            None,
+                        );
+                    }
                 }
             }
         }
@@ -268,8 +286,11 @@ pub async fn execute_request(
                         None,
                     );
                 }
-                Ok(Flow::RetryUpstream) => {
-                    warn!(plugin = plugin.name(), "RetryUpstream ignored in on_route");
+                Ok(Flow::RetryUpstream) | Ok(Flow::InspectResponseBody { .. }) => {
+                    warn!(
+                        plugin = plugin.name(),
+                        "RetryUpstream/InspectResponseBody ignored in on_route"
+                    );
                 }
                 Err(panic_msg) => {
                     warn!(plugin = plugin.name(), panic = %panic_msg, "plugin panicked in on_route");
@@ -321,6 +342,16 @@ pub async fn execute_request(
     // (plugins may still set a custom Host header inside `on_upstream_request`).
     req_head.headers.remove(header::HOST);
 
+    // Fire-and-forget sampled HTTP traffic mirroring (bounded concurrency, never blocks primary).
+    if !sampled_mirrors.is_empty() {
+        spawn_traffic_mirrors(
+            &snapshot,
+            &sampled_mirrors,
+            &req_head,
+            buffered_body.clone(),
+        );
+    }
+
     let max_attempts = decision.max_attempts.max(1);
     let body_is_replayable = buffered_body.is_some()
         || unbuffered_incoming
@@ -344,6 +375,7 @@ pub async fn execute_request(
             endpoint_override: None,
             attempt,
             max_attempts,
+            response_headers_timeout_override: None,
         };
 
         // 4a: on_upstream_select
@@ -371,10 +403,10 @@ pub async fn execute_request(
                             Some(selection.upstream),
                         );
                     }
-                    Ok(Flow::RetryUpstream) => {
+                    Ok(Flow::RetryUpstream) | Ok(Flow::InspectResponseBody { .. }) => {
                         warn!(
                             plugin = plugin.name(),
-                            "RetryUpstream ignored in on_upstream_select"
+                            "RetryUpstream/InspectResponseBody ignored in on_upstream_select"
                         );
                     }
                     Err(panic_msg) => {
@@ -487,10 +519,10 @@ pub async fn execute_request(
                             Some(selection.upstream),
                         );
                     }
-                    Ok(Flow::RetryUpstream) => {
+                    Ok(Flow::RetryUpstream) | Ok(Flow::InspectResponseBody { .. }) => {
                         warn!(
                             plugin = plugin.name(),
-                            "RetryUpstream ignored in on_upstream_request"
+                            "RetryUpstream/InspectResponseBody ignored in on_upstream_request"
                         );
                     }
                     Err(panic_msg) => {
@@ -586,8 +618,11 @@ pub async fn execute_request(
         };
 
         // 4d: Send request to upstream pool with split connect + response_headers timeouts.
+        let effective_headers_timeout = selection
+            .response_headers_timeout_override
+            .or(route.timeouts.response_headers_timeout);
         let upstream_res = match pool
-            .send_request(hyper_req, route.timeouts.response_headers_timeout)
+            .send_request(hyper_req, effective_headers_timeout)
             .await
         {
             Ok(res) => {
@@ -646,8 +681,10 @@ pub async fn execute_request(
         ctx.last_upstream_status = Some(res_head.status);
         ctx.last_upstream_error = None;
 
-        // 4e: on_response_headers (can short-circuit Respond or trigger Flow::RetryUpstream)
+        // 4e: on_response_headers (can short-circuit Respond, trigger Flow::RetryUpstream,
+        // or request bounded pre-flush body inspection via Flow::InspectResponseBody)
         let mut retry_requested = false;
+        let mut inspect_max_bytes: Option<usize> = None;
         if mask.contains(HookMask::ON_RESPONSE_HEADERS) {
             for plugin in plugins.iter() {
                 if !plugin.hook_mask().contains(HookMask::ON_RESPONSE_HEADERS) {
@@ -686,6 +723,10 @@ pub async fn execute_request(
                             );
                         }
                     }
+                    Ok(Flow::InspectResponseBody { max_bytes }) => {
+                        let cap = max_bytes.max(1);
+                        inspect_max_bytes = Some(inspect_max_bytes.map_or(cap, |p| p.max(cap)));
+                    }
                     Err(panic_msg) => {
                         warn!(plugin = plugin.name(), panic = %panic_msg, "plugin panicked in on_response_headers");
                         return finish_error(
@@ -712,6 +753,213 @@ pub async fn execute_request(
         if retry_requested {
             drop(res_incoming);
             continue;
+        }
+
+        // 4f: Conditional bounded pre-flush response-body inspection
+        if let Some(max_bytes) = inspect_max_bytes {
+            let mut inspected_body = match collect_body_limited(res_incoming, max_bytes).await {
+                Ok(b) => b,
+                Err(CoreError::BodyTooLarge(cap)) => {
+                    return finish_error(
+                        &plugins,
+                        mask,
+                        ctx,
+                        &route.id,
+                        Some(selection.upstream),
+                        Some(endpoint_label),
+                        StatusCode::BAD_GATEWAY,
+                        "upstream response exceeded inspection limit",
+                        CoreError::BodyTooLarge(cap).to_string(),
+                        request_bytes,
+                        ttfb,
+                    );
+                }
+                Err(err) => {
+                    return finish_error(
+                        &plugins,
+                        mask,
+                        ctx,
+                        &route.id,
+                        Some(selection.upstream),
+                        Some(endpoint_label),
+                        StatusCode::BAD_GATEWAY,
+                        "failed to read upstream response body",
+                        err.to_string(),
+                        request_bytes,
+                        ttfb,
+                    );
+                }
+            };
+
+            if mask.contains(HookMask::ON_RESPONSE_BODY_INSPECTED) {
+                for plugin in plugins.iter() {
+                    if !plugin
+                        .hook_mask()
+                        .contains(HookMask::ON_RESPONSE_BODY_INSPECTED)
+                    {
+                        continue;
+                    }
+                    let start = ctx.trace_enabled.then(Instant::now);
+                    let res = run_hook_isolated(|| {
+                        plugin.on_response_body_inspected(&mut ctx, &mut res_head, &inspected_body)
+                    })
+                    .await;
+                    if let Some(s) = start {
+                        ctx.record_timing(plugin.name(), "on_response_body_inspected", s.elapsed());
+                    }
+                    match res {
+                        Ok(Flow::Continue) => {}
+                        Ok(Flow::Respond(resp)) => {
+                            return finish_short_circuit(
+                                &plugins,
+                                mask,
+                                ctx,
+                                &route.id,
+                                resp,
+                                request_bytes,
+                                Some(selection.upstream),
+                            );
+                        }
+                        Ok(Flow::RetryUpstream) => {
+                            if attempt < max_attempts && body_is_replayable {
+                                retry_requested = true;
+                                break;
+                            } else {
+                                warn!(
+                                    plugin = plugin.name(),
+                                    attempt,
+                                    max_attempts,
+                                    body_is_replayable,
+                                    "RetryUpstream cannot retry after response body inspection"
+                                );
+                            }
+                        }
+                        Ok(Flow::InspectResponseBody { .. }) => {
+                            warn!(
+                                plugin = plugin.name(),
+                                "InspectResponseBody ignored in on_response_body_inspected"
+                            );
+                        }
+                        Err(panic_msg) => {
+                            warn!(plugin = plugin.name(), panic = %panic_msg, "plugin panicked in on_response_body_inspected");
+                            return finish_error(
+                                &plugins,
+                                mask,
+                                ctx,
+                                &route.id,
+                                Some(selection.upstream),
+                                Some(endpoint_label),
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "internal plugin error",
+                                format!(
+                                    "plugin `{}` panicked in on_response_body_inspected: {panic_msg}",
+                                    plugin.name()
+                                ),
+                                request_bytes,
+                                ttfb,
+                            );
+                        }
+                    }
+                }
+            }
+
+            if retry_requested {
+                continue;
+            }
+
+            // No retry triggered: flush the inspected response downstream cleanly.
+            // Still pass through any RESPONSE_BODY_STREAM plugins so usage/guardrails see it.
+            let mut error_msg: Option<String> = None;
+            let mut aborted_mid_stream = false;
+            if mask.contains(HookMask::RESPONSE_BODY_STREAM) {
+                for plugin in plugins.iter() {
+                    if !plugin.hook_mask().contains(HookMask::RESPONSE_BODY_STREAM) {
+                        continue;
+                    }
+                    match run_hook_isolated(|| {
+                        plugin.on_response_body_chunk(&mut ctx, &mut inspected_body, false)
+                    })
+                    .await
+                    {
+                        Ok(StreamFlow::Continue) => {}
+                        Ok(StreamFlow::Abort(reason)) => {
+                            aborted_mid_stream = true;
+                            error_msg = Some(reason);
+                            break;
+                        }
+                        Err(panic_msg) => {
+                            aborted_mid_stream = true;
+                            error_msg = Some(format!(
+                                "plugin `{}` panicked in on_response_body_chunk: {panic_msg}",
+                                plugin.name()
+                            ));
+                            break;
+                        }
+                    }
+                }
+                if !aborted_mid_stream {
+                    let mut flush = Bytes::new();
+                    for plugin in plugins.iter() {
+                        if !plugin.hook_mask().contains(HookMask::RESPONSE_BODY_STREAM) {
+                            continue;
+                        }
+                        match run_hook_isolated(|| {
+                            plugin.on_response_body_chunk(&mut ctx, &mut flush, true)
+                        })
+                        .await
+                        {
+                            Ok(StreamFlow::Continue) => {}
+                            Ok(StreamFlow::Abort(reason)) => {
+                                aborted_mid_stream = true;
+                                error_msg = Some(reason);
+                                break;
+                            }
+                            Err(panic_msg) => {
+                                aborted_mid_stream = true;
+                                error_msg = Some(format!(
+                                    "plugin `{}` panicked in on_response_body_chunk: {panic_msg}",
+                                    plugin.name()
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                    if !flush.is_empty() {
+                        let mut combined =
+                            Vec::with_capacity(inspected_body.len().saturating_add(flush.len()));
+                        combined.extend_from_slice(&inspected_body);
+                        combined.extend_from_slice(&flush);
+                        inspected_body = Bytes::from(combined);
+                    }
+                }
+            }
+
+            let final_status = res_head.status;
+            let response_bytes = inspected_body.len() as u64;
+            let out = build_buffered_response(BufferedResponse {
+                status: final_status,
+                headers: res_head.headers,
+                body: inspected_body,
+            });
+            if mask.contains(HookMask::ON_COMPLETE) {
+                let summary = RequestSummary {
+                    request_id: ctx.request_id,
+                    route_id: Some(route.id.clone()),
+                    upstream: Some(selection.upstream),
+                    endpoint: Some(endpoint_label),
+                    status: Some(final_status),
+                    attempts: attempt,
+                    request_bytes,
+                    response_bytes,
+                    ttfb,
+                    total_duration: ctx.started_at.elapsed(),
+                    error: error_msg,
+                    aborted_mid_stream,
+                    hook_timings: ctx.hook_timings.clone(),
+                };
+                spawn_on_complete(Arc::clone(&plugins), mask, ctx, summary);
+            }
+            return out;
         }
 
         // ---------------------------------------------------------------------
@@ -1276,6 +1524,78 @@ fn append_forwarded_for(headers: &mut HeaderMap, client_addr: SocketAddr) {
     };
     if let Ok(val) = HeaderValue::from_str(&new_val) {
         headers.insert(xff_name, val);
+    }
+}
+
+/// Dispatches fire-and-forget sampled copies of the incoming HTTP request to configured
+/// route traffic mirrors inside a concurrency-bounded detached task pool.
+fn spawn_traffic_mirrors(
+    snapshot: &Arc<GatewaySnapshot>,
+    mirrors: &[Arc<crate::snapshot::CompiledMirror>],
+    req_head: &RequestHead,
+    body: Option<Bytes>,
+) {
+    use std::sync::atomic::Ordering;
+
+    for mirror in mirrors {
+        let Ok(permit) = mirror.semaphore.clone().try_acquire_owned() else {
+            mirror.dropped_total.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
+        let Some(pool) = snapshot.upstream(&mirror.upstream).cloned() else {
+            mirror.errors_total.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
+
+        let (_, ep) = pool.select_endpoint(&[]);
+        let target_uri = match build_target_uri(&ep.base_uri, &req_head.uri) {
+            Ok(u) => u,
+            Err(_) => {
+                mirror.errors_total.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+        };
+
+        let mut headers = req_head.headers.clone();
+        headers.remove(header::HOST);
+        headers.remove(header::TRANSFER_ENCODING);
+        for (k, v) in &mirror.headers {
+            headers.insert(k.clone(), v.clone());
+        }
+
+        let out_body = match body.clone() {
+            Some(bytes) => {
+                if let Ok(len_val) = HeaderValue::from_str(&bytes.len().to_string()) {
+                    headers.insert(header::CONTENT_LENGTH, len_val);
+                }
+                ShuntBody::full(bytes)
+            }
+            None => ShuntBody::empty(),
+        };
+
+        let mut builder = Request::builder()
+            .method(req_head.method.clone())
+            .uri(target_uri);
+        if let Some(h) = builder.headers_mut() {
+            *h = headers;
+        }
+        let Ok(mirror_req) = builder.body(out_body) else {
+            mirror.errors_total.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
+
+        let mirror = Arc::clone(mirror);
+        tokio::spawn(async move {
+            let _permit = permit;
+            match pool.send_request(mirror_req, Some(mirror.timeout)).await {
+                Ok(_resp) => {
+                    mirror.sent_total.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    mirror.errors_total.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
     }
 }
 

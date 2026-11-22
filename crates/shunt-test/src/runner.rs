@@ -516,14 +516,20 @@ async fn run_case(
     let rt_metrics = Arc::clone(&runtime_registry);
     let render_all_metrics: MetricsRenderer = Arc::new(move || {
         let mut out = m_clone.render_prometheus();
-        let up_out = ctrl_metrics
-            .current_snapshot()
-            .render_upstream_health_prometheus();
+        let snap = ctrl_metrics.current_snapshot();
+        let up_out = snap.render_upstream_health_prometheus();
         if !up_out.is_empty() {
             if !out.is_empty() && !out.ends_with('\n') {
                 out.push('\n');
             }
             out.push_str(&up_out);
+        }
+        let mirror_out = snap.render_mirror_metrics_prometheus();
+        if !mirror_out.is_empty() {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&mirror_out);
         }
         let tel_out = rt_metrics.render_telemetry_prometheus();
         if !tel_out.is_empty() {

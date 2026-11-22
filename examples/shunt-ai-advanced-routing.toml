@@ -1,0 +1,141 @@
+# Shunt AI Gateway — RFC 0017: Per-Request Routing, Concurrency Quotas & Advanced Failover
+#
+# Demonstrates:
+# - OpenRouter-style per-request `models[]` and `provider: { order, only, ignore, sort, data_collection, zdr, regions, tags }`
+# - Context-window capability guards & context-overflow 400 error-body failover
+# - Per-target TTFT timeout failover (`ttft_timeout_ms`)
+# - `throughput` (EWMA tokens/sec) and `headroom` (RPM/TPM capacity) routing strategies
+# - Virtual key `expires_at`, `org` hierarchy, `max_parallel_requests`, per-model `model_limits`,
+#   and `preflight_reserve = true` atomic pre-flight budget holds
+# - Enriched `GET /v1/models` metadata and route-level / AI traffic mirroring
+#
+# Validate: shunt check -c examples/shunt-ai-advanced-routing.toml
+# Run:      shunt dev   -c examples/shunt-ai-advanced-routing.toml
+
+[server]
+listen = "127.0.0.1:8080"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:9090"
+
+[[upstreams]]
+name = "openai"
+endpoints = ["https://api.openai.com"]
+
+[[upstreams]]
+name = "anthropic"
+endpoints = ["https://api.anthropic.com"]
+
+[[upstreams]]
+name = "gemini"
+endpoints = ["https://generativelanguage.googleapis.com"]
+
+[[upstreams]]
+name = "shadow_eval"
+endpoints = ["http://127.0.0.1:18081"]
+
+[[routes]]
+id = "ai-advanced"
+path_prefix = "/v1/"
+upstream = "openai"
+max_attempts = 4
+response_headers_timeout_ms = 30000
+
+# Optional Path B / generic HTTP route mirror (5% sample rate)
+[[routes.mirrors]]
+upstream = "shadow_eval"
+sample_rate = 0.05
+timeout_ms = 2000
+max_in_flight = 32
+[routes.mirrors.headers]
+x-shunt-mirror = "eval"
+
+[[routes.plugins]]
+name = "ai-virtual-keys"
+[routes.plugins.config]
+[[routes.plugins.config.keys]]
+id = "prod-eu"
+api_key = "env:SHUNT_PROD_EU_KEY"
+org = "acme"
+team = "eu-app"
+expires_at = "2028-01-01T00:00:00Z"
+max_parallel_requests = 16
+rpm = 300
+tpm = 500000
+budget_usd = 100.0
+[routes.plugins.config.keys.model_limits.frontier]
+rpm = 60
+max_parallel_requests = 4
+budget_usd = 50.0
+
+[[routes.plugins]]
+name = "ai-model-router"
+[routes.plugins.config]
+allow_request_routing_overrides = true
+enforce_context_window = true
+context_window_safety_margin_tokens = 256
+include_routing_headers = true
+# Optional external JSON pricing catalog (Shunt or LiteLLM model_prices_and_context_window.json):
+# pricing_file = "prices.json"
+
+[routes.plugins.config.models.frontier]
+strategy = "headroom"
+targets = [
+  { provider = "openai", upstream = "openai", model = "gpt-4o", context_window = 128000, max_output_tokens = 16384, capabilities = ["chat", "streaming", "tools", "vision", "json_schema"], zdr = false, regions = ["us"], upstream_rpm = 500, upstream_tpm = 1000000, ttft_timeout_ms = 8000 },
+  { provider = "anthropic", upstream = "anthropic", model = "claude-sonnet-4-20250514", context_window = 200000, max_output_tokens = 64000, capabilities = ["chat", "streaming", "tools", "vision", "reasoning"], zdr = true, regions = ["us", "eu"], tags = ["hipaa", "soc2"], upstream_rpm = 400, upstream_tpm = 800000, ttft_timeout_ms = 10000 },
+  { provider = "gemini", upstream = "gemini", model = "gemini-2.5-pro", context_window = 1048576, max_output_tokens = 65536, capabilities = ["chat", "streaming", "tools", "vision", "reasoning"], zdr = true, regions = ["us", "eu"], tags = ["soc2"] },
+]
+
+[routes.plugins.config.models.fast]
+strategy = "throughput"
+targets = [
+  { provider = "openai", upstream = "openai", model = "gpt-4o-mini", context_window = 128000, capabilities = ["chat", "streaming", "tools"] },
+  { provider = "gemini", upstream = "gemini", model = "gemini-2.5-flash", context_window = 1048576, capabilities = ["chat", "streaming", "tools"], zdr = true, regions = ["eu"] },
+]
+
+[[routes.plugins]]
+name = "ai-token-rate-limit"
+[routes.plugins.config]
+window_secs = 60
+max_parallel_requests = 32
+
+[[routes.plugins]]
+name = "ai-budget"
+[routes.plugins.config]
+preflight_reserve = true
+reserve_output_tokens_cap = 1024
+end_user_budget_usd = 10.0
+[routes.plugins.config.org_budgets.acme]
+limit_usd = 500.0
+window = "monthly"
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+[routes.plugins.config.providers.openai]
+preset = "openai"
+api_key = "env:OPENAI_API_KEY"
+drop_params = true
+
+[routes.plugins.config.providers.anthropic]
+preset = "anthropic"
+api_key = "env:ANTHROPIC_API_KEY"
+drop_params = true
+
+[routes.plugins.config.providers.gemini]
+preset = "gemini"
+api_key = "env:GEMINI_API_KEY"
+drop_params = true
+
+[[routes.plugins]]
+name = "ai-failover"
+[routes.plugins.config]
+cooldown_ms = 30000
+respect_retry_after = true
+ttft_timeout_ms = 15000
+failover_on_context_overflow = true
+
+[[routes.plugins]]
+name = "ai-usage-tracker"
+[routes.plugins.config]
+log_usage = true

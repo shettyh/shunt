@@ -84,12 +84,28 @@ pub trait HttpPlugin: Send + Sync + 'static {
     }
 
     /// Stage 4d: Inspect or mutate upstream response headers prior to flushing downstream.
-    /// May return [`Flow::RetryUpstream`] (if body is empty/buffered and attempts remain)
-    /// or [`Flow::Respond`] to override the response.
+    /// May return [`Flow::RetryUpstream`] (if body is empty/buffered and attempts remain),
+    /// [`Flow::InspectResponseBody`] to inspect a bounded response body pre-flush, or
+    /// [`Flow::Respond`] to override the response.
     fn on_response_headers<'a>(
         &'a self,
         _ctx: &'a mut RequestCtx,
         _res: &'a mut ResponseHead,
+    ) -> HookResult<'a, Flow> {
+        HookResult::Ready(Flow::Continue)
+    }
+
+    /// Stage 4e (conditional pre-flush): Inspect a bounded buffered upstream response body
+    /// after a plugin returned [`Flow::InspectResponseBody`] from `on_response_headers`.
+    ///
+    /// Only invoked when [`HookMask::ON_RESPONSE_BODY_INSPECTED`] is set and an earlier
+    /// `on_response_headers` hook requested inspection. May return [`Flow::RetryUpstream`],
+    /// [`Flow::Respond`], or [`Flow::Continue`] (which flushes the buffered response verbatim).
+    fn on_response_body_inspected<'a>(
+        &'a self,
+        _ctx: &'a mut RequestCtx,
+        _res: &'a mut ResponseHead,
+        _body: &'a Bytes,
     ) -> HookResult<'a, Flow> {
         HookResult::Ready(Flow::Continue)
     }

@@ -194,12 +194,31 @@ impl BudgetWindow {
     }
 }
 
+/// Per-model quota & budget overrides attached to a virtual API key (`model_limits.<pattern>`).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ModelLimitOverride {
+    /// Optional per-model RPM override.
+    pub rpm: Option<u64>,
+    /// Optional per-model TPM override.
+    pub tpm: Option<u64>,
+    /// Optional per-model concurrent in-flight request limit.
+    pub max_parallel_requests: Option<u64>,
+    /// Optional per-model hard spend budget (USD).
+    pub budget_usd: Option<f64>,
+    /// Optional per-model soft warning spend threshold (USD).
+    pub budget_soft_limit_usd: Option<f64>,
+    /// Optional per-model budget accumulation window.
+    pub budget_window: Option<BudgetWindow>,
+}
+
 /// Authenticated virtual API key identity & multi-tenant policy attached to
 /// `RequestCtx::extensions` by `ai-virtual-keys` and enforced downstream by
 /// `ai-model-router`, `ai-token-rate-limit`, `ai-budget`, and `ai-usage-tracker`.
 #[derive(Debug, Clone)]
 pub struct AiKeyPolicy {
     pub key_id: String,
+    pub org: Option<String>,
     pub team: Option<String>,
     /// Glob patterns of permitted model aliases/names (empty = all models permitted).
     pub allowed_models: Vec<String>,
@@ -211,12 +230,16 @@ pub struct AiKeyPolicy {
     pub rpm: Option<u64>,
     /// Optional per-key TPM override for `ai-token-rate-limit`.
     pub tpm: Option<u64>,
+    /// Optional per-key max concurrent in-flight requests for `ai-token-rate-limit`.
+    pub max_parallel_requests: Option<u64>,
     /// Optional per-key hard spend budget (USD) for `ai-budget`.
     pub budget_usd: Option<f64>,
     /// Optional per-key soft warning spend threshold (USD) for `ai-budget`.
     pub budget_soft_limit_usd: Option<f64>,
     /// Optional per-key budget window override for `ai-budget`.
     pub budget_window: Option<BudgetWindow>,
+    /// Optional per-model quota/budget overrides (exact model name or glob pattern).
+    pub model_limits: HashMap<String, ModelLimitOverride>,
     /// Arbitrary key metadata tags.
     pub metadata: BTreeMap<String, String>,
 }
@@ -261,7 +284,38 @@ impl AiKeyPolicy {
         }
         None
     }
+
+    /// Resolves any per-model quota/budget override for `model` (exact match first, then sorted glob).
+    pub fn limit_for_model(&self, model: &str) -> Option<(&str, &ModelLimitOverride)> {
+        if let Some((k, v)) = self.model_limits.get_key_value(model) {
+            return Some((k.as_str(), v));
+        }
+        let mut patterns: Vec<&String> = self
+            .model_limits
+            .keys()
+            .filter(|k| k.contains('*'))
+            .collect();
+        patterns.sort();
+        for pat in patterns {
+            if wildcard_match(pat, model)
+                && let Some(v) = self.model_limits.get(pat)
+            {
+                return Some((pat.as_str(), v));
+            }
+        }
+        None
+    }
 }
+
+/// Extracted end-user identifier (`user` JSON field, Anthropic `metadata.user_id`, or custom header)
+/// attached to `RequestCtx::extensions` for per-end-user quotas, budgets, and telemetry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiEndUser(pub String);
+
+/// Per-request minimum context window required after a target failed with context-window overflow,
+/// instructing `ai-model-router` to skip subsequent targets with `context_window <= floor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextOverflowFloor(pub u64);
 
 /// Simple wildcard glob matching supporting `*` (zero or more bytes).
 pub fn wildcard_match(pattern: &str, text: &str) -> bool {
@@ -314,6 +368,10 @@ pub enum RoutingStrategy {
     Latency,
     /// Cheapest-first estimated nano-USD ranking via [`crate::PricingCatalog`].
     Cost,
+    /// Dynamic EWMA output tokens/sec throughput ranking with cold-start exploration.
+    Throughput,
+    /// Live upstream RPM/TPM remaining headroom ratio ranking.
+    Headroom,
 }
 
 impl RoutingStrategy {
@@ -323,6 +381,8 @@ impl RoutingStrategy {
             RoutingStrategy::Weighted => "weighted",
             RoutingStrategy::Latency => "latency",
             RoutingStrategy::Cost => "cost",
+            RoutingStrategy::Throughput => "throughput",
+            RoutingStrategy::Headroom => "headroom",
         }
     }
 }
@@ -409,6 +469,22 @@ pub struct AiTarget {
     pub default_params: BTreeMap<String, serde_json::Value>,
     /// Optional per-target JSON parameter overrides injected unconditionally before translation.
     pub override_params: BTreeMap<String, serde_json::Value>,
+    /// Optional maximum input context window in tokens (used for context-window guards & overflow failover).
+    pub context_window: Option<u64>,
+    /// Optional maximum output token limit advertised in `GET /v1/models`.
+    pub max_output_tokens: Option<u64>,
+    /// Zero Data Retention compliance flag (`data_collection = "deny"` / `zdr = true`).
+    pub zdr: bool,
+    /// Compliance / geographic region tags (e.g., `["eu", "us-east"]`).
+    pub regions: Vec<String>,
+    /// Arbitrary compliance / deployment tags (e.g., `["hipaa", "soc2", "private_vpc"]`).
+    pub tags: Vec<String>,
+    /// Optional declared upstream provider RPM limit for [`RoutingStrategy::Headroom`].
+    pub upstream_rpm: Option<u64>,
+    /// Optional declared upstream provider TPM limit for [`RoutingStrategy::Headroom`].
+    pub upstream_tpm: Option<u64>,
+    /// Optional per-target TTFT / response-headers timeout override in milliseconds.
+    pub ttft_timeout_ms: Option<u64>,
 }
 
 impl AiTarget {
@@ -420,6 +496,24 @@ impl AiTarget {
     /// Returns `true` if this target supports every required capability.
     pub fn supports_all(&self, required: &[AiCapability]) -> bool {
         self.capabilities.is_empty() || required.iter().all(|c| self.capabilities.contains(c))
+    }
+
+    /// Returns `true` if `required_regions` is empty or this target matches at least one region
+    /// (case-insensitive).
+    pub fn matches_any_region(&self, required_regions: &[String]) -> bool {
+        if required_regions.is_empty() {
+            return true;
+        }
+        required_regions
+            .iter()
+            .any(|req| self.regions.iter().any(|r| r.eq_ignore_ascii_case(req)))
+    }
+
+    /// Returns `true` if this target contains every tag in `required_tags` (case-insensitive).
+    pub fn matches_all_tags(&self, required_tags: &[String]) -> bool {
+        required_tags
+            .iter()
+            .all(|req| self.tags.iter().any(|t| t.eq_ignore_ascii_case(req)))
     }
 }
 
