@@ -26,6 +26,7 @@ pub mod failover;
 pub mod ingress;
 pub mod inspector;
 pub mod model_router;
+pub mod presets;
 pub mod pricing;
 pub mod provider_adapter;
 pub mod routing;
@@ -54,7 +55,9 @@ pub use cache::{
 };
 pub use dialects::bedrock::{
     BedrockStreamTranslator, bedrock_converse_path, bedrock_converse_to_openai_response,
-    map_bedrock_stop_reason, openai_to_bedrock_converse_request,
+    bedrock_embeddings_to_openai_response, bedrock_invoke_path, map_bedrock_stop_reason,
+    openai_to_bedrock_converse_request, openai_to_bedrock_converse_request_for_model,
+    openai_to_bedrock_embeddings_request,
 };
 pub use dialects::gemini::{
     GeminiSseTranslator, clean_gemini_schema, gemini_chat_path, gemini_embeddings_path,
@@ -71,11 +74,15 @@ pub use ingress::responses::{
     rewrite_openai_responses_request,
 };
 pub use inspector::{
-    AiRuntimeInspect, ScopedCacheSnapshot, ScopedCooldownSnapshot, ScopedLatencySnapshot,
-    inspect_ai_runtime,
+    AiRuntimeInspect, ScopedCacheSnapshot, ScopedCooldownSnapshot, ScopedKeyPoolSnapshot,
+    ScopedLatencySnapshot, inspect_ai_runtime,
 };
 pub use model_router::{
     AiModelRouterFactory, AiModelRouterPlugin, ModelEntryConfig, ModelRule, TargetSpec,
+};
+pub use presets::{
+    DefaultAuthShape, KeyPoolSnapshot, KeyPoolTable, PresetDefaults, ProviderPreset,
+    default_auth_shape_for_dialect,
 };
 pub use pricing::{
     ModelPricing, NANO_USD_PER_USD, PricingCatalog, nano_usd_to_usd, usd_to_nano_usd,
@@ -94,13 +101,16 @@ pub use token_rate_limit::{
 };
 pub use tokens::{TokenEstimate, estimate_request_tokens, estimate_text_tokens};
 pub use translate::{
-    AnthropicSseTranslator, anthropic_to_openai_response, map_anthropic_stop_reason,
-    openai_to_anthropic_request, rewrite_openai_embeddings_request, rewrite_openai_request,
+    AnthropicSseTranslator, DropParamsConfig, adapt_anthropic_body_for_vertex,
+    anthropic_to_openai_response, apply_request_param_transforms, budget_to_reasoning_effort,
+    map_anthropic_stop_reason, openai_to_anthropic_request, reasoning_effort_to_budget,
+    rewrite_openai_embeddings_request, rewrite_openai_request, vertex_anthropic_path,
 };
 pub use types::{
     AiCapability, AiEndpointKind, AiFailoverHistory, AiKeyPolicy, AiRequestMeta, AiTarget, AiUsage,
-    AiUsageReport, BudgetWindow, DetectedEndpoint, FailoverEvent, ProviderDialect, RoutingStrategy,
-    anthropic_error_response, endpoint_error_response, openai_error_response, wildcard_match,
+    AiUsageReport, BudgetWindow, DetectedEndpoint, FailoverEvent, IntraProviderKeyRetry,
+    ProviderDialect, RoutingStrategy, anthropic_error_response, endpoint_error_response,
+    openai_error_response, wildcard_match,
 };
 pub use usage_tracker::{
     AiDetailedMetricsSnapshot, AiMetrics, AiMetricsSnapshot, AiModelBreakdown,

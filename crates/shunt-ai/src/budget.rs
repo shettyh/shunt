@@ -602,6 +602,7 @@ impl HttpPlugin for AiBudgetPlugin {
         };
         let prompt = usage.prompt_tokens.unwrap_or(0);
         let cached = usage.cached_prompt_tokens.unwrap_or(0);
+        let cache_write = usage.cache_creation_prompt_tokens.unwrap_or(0);
         let completion = usage.completion_tokens.unwrap_or(0);
         if prompt == 0 && completion == 0 {
             return HookResult::Ready(());
@@ -626,7 +627,7 @@ impl HttpPlugin for AiBudgetPlugin {
         let Some(pricing) = self.catalog.lookup(served_model, requested_model) else {
             return HookResult::Ready(());
         };
-        let cost_nano = pricing.cost_nano_usd(prompt, cached, completion);
+        let cost_nano = pricing.cost_nano_usd_detailed(prompt, cached, cache_write, completion);
         if cost_nano == 0 {
             return HookResult::Ready(());
         }
@@ -648,6 +649,7 @@ impl HttpPlugin for AiBudgetPlugin {
             team = %team_label,
             prompt_tokens = prompt,
             cached_prompt_tokens = cached,
+            cache_creation_prompt_tokens = cache_write,
             completion_tokens = completion,
             cost_usd = nano_usd_to_usd(cost_nano),
             "ai_cost"

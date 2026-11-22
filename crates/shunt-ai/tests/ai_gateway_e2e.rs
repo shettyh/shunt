@@ -1315,3 +1315,58 @@ fn example_shunt_ai_observability_cache_toml_compiles_and_verifies_cleanly() {
         report.diagnostics
     );
 }
+
+#[test]
+fn example_shunt_ai_presets_and_parity_toml_compiles_and_verifies_cleanly() {
+    unsafe {
+        std::env::set_var("OPENAI_KEY_1", "sk-example-pool-key-1");
+        std::env::set_var("OPENAI_KEY_2", "sk-example-pool-key-2");
+        std::env::set_var("GROQ_API_KEY", "gsk-example-groq");
+        std::env::set_var("DEEPSEEK_API_KEY", "sk-example-deepseek");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-example-anthropic");
+        std::env::set_var("GCP_ACCESS_TOKEN", "ya29.example-gcp-token");
+        std::env::set_var("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE123");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "secret-example-aws");
+    }
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/shunt-ai-presets-and-parity.toml");
+    let provider = shunt_config::FileConfigProvider::new(&path);
+    let loaded = provider
+        .load()
+        .expect("examples/shunt-ai-presets-and-parity.toml should parse");
+
+    let mut reg = PluginRegistry::new();
+    let prom = Arc::new(PrometheusMetrics::new());
+    let ai_metrics = Arc::new(AiMetrics::new());
+    register_builtin_plugins(&mut reg, prom);
+    register_ai_plugins(&mut reg, ai_metrics);
+
+    let compiler = SnapshotCompiler::new(Arc::new(reg), Arc::new(RuntimeRegistry::new()));
+    let bundle = compiler
+        .compile(&loaded)
+        .expect("examples/shunt-ai-presets-and-parity.toml should compile cleanly");
+
+    let inspect_json = serde_json::to_string(&bundle.inspect).unwrap();
+    for secret in [
+        "sk-example-pool-key-1",
+        "sk-example-pool-key-2",
+        "gsk-example-groq",
+        "sk-example-deepseek",
+        "sk-example-anthropic",
+        "ya29.example-gcp-token",
+        "secret-example-aws",
+    ] {
+        assert!(
+            !inspect_json.contains(secret),
+            "secret `{secret}` leaked into SnapshotInspect"
+        );
+    }
+
+    let report = shunt_config::verify_bundle(&bundle, None, true);
+    assert!(
+        report.passed,
+        "presets-and-parity example failed verify: {:?}",
+        report.diagnostics
+    );
+}

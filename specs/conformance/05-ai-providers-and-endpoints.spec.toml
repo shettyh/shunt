@@ -258,14 +258,14 @@ status = 400
 json_path = { "/error/code" = "unsupported_endpoint" }
 
 [[cases.steps]]
-name = "Bedrock embeddings returns 501 unsupported_endpoint"
+name = "Bedrock Titan embeddings rejects multi-input arrays with 400"
 [cases.steps.request]
 method = "POST"
 path = "/v1/embeddings"
-json = { model = "anthropic.claude-3-5-sonnet-20241022-v2:0", input = "nope" }
+json = { model = "anthropic.claude-3-5-sonnet-20241022-v2:0", input = ["a", "b"] }
 [cases.steps.expect]
-status = 501
-json_path = { "/error/code" = "unsupported_endpoint" }
+status = 400
+json_path = { "/error/code" = "request_translation_failed" }
 
 [[cases.steps]]
 name = "Capability-filtered chat-only model rejects /v1/embeddings up front"

@@ -106,6 +106,16 @@ pub fn responses_to_chat_request(body: &[u8], target_model: &str) -> Result<Vec<
     if let Some(ptc) = obj.get("parallel_tool_calls").and_then(Value::as_bool) {
         out.insert("parallel_tool_calls".to_owned(), Value::Bool(ptc));
     }
+    if let Some(effort) = obj
+        .get("reasoning")
+        .and_then(|r| r.get("effort"))
+        .and_then(Value::as_str)
+    {
+        out.insert(
+            "reasoning_effort".to_owned(),
+            Value::String(effort.to_owned()),
+        );
+    }
 
     // Tools: Responses API uses flat function definitions `{type: "function", name, description, parameters}`.
     if let Some(tools) = obj.get("tools").and_then(Value::as_array) {
@@ -390,6 +400,23 @@ pub fn chat_to_responses_response(
 
     let mut output_items: Vec<Value> = Vec::new();
     if let Some(msg) = message {
+        if let Some(reasoning) = msg
+            .get("reasoning_content")
+            .or_else(|| msg.get("reasoning"))
+            .and_then(Value::as_str)
+            && !reasoning.is_empty()
+        {
+            output_items.push(json!({
+                "id": format!("rs_{suffix}"),
+                "type": "reasoning",
+                "status": "completed",
+                "summary": [{
+                    "type": "summary_text",
+                    "text": reasoning,
+                }],
+            }));
+        }
+
         let text = msg.get("content").and_then(Value::as_str).unwrap_or("");
         let tool_calls = msg.get("tool_calls").and_then(Value::as_array);
 
@@ -436,24 +463,70 @@ pub fn chat_to_responses_response(
         }
     }
 
-    let input_tokens = val
-        .get("usage")
+    let usage_in = val.get("usage");
+    let input_tokens = usage_in
         .and_then(|u| u.get("prompt_tokens").or_else(|| u.get("input_tokens")))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let output_tokens = val
-        .get("usage")
+    let output_tokens = usage_in
         .and_then(|u| {
             u.get("completion_tokens")
                 .or_else(|| u.get("output_tokens"))
         })
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let total_tokens = val
-        .get("usage")
+    let total_tokens = usage_in
         .and_then(|u| u.get("total_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or_else(|| input_tokens.saturating_add(output_tokens));
+    let cached_tokens = usage_in.and_then(|u| {
+        u.get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .or_else(|| {
+                u.get("input_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+            })
+            .and_then(Value::as_u64)
+    });
+    let reasoning_tokens = usage_in.and_then(|u| {
+        u.get("completion_tokens_details")
+            .and_then(|d| d.get("reasoning_tokens"))
+            .or_else(|| {
+                u.get("output_tokens_details")
+                    .and_then(|d| d.get("reasoning_tokens"))
+            })
+            .and_then(Value::as_u64)
+    });
+
+    let mut usage_out = Map::new();
+    usage_out.insert(
+        "input_tokens".to_owned(),
+        Value::Number(input_tokens.into()),
+    );
+    usage_out.insert(
+        "output_tokens".to_owned(),
+        Value::Number(output_tokens.into()),
+    );
+    usage_out.insert(
+        "total_tokens".to_owned(),
+        Value::Number(total_tokens.into()),
+    );
+    if let Some(c) = cached_tokens
+        && c > 0
+    {
+        usage_out.insert(
+            "input_tokens_details".to_owned(),
+            json!({ "cached_tokens": c }),
+        );
+    }
+    if let Some(r) = reasoning_tokens
+        && r > 0
+    {
+        usage_out.insert(
+            "output_tokens_details".to_owned(),
+            json!({ "reasoning_tokens": r }),
+        );
+    }
 
     let resp_obj = json!({
         "id": resp_id,
@@ -464,11 +537,7 @@ pub fn chat_to_responses_response(
         "incomplete_details": incomplete_details,
         "model": model,
         "output": output_items,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": total_tokens,
-        }
+        "usage": Value::Object(usage_out),
     });
 
     serde_json::to_vec(&resp_obj)
@@ -501,6 +570,10 @@ pub struct ChatToResponsesSseTranslator {
     started: bool,
     finished: bool,
     next_output_index: usize,
+    reasoning_output_index: Option<usize>,
+    reasoning_item_id: Option<String>,
+    reasoning_text: String,
+    reasoning_closed: bool,
     message_output_index: Option<usize>,
     message_item_id: Option<String>,
     message_text: String,
@@ -510,7 +583,9 @@ pub struct ChatToResponsesSseTranslator {
     completed_items: BTreeMap<usize, Value>,
     finish_reason: Option<String>,
     input_tokens: u64,
+    cached_tokens: Option<u64>,
     output_tokens: u64,
+    reasoning_tokens: Option<u64>,
     total_tokens: Option<u64>,
 }
 
@@ -525,6 +600,10 @@ impl ChatToResponsesSseTranslator {
             started: false,
             finished: false,
             next_output_index: 0,
+            reasoning_output_index: None,
+            reasoning_item_id: None,
+            reasoning_text: String::new(),
+            reasoning_closed: false,
             message_output_index: None,
             message_item_id: None,
             message_text: String::new(),
@@ -533,7 +612,9 @@ impl ChatToResponsesSseTranslator {
             completed_items: BTreeMap::new(),
             finish_reason: None,
             input_tokens: 0,
+            cached_tokens: None,
             output_tokens: 0,
+            reasoning_tokens: None,
             total_tokens: None,
         }
     }
@@ -647,6 +728,28 @@ impl ChatToResponsesSseTranslator {
             if let Some(t) = u.get("total_tokens").and_then(Value::as_u64) {
                 self.total_tokens = Some(t);
             }
+            if let Some(cached) = u
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .or_else(|| {
+                    u.get("input_tokens_details")
+                        .and_then(|d| d.get("cached_tokens"))
+                })
+                .and_then(Value::as_u64)
+            {
+                self.cached_tokens = Some(cached);
+            }
+            if let Some(rt) = u
+                .get("completion_tokens_details")
+                .and_then(|d| d.get("reasoning_tokens"))
+                .or_else(|| {
+                    u.get("output_tokens_details")
+                        .and_then(|d| d.get("reasoning_tokens"))
+                })
+                .and_then(Value::as_u64)
+            {
+                self.reasoning_tokens = Some(rt);
+            }
         }
 
         self.ensure_started(out);
@@ -655,9 +758,33 @@ impl ChatToResponsesSseTranslator {
             && let Some(choice) = choices.first()
         {
             if let Some(delta) = choice.get("delta") {
+                if let Some(reasoning) = delta
+                    .get("reasoning_content")
+                    .or_else(|| delta.get("reasoning"))
+                    .and_then(Value::as_str)
+                    && !reasoning.is_empty()
+                {
+                    let (output_index, item_id) = self.ensure_reasoning_item(out);
+                    self.reasoning_text.push_str(reasoning);
+                    let seq = self.next_seq();
+                    write_named_sse_json(
+                        out,
+                        "response.reasoning_summary_text.delta",
+                        &json!({
+                            "type": "response.reasoning_summary_text.delta",
+                            "sequence_number": seq,
+                            "item_id": item_id,
+                            "output_index": output_index,
+                            "summary_index": 0,
+                            "delta": reasoning,
+                        }),
+                    );
+                }
+
                 if let Some(text) = delta.get("content").and_then(Value::as_str)
                     && !text.is_empty()
                 {
+                    self.close_reasoning_item(out);
                     let (output_index, item_id) = self.ensure_message_item(out);
                     self.message_text.push_str(text);
                     let seq = self.next_seq();
@@ -676,7 +803,8 @@ impl ChatToResponsesSseTranslator {
                 }
 
                 if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
-                    // Close open message text item before emitting tool items.
+                    // Close open reasoning/message items before emitting tool items.
+                    self.close_reasoning_item(out);
                     self.close_message_item(out);
 
                     for tc in tool_calls {
@@ -805,6 +933,84 @@ impl ChatToResponsesSseTranslator {
         );
     }
 
+    fn ensure_reasoning_item(&mut self, out: &mut Vec<u8>) -> (usize, String) {
+        if let (Some(idx), Some(id)) = (self.reasoning_output_index, &self.reasoning_item_id) {
+            return (idx, id.clone());
+        }
+        let idx = self.next_output_index;
+        self.next_output_index += 1;
+        let id = format!("rs_{}", id_suffix(&self.response_id));
+        self.reasoning_output_index = Some(idx);
+        self.reasoning_item_id = Some(id.clone());
+
+        let seq_item = self.next_seq();
+        write_named_sse_json(
+            out,
+            "response.output_item.added",
+            &json!({
+                "type": "response.output_item.added",
+                "sequence_number": seq_item,
+                "output_index": idx,
+                "item": {
+                    "id": id,
+                    "type": "reasoning",
+                    "status": "in_progress",
+                    "summary": [],
+                }
+            }),
+        );
+        (idx, id)
+    }
+
+    fn close_reasoning_item(&mut self, out: &mut Vec<u8>) {
+        if self.reasoning_closed {
+            return;
+        }
+        let (Some(output_index), Some(item_id)) =
+            (self.reasoning_output_index, self.reasoning_item_id.clone())
+        else {
+            return;
+        };
+        self.reasoning_closed = true;
+
+        let seq_txt = self.next_seq();
+        write_named_sse_json(
+            out,
+            "response.reasoning_summary_text.done",
+            &json!({
+                "type": "response.reasoning_summary_text.done",
+                "sequence_number": seq_txt,
+                "item_id": item_id,
+                "output_index": output_index,
+                "summary_index": 0,
+                "text": self.reasoning_text,
+            }),
+        );
+
+        let completed_item = json!({
+            "id": item_id,
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [{
+                "type": "summary_text",
+                "text": self.reasoning_text,
+            }],
+        });
+
+        let seq_done = self.next_seq();
+        write_named_sse_json(
+            out,
+            "response.output_item.done",
+            &json!({
+                "type": "response.output_item.done",
+                "sequence_number": seq_done,
+                "output_index": output_index,
+                "item": completed_item,
+            }),
+        );
+        self.completed_items.insert(output_index, completed_item);
+    }
+
     fn ensure_message_item(&mut self, out: &mut Vec<u8>) -> (usize, String) {
         if let (Some(idx), Some(id)) = (self.message_output_index, &self.message_item_id) {
             return (idx, id.clone());
@@ -928,6 +1134,7 @@ impl ChatToResponsesSseTranslator {
         }
         self.finished = true;
 
+        self.close_reasoning_item(out);
         self.close_message_item(out);
 
         // Close all function call items in deterministic output_index order.
@@ -989,6 +1196,33 @@ impl ChatToResponsesSseTranslator {
             ("response.completed", "completed", Value::Null)
         };
 
+        let mut usage_out = Map::new();
+        usage_out.insert(
+            "input_tokens".to_owned(),
+            Value::Number(self.input_tokens.into()),
+        );
+        usage_out.insert(
+            "output_tokens".to_owned(),
+            Value::Number(self.output_tokens.into()),
+        );
+        usage_out.insert("total_tokens".to_owned(), Value::Number(total.into()));
+        if let Some(c) = self.cached_tokens
+            && c > 0
+        {
+            usage_out.insert(
+                "input_tokens_details".to_owned(),
+                json!({ "cached_tokens": c }),
+            );
+        }
+        if let Some(r) = self.reasoning_tokens
+            && r > 0
+        {
+            usage_out.insert(
+                "output_tokens_details".to_owned(),
+                json!({ "reasoning_tokens": r }),
+            );
+        }
+
         let seq_final = self.next_seq();
         write_named_sse_json(
             out,
@@ -1005,11 +1239,7 @@ impl ChatToResponsesSseTranslator {
                     "incomplete_details": incomplete_details,
                     "model": self.model,
                     "output": output_items,
-                    "usage": {
-                        "input_tokens": self.input_tokens,
-                        "output_tokens": self.output_tokens,
-                        "total_tokens": total,
-                    }
+                    "usage": Value::Object(usage_out),
                 }
             }),
         );
@@ -1200,5 +1430,73 @@ mod tests {
             "Hello world"
         );
         assert_eq!(completed["response"]["usage"]["total_tokens"], 10);
+    }
+
+    #[test]
+    fn responses_translates_reasoning_effort_and_reasoning_output_items() {
+        let req = json!({
+            "model": "smart",
+            "reasoning": { "effort": "high" },
+            "input": "Solve x+1=2"
+        });
+        let chat_bytes =
+            responses_to_chat_request(&serde_json::to_vec(&req).unwrap(), "gpt-4o").unwrap();
+        let chat: Value = serde_json::from_slice(&chat_bytes).unwrap();
+        assert_eq!(chat["reasoning_effort"], "high");
+
+        let chat_resp = json!({
+            "id": "chatcmpl-r1",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "Subtract 1 from both sides.",
+                    "content": "x = 1"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 25,
+                "total_tokens": 37,
+                "completion_tokens_details": { "reasoning_tokens": 18 }
+            }
+        });
+        let resp_bytes = chat_to_responses_response(
+            &serde_json::to_vec(&chat_resp).unwrap(),
+            StatusCode::OK,
+            "gpt-4o",
+        )
+        .unwrap();
+        let resp: Value = serde_json::from_slice(&resp_bytes).unwrap();
+        assert_eq!(resp["output"][0]["type"], "reasoning");
+        assert_eq!(
+            resp["output"][0]["summary"][0]["text"],
+            "Subtract 1 from both sides."
+        );
+        assert_eq!(resp["output"][1]["type"], "message");
+        assert_eq!(resp["output"][1]["content"][0]["text"], "x = 1");
+        assert_eq!(
+            resp["usage"]["output_tokens_details"]["reasoning_tokens"],
+            18
+        );
+
+        // Streaming reasoning -> response.reasoning_summary_text.delta + output_tokens_details
+        let sse = concat!(
+            "data: {\"id\":\"chatcmpl-rs2\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Step 1\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-rs2\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x=1\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"id\":\"chatcmpl-rs2\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":9,\"total_tokens\":14,\"completion_tokens_details\":{\"reasoning_tokens\":6}}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut tr = ChatToResponsesSseTranslator::new("gpt-4o");
+        let mut out = Vec::new();
+        out.extend_from_slice(&tr.push_chunk(sse.as_bytes()));
+        out.extend_from_slice(&tr.finish());
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("response.reasoning_summary_text.delta"));
+        assert!(text.contains("\"reasoning_tokens\":6"));
     }
 }

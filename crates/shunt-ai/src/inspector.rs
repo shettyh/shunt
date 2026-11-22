@@ -3,8 +3,16 @@ use shunt_plugin_sdk::{Clock, StateStore};
 
 use crate::cache::AiCacheTable;
 use crate::failover::{CooldownSnapshot, FailoverCircuitState};
+use crate::presets::{KeyPoolSnapshot, KeyPoolTable};
 use crate::routing::{LatencyEntrySnapshot, TargetLatencyTable};
 use crate::usage_tracker::{AiMetrics, AiMetricsSnapshot, AiModelBreakdown};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopedKeyPoolSnapshot {
+    pub scope: String,
+    #[serde(flatten)]
+    pub entry: KeyPoolSnapshot,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ScopedCooldownSnapshot {
@@ -35,6 +43,7 @@ pub struct AiRuntimeInspect {
     pub cooldowns: Vec<ScopedCooldownSnapshot>,
     pub latency_targets: Vec<ScopedLatencySnapshot>,
     pub caches: Vec<ScopedCacheSnapshot>,
+    pub key_pools: Vec<ScopedKeyPoolSnapshot>,
 }
 
 /// Collects a point-in-time read-only inspection payload covering AI usage totals,
@@ -81,12 +90,23 @@ pub fn inspect_ai_runtime(
         });
     }
 
+    let mut key_pools = Vec::new();
+    for (scope, _key, table) in state_store.collect_by_type::<KeyPoolTable>() {
+        for entry in table.snapshot_pools(now) {
+            key_pools.push(ScopedKeyPoolSnapshot {
+                scope: scope.clone(),
+                entry,
+            });
+        }
+    }
+
     let report = AiRuntimeInspect {
         totals: detailed.totals,
         models: detailed.models,
         cooldowns,
         latency_targets,
         caches,
+        key_pools,
     };
 
     serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({}))
