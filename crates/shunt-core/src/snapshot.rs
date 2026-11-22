@@ -75,6 +75,8 @@ pub struct RouteMatch {
     pub path: PathMatch,
     /// Optional HTTP method filters. Empty matches any method.
     pub methods: Vec<Method>,
+    /// Optional exact HTTP header matchers (all must match). Empty matches any headers.
+    pub headers: Vec<(HeaderName, String)>,
 }
 
 impl RouteMatch {
@@ -106,6 +108,11 @@ impl RouteMatch {
         self
     }
 
+    pub fn with_header(mut self, name: HeaderName, value: impl Into<String>) -> Self {
+        self.headers.push((name, value.into()));
+        self
+    }
+
     pub fn matches<B>(&self, req: &Request<B>) -> bool {
         if !self.methods.is_empty() && !self.methods.contains(req.method()) {
             return false;
@@ -126,6 +133,19 @@ impl RouteMatch {
                 .any(|pattern| host_matches(pattern, &host))
             {
                 return false;
+            }
+        }
+
+        if !self.headers.is_empty() {
+            for (name, expected) in &self.headers {
+                let matched = req
+                    .headers()
+                    .get_all(name)
+                    .iter()
+                    .any(|v| v.to_str().map(|s| s == expected).unwrap_or(false));
+                if !matched {
+                    return false;
+                }
             }
         }
 
@@ -316,6 +336,9 @@ pub struct CompiledRoute {
     pub plugins: Arc<[Arc<dyn HttpPlugin>]>,
     pub hook_mask: HookMask,
     pub max_body_bytes: usize,
+    /// Explicit request body cap set by route config or a plugin (`max_request_body_bytes`).
+    /// Enforced on both buffered and unbuffered streaming requests (`None` = unlimited streaming).
+    pub explicit_max_body_bytes: Option<usize>,
     pub max_attempts: usize,
     pub timeouts: TimeoutConfig,
     pub allow_websockets: bool,
@@ -610,6 +633,7 @@ impl SnapshotBuilder {
                 plugins: Arc::from(chain),
                 hook_mask,
                 max_body_bytes: effective_max_body.unwrap_or(DEFAULT_MAX_BODY_BYTES),
+                explicit_max_body_bytes: effective_max_body,
                 max_attempts: spec.max_attempts.max(1),
                 timeouts: spec.timeouts,
                 allow_websockets: spec.allow_websockets,

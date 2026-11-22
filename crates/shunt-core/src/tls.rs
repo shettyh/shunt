@@ -1,13 +1,15 @@
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::{Arc, Once};
 
 use arc_swap::ArcSwap;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-use rustls::server::{ClientHello, ResolvesServerCert};
+use rustls::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
 use rustls::sign::CertifiedKey;
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, ServerConfig, SignatureScheme};
+use shunt_plugin_sdk::ClientCertInfo;
 
 use crate::error::CoreError;
 
@@ -117,11 +119,33 @@ impl ResolvesServerCert for DynamicCertResolver {
     }
 }
 
-/// Server-side TLS listener configuration supporting SNI and hot-reloadable certs.
+/// Mutual TLS (mTLS) client certificate verification policy on a TLS listener.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClientAuthMode {
+    /// Do not request or verify client certificates (standard server-auth TLS).
+    #[default]
+    None,
+    /// Request a client certificate if offered and verify it against `ca_pem`,
+    /// but allow unauthenticated clients (route plugins such as `mtls-auth` can enforce selectively).
+    Optional,
+    /// Require a valid client certificate signed by `ca_pem` at TLS handshake time.
+    Required,
+}
+
+/// Mutual TLS client CA bundle and verification mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientAuthConfig {
+    pub mode: ClientAuthMode,
+    /// PEM-encoded client CA root certificate(s) (required when `mode != None`).
+    pub ca_pem: Vec<u8>,
+}
+
+/// Server-side TLS listener configuration supporting SNI, hot-reloadable certs, and mTLS.
 #[derive(Clone)]
 pub struct TlsListenerConfig {
     resolver: Arc<DynamicCertResolver>,
     alpn_protocols: Vec<Vec<u8>>,
+    client_auth: Option<ClientAuthConfig>,
 }
 
 impl TlsListenerConfig {
@@ -129,6 +153,7 @@ impl TlsListenerConfig {
         Self {
             resolver,
             alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            client_auth: None,
         }
     }
 
@@ -137,17 +162,340 @@ impl TlsListenerConfig {
         self
     }
 
+    pub fn with_client_auth(mut self, client_auth: Option<ClientAuthConfig>) -> Self {
+        self.client_auth = client_auth;
+        self
+    }
+
     pub fn resolver(&self) -> &Arc<DynamicCertResolver> {
         &self.resolver
     }
 
+    pub fn alpn_protocols(&self) -> &[Vec<u8>] {
+        &self.alpn_protocols
+    }
+
+    pub fn client_auth(&self) -> Option<&ClientAuthConfig> {
+        self.client_auth.as_ref()
+    }
+
     pub fn build_server_config(&self) -> Result<Arc<ServerConfig>, CoreError> {
-        ensure_crypto_provider();
-        let mut cfg = ServerConfig::builder()
+        build_server_config_with_auth(
+            &self.resolver,
+            &self.alpn_protocols,
+            self.client_auth.as_ref(),
+        )
+    }
+}
+
+/// Builds a `rustls::ServerConfig` using `resolver`, `alpn_protocols`, and optional mTLS `client_auth`.
+pub fn build_server_config_with_auth(
+    resolver: &Arc<DynamicCertResolver>,
+    alpn_protocols: &[Vec<u8>],
+    client_auth: Option<&ClientAuthConfig>,
+) -> Result<Arc<ServerConfig>, CoreError> {
+    ensure_crypto_provider();
+    let mut cfg = match client_auth {
+        Some(auth) if auth.mode != ClientAuthMode::None => {
+            let mut roots = RootCertStore::empty();
+            let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&auth.ca_pem)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| CoreError::Tls(format!("failed to parse client CA PEM: {e}")))?;
+            if certs.is_empty() {
+                return Err(CoreError::Tls(
+                    "client CA PEM contained no certificates".to_owned(),
+                ));
+            }
+            for cert in certs {
+                roots
+                    .add(cert)
+                    .map_err(|e| CoreError::Tls(format!("invalid client CA cert: {e}")))?;
+            }
+            let verifier_builder = WebPkiClientVerifier::builder(Arc::new(roots));
+            let verifier = match auth.mode {
+                ClientAuthMode::Required => verifier_builder.build(),
+                ClientAuthMode::Optional => verifier_builder.allow_unauthenticated().build(),
+                ClientAuthMode::None => unreachable!(),
+            }
+            .map_err(|e| CoreError::Tls(format!("failed to build mTLS client verifier: {e}")))?;
+
+            ServerConfig::builder()
+                .with_client_cert_verifier(verifier)
+                .with_cert_resolver(Arc::clone(resolver) as Arc<dyn ResolvesServerCert>)
+        }
+        _ => ServerConfig::builder()
             .with_no_client_auth()
-            .with_cert_resolver(Arc::clone(&self.resolver) as Arc<dyn ResolvesServerCert>);
-        cfg.alpn_protocols = self.alpn_protocols.clone();
-        Ok(Arc::new(cfg))
+            .with_cert_resolver(Arc::clone(resolver) as Arc<dyn ResolvesServerCert>),
+    };
+    cfg.alpn_protocols = alpn_protocols.to_vec();
+    Ok(Arc::new(cfg))
+}
+
+/// Pure-Rust, panic-free DER X.509 certificate metadata extractor for verified mTLS peer certs.
+///
+/// Extracts Subject CN/DN, Issuer DN, SAN DNS/URI/Email entries, serial hex, and SHA-256
+/// fingerprint directly from the leaf DER certificate without external X.509 crates.
+pub fn parse_client_cert_info(der: &[u8]) -> Option<ClientCertInfo> {
+    if der.is_empty() {
+        return None;
+    }
+
+    let digest = ring::digest::digest(&ring::digest::SHA256, der);
+    let sha256_fingerprint = hex_lower(digest.as_ref());
+
+    // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
+    let (cert_tag, cert_body, _) = der_read_tlv(der)?;
+    if cert_tag != 0x30 {
+        return None;
+    }
+    let (tbs_tag, mut tbs, _) = der_read_tlv(cert_body)?;
+    if tbs_tag != 0x30 {
+        return None;
+    }
+
+    // Optional [0] EXPLICIT version
+    if tbs.first() == Some(&0xA0) {
+        let (_, _, rest) = der_read_tlv(tbs)?;
+        tbs = rest;
+    }
+
+    // serialNumber INTEGER (0x02)
+    let (ser_tag, ser_val, rest) = der_read_tlv(tbs)?;
+    if ser_tag != 0x02 {
+        return None;
+    }
+    let serial_hex = hex_lower(ser_val);
+    tbs = rest;
+
+    // signature AlgorithmIdentifier (SEQUENCE)
+    let (sig_tag, _, rest) = der_read_tlv(tbs)?;
+    if sig_tag != 0x30 {
+        return None;
+    }
+    tbs = rest;
+
+    // issuer Name (SEQUENCE)
+    let (iss_tag, iss_body, rest) = der_read_tlv(tbs)?;
+    if iss_tag != 0x30 {
+        return None;
+    }
+    let (issuer_dn, _) = parse_x509_name(iss_body);
+    tbs = rest;
+
+    // validity Validity (SEQUENCE)
+    let (val_tag, _, rest) = der_read_tlv(tbs)?;
+    if val_tag != 0x30 {
+        return None;
+    }
+    tbs = rest;
+
+    // subject Name (SEQUENCE)
+    let (sub_tag, sub_body, rest) = der_read_tlv(tbs)?;
+    if sub_tag != 0x30 {
+        return None;
+    }
+    let (subject_dn, subject_cn) = parse_x509_name(sub_body);
+    tbs = rest;
+
+    // subjectPublicKeyInfo (SEQUENCE)
+    let (spki_tag, _, mut rest) = der_read_tlv(tbs)?;
+    if spki_tag != 0x30 {
+        return None;
+    }
+
+    let mut san_dns = Vec::new();
+    let mut san_uris = Vec::new();
+    let mut san_emails = Vec::new();
+
+    // Scan remaining optional tagged fields for [3] EXPLICIT Extensions (0xA3).
+    while !rest.is_empty() {
+        let Some((tag, val, next)) = der_read_tlv(rest) else {
+            break;
+        };
+        if tag == 0xA3 {
+            parse_x509_extensions(val, &mut san_dns, &mut san_uris, &mut san_emails);
+            break;
+        }
+        rest = next;
+    }
+
+    Some(ClientCertInfo {
+        subject_cn,
+        subject_dn,
+        issuer_dn,
+        san_dns,
+        san_uris,
+        san_emails,
+        serial_hex,
+        sha256_fingerprint,
+    })
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+fn der_read_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let &tag = input.first()?;
+    let &first_len = input.get(1)?;
+    let (len, header_len) = if first_len & 0x80 == 0 {
+        (usize::from(first_len), 2usize)
+    } else {
+        let num_bytes = usize::from(first_len & 0x7F);
+        if num_bytes == 0 || num_bytes > 4 {
+            return None;
+        }
+        let len_slice = input.get(2..2 + num_bytes)?;
+        let mut len = 0usize;
+        for &b in len_slice {
+            len = len.checked_shl(8)?.checked_add(usize::from(b))?;
+        }
+        (len, 2 + num_bytes)
+    };
+    let end = header_len.checked_add(len)?;
+    let value = input.get(header_len..end)?;
+    let rest = input.get(end..)?;
+    Some((tag, value, rest))
+}
+
+fn parse_x509_name(mut body: &[u8]) -> (String, Option<String>) {
+    let mut parts = Vec::new();
+    let mut cn = None;
+
+    while !body.is_empty() {
+        let Some((set_tag, mut set_body, next_rdn)) = der_read_tlv(body) else {
+            break;
+        };
+        body = next_rdn;
+        if set_tag != 0x31 {
+            continue;
+        }
+        while !set_body.is_empty() {
+            let Some((atv_tag, atv_body, next_atv)) = der_read_tlv(set_body) else {
+                break;
+            };
+            set_body = next_atv;
+            if atv_tag != 0x30 {
+                continue;
+            }
+            let Some((oid_tag, oid_bytes, val_rest)) = der_read_tlv(atv_body) else {
+                continue;
+            };
+            if oid_tag != 0x06 {
+                continue;
+            }
+            let Some((val_tag, val_bytes, _)) = der_read_tlv(val_rest) else {
+                continue;
+            };
+            let Some(val_str) = decode_der_string(val_tag, val_bytes) else {
+                continue;
+            };
+            let attr_name = match oid_bytes {
+                [0x55, 0x04, 0x03] => {
+                    if cn.is_none() {
+                        cn = Some(val_str.clone());
+                    }
+                    "CN"
+                }
+                [0x55, 0x04, 0x06] => "C",
+                [0x55, 0x04, 0x07] => "L",
+                [0x55, 0x04, 0x08] => "ST",
+                [0x55, 0x04, 0x0A] => "O",
+                [0x55, 0x04, 0x0B] => "OU",
+                [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x01] => "emailAddress",
+                _ => continue,
+            };
+            parts.push(format!("{attr_name}={val_str}"));
+        }
+    }
+
+    (parts.join(","), cn)
+}
+
+fn decode_der_string(tag: u8, bytes: &[u8]) -> Option<String> {
+    match tag {
+        // UTF8String, PrintableString, IA5String, TeletexString, VisibleString
+        0x0C | 0x13 | 0x16 | 0x14 | 0x1A => String::from_utf8(bytes.to_vec()).ok(),
+        // BMPString (UTF-16BE)
+        0x1E if bytes.len().is_multiple_of(2) => {
+            let units: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect();
+            String::from_utf16(&units).ok()
+        }
+        _ => None,
+    }
+}
+
+fn parse_x509_extensions(
+    ext_wrapper: &[u8],
+    san_dns: &mut Vec<String>,
+    san_uris: &mut Vec<String>,
+    san_emails: &mut Vec<String>,
+) {
+    let Some((seq_tag, mut exts, _)) = der_read_tlv(ext_wrapper) else {
+        return;
+    };
+    if seq_tag != 0x30 {
+        return;
+    }
+
+    while !exts.is_empty() {
+        let Some((ext_tag, ext_body, next_ext)) = der_read_tlv(exts) else {
+            break;
+        };
+        exts = next_ext;
+        if ext_tag != 0x30 {
+            continue;
+        }
+        let Some((oid_tag, oid_bytes, mut rest)) = der_read_tlv(ext_body) else {
+            continue;
+        };
+        // OID 2.5.29.17 = subjectAltName
+        if oid_tag != 0x06 || oid_bytes != [0x55, 0x1D, 0x11] {
+            continue;
+        }
+        // Optional critical BOOLEAN (0x01)
+        if rest.first() == Some(&0x01) {
+            let Some((_, _, after_bool)) = der_read_tlv(rest) else {
+                continue;
+            };
+            rest = after_bool;
+        }
+        // extnValue OCTET STRING (0x04)
+        let Some((oct_tag, oct_bytes, _)) = der_read_tlv(rest) else {
+            continue;
+        };
+        if oct_tag != 0x04 {
+            continue;
+        }
+        // GeneralNames ::= SEQUENCE OF GeneralName
+        let Some((gn_seq_tag, mut gns, _)) = der_read_tlv(oct_bytes) else {
+            continue;
+        };
+        if gn_seq_tag != 0x30 {
+            continue;
+        }
+        while !gns.is_empty() {
+            let Some((gn_tag, gn_val, next_gn)) = der_read_tlv(gns) else {
+                break;
+            };
+            gns = next_gn;
+            let Ok(s) = std::str::from_utf8(gn_val) else {
+                continue;
+            };
+            match gn_tag {
+                0x81 => san_emails.push(s.to_owned()),
+                0x82 => san_dns.push(s.to_owned()),
+                0x86 => san_uris.push(s.to_owned()),
+                _ => {}
+            }
+        }
     }
 }
 

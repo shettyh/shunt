@@ -19,6 +19,14 @@ struct HeaderRewriteConfig {
     response_set: HashMap<String, String>,
     response_add: HashMap<String, String>,
     response_remove: Vec<String>,
+    /// Optional upstream `Host` header rewrite (e.g. Kubernetes Gateway API `URLRewrite.hostname`).
+    upstream_host: Option<String>,
+    /// Replace full upstream request path (e.g. Gateway API `ReplaceFullPath`).
+    path_replace_full: Option<String>,
+    /// Prefix to strip when replacing with `path_replace_prefix`.
+    path_match_prefix: Option<String>,
+    /// Replacement prefix for `path_match_prefix` (e.g. Gateway API `ReplacePrefixMatch`).
+    path_replace_prefix: Option<String>,
 }
 
 struct HeaderOps {
@@ -106,11 +114,35 @@ impl PluginFactory for HeaderRewriteFactory {
             remove: compile_names(self.name(), cfg.response_remove)?,
         };
 
+        let upstream_host = match cfg.upstream_host {
+            Some(h) => {
+                Some(
+                    HeaderValue::from_str(&h).map_err(|e| PluginBuildError::BuildFailed {
+                        plugin: self.name().to_owned(),
+                        message: format!("invalid `upstream_host` `{h}`: {e}"),
+                    })?,
+                )
+            }
+            None => None,
+        };
+        if cfg.path_replace_full.is_some() && cfg.path_replace_prefix.is_some() {
+            return Err(PluginBuildError::BuildFailed {
+                plugin: self.name().to_owned(),
+                message: "cannot specify both `path_replace_full` and `path_replace_prefix`"
+                    .to_owned(),
+            });
+        }
+
+        let has_upstream_rewrite = !up_ops.is_empty()
+            || upstream_host.is_some()
+            || cfg.path_replace_full.is_some()
+            || cfg.path_replace_prefix.is_some();
+
         let mut mask = HookMask::EMPTY;
         if !req_ops.is_empty() {
             mask |= HookMask::ON_REQUEST_HEADERS;
         }
-        if !up_ops.is_empty() {
+        if has_upstream_rewrite {
             mask |= HookMask::ON_UPSTREAM_REQUEST;
         }
         if !res_ops.is_empty() {
@@ -122,6 +154,10 @@ impl PluginFactory for HeaderRewriteFactory {
             req_ops,
             up_ops,
             res_ops,
+            upstream_host,
+            path_replace_full: cfg.path_replace_full,
+            path_match_prefix: cfg.path_match_prefix,
+            path_replace_prefix: cfg.path_replace_prefix,
         }))
     }
 }
@@ -131,6 +167,10 @@ pub struct HeaderRewritePlugin {
     req_ops: HeaderOps,
     up_ops: HeaderOps,
     res_ops: HeaderOps,
+    upstream_host: Option<HeaderValue>,
+    path_replace_full: Option<String>,
+    path_match_prefix: Option<String>,
+    path_replace_prefix: Option<String>,
 }
 
 impl HttpPlugin for HeaderRewritePlugin {
@@ -157,6 +197,29 @@ impl HttpPlugin for HeaderRewritePlugin {
         req: &'a mut UpstreamRequest,
     ) -> HookResult<'a, Flow> {
         self.up_ops.apply(&mut req.headers);
+        if let Some(host) = &self.upstream_host {
+            req.headers
+                .insert(shunt_plugin_sdk::header::HOST, host.clone());
+        }
+        if let Some(full) = &self.path_replace_full {
+            let next_pq = match req.uri.query() {
+                Some(q) => format!("{full}?{q}"),
+                None => full.clone(),
+            };
+            if let Ok(parsed) = next_pq.parse() {
+                req.uri = parsed;
+            }
+        } else if let Some(rep) = &self.path_replace_prefix {
+            let match_pfx = self.path_match_prefix.as_deref().unwrap_or("/");
+            let rewritten = crate::redirect::replace_path_prefix(req.uri.path(), match_pfx, rep);
+            let next_pq = match req.uri.query() {
+                Some(q) => format!("{rewritten}?{q}"),
+                None => rewritten,
+            };
+            if let Ok(parsed) = next_pq.parse() {
+                req.uri = parsed;
+            }
+        }
         HookResult::Ready(Flow::Continue)
     }
 

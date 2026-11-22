@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -8,8 +9,8 @@ use http::{HeaderMap, HeaderValue, Request, Response, StatusCode, Uri};
 use http_body::{Body, Frame};
 use http_body_util::BodyExt;
 use shunt_plugin_sdk::{
-    BufferedResponse, Flow, HookMask, HttpPlugin, RequestCtx, RequestHead, RequestSummary,
-    ResponseHead, RouteDecision, StreamFlow, UpstreamRequest, UpstreamSelection,
+    BufferedResponse, ClientCertInfo, Flow, HookMask, HttpPlugin, RequestCtx, RequestHead,
+    RequestSummary, ResponseHead, RouteDecision, StreamFlow, UpstreamRequest, UpstreamSelection,
 };
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -31,9 +32,10 @@ pub async fn execute_request(
     request_id: u64,
     client_addr: SocketAddr,
     tls_sni: Option<String>,
+    client_cert: Option<Arc<ClientCertInfo>>,
     trace_enabled: bool,
 ) -> Response<ShuntBody> {
-    let mut ctx = RequestCtx::new(request_id, client_addr, tls_sni);
+    let mut ctx = RequestCtx::new(request_id, client_addr, tls_sni).with_client_cert(client_cert);
     ctx.trace_enabled = trace_enabled;
 
     let Some(route) = snapshot.match_route(&req).cloned() else {
@@ -130,30 +132,37 @@ pub async fn execute_request(
     let needs_buffer =
         mask.contains(HookMask::REQUEST_BODY_BUFFERED) || !sampled_mirrors.is_empty();
 
-    if ws_upgrade.is_none() && needs_buffer {
-        // Check Content-Length header upfront for fast 413 rejection.
-        if let Some(cl) = req_head
+    // Upfront Content-Length enforcement whenever buffering OR an explicit route/plugin cap is set.
+    let upfront_cap = if needs_buffer {
+        Some(route.max_body_bytes)
+    } else {
+        route.explicit_max_body_bytes
+    };
+    if ws_upgrade.is_none()
+        && let Some(cap) = upfront_cap
+        && let Some(cl) = req_head
             .headers
             .get(header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<usize>().ok())
-            && cl > route.max_body_bytes
-        {
-            return finish_error(
-                &plugins,
-                mask,
-                ctx,
-                &route.id,
-                None,
-                None,
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "request body too large",
-                CoreError::BodyTooLarge(route.max_body_bytes).to_string(),
-                0,
-                None,
-            );
-        }
+        && cl > cap
+    {
+        return finish_error(
+            &plugins,
+            mask,
+            ctx,
+            &route.id,
+            None,
+            None,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request body too large",
+            CoreError::BodyTooLarge(cap).to_string(),
+            0,
+            None,
+        );
+    }
 
+    if ws_upgrade.is_none() && needs_buffer {
         let mut body_bytes = match collect_body_limited(incoming_body, route.max_body_bytes).await {
             Ok(b) => b,
             Err(CoreError::BodyTooLarge(cap)) => {
@@ -568,6 +577,7 @@ pub async fn execute_request(
         };
 
         // Construct outgoing request body.
+        let mut streaming_body_exceeded: Option<Arc<AtomicBool>> = None;
         let out_body = if let Some(body_bytes) = up_req.body {
             // Ensure Content-Length matches the (potentially rewritten) buffered body.
             up_req.headers.remove(header::TRANSFER_ENCODING);
@@ -578,15 +588,26 @@ pub async fn execute_request(
         } else if let Some(incoming) = unbuffered_incoming.take() {
             if mask.contains(HookMask::REQUEST_BODY_STREAM) {
                 up_req.headers.remove(header::CONTENT_LENGTH);
+                let flag = route
+                    .explicit_max_body_bytes
+                    .map(|_| Arc::new(AtomicBool::new(false)));
+                streaming_body_exceeded = flag.clone();
                 spawn_request_body_stream_pump(
                     incoming,
                     Arc::clone(&plugins),
                     ctx.request_id,
                     ctx.client_addr,
                     ctx.tls_sni.clone(),
+                    ctx.client_cert.clone(),
                     ctx.route_id.clone(),
                     attempt,
+                    route.explicit_max_body_bytes,
+                    flag,
                 )
+            } else if let Some(cap) = route.explicit_max_body_bytes {
+                let flag = Arc::new(AtomicBool::new(false));
+                streaming_body_exceeded = Some(Arc::clone(&flag));
+                ShuntBody::limited_passthrough(incoming, cap, flag)
             } else {
                 ShuntBody::passthrough(incoming)
             }
@@ -632,21 +653,30 @@ pub async fn execute_request(
                 res
             }
             Err(err) => {
-                if let Some(idx) = ep_idx {
+                let err_str = err.to_string();
+                let is_body_too_large = matches!(err, CoreError::BodyTooLarge(_))
+                    || streaming_body_exceeded
+                        .as_ref()
+                        .map(|f| f.load(Ordering::Acquire))
+                        .unwrap_or(false);
+                if !is_body_too_large && let Some(idx) = ep_idx {
                     pool.record_failure(idx);
                 }
-                let status = match &err {
-                    CoreError::ConnectTimeout(_) | CoreError::ResponseHeadersTimeout(_) => {
-                        StatusCode::GATEWAY_TIMEOUT
+                let status = if is_body_too_large {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                } else {
+                    match &err {
+                        CoreError::ConnectTimeout(_) | CoreError::ResponseHeadersTimeout(_) => {
+                            StatusCode::GATEWAY_TIMEOUT
+                        }
+                        _ => StatusCode::BAD_GATEWAY,
                     }
-                    _ => StatusCode::BAD_GATEWAY,
                 };
-                let err_str = err.to_string();
                 ctx.last_upstream_error = Some(err_str.clone());
                 ctx.last_upstream_status = Some(status);
                 last_error = Some((status, err_str));
 
-                if attempt < max_attempts && body_is_replayable {
+                if !is_body_too_large && attempt < max_attempts && body_is_replayable {
                     continue;
                 }
                 let (st, msg) = last_error.unwrap();
@@ -658,7 +688,9 @@ pub async fn execute_request(
                     Some(selection.upstream),
                     Some(endpoint_label),
                     st,
-                    if st == StatusCode::GATEWAY_TIMEOUT {
+                    if st == StatusCode::PAYLOAD_TOO_LARGE {
+                        "request body too large"
+                    } else if st == StatusCode::GATEWAY_TIMEOUT {
                         "upstream timed out"
                     } else {
                         "upstream request failed"
@@ -1061,21 +1093,27 @@ pub async fn execute_request(
 
 /// Spawns a bounded-backpressure streaming pump that runs `on_request_body_chunk` on
 /// outgoing request chunks (only used when `REQUEST_BODY_STREAM` is set without buffering).
+#[allow(clippy::too_many_arguments)]
 fn spawn_request_body_stream_pump(
     mut incoming: hyper::body::Incoming,
     plugins: Arc<[Arc<dyn HttpPlugin>]>,
     request_id: u64,
     client_addr: SocketAddr,
     tls_sni: Option<String>,
+    client_cert: Option<Arc<ClientCertInfo>>,
     route_id: Option<String>,
     attempt: usize,
+    max_body_bytes: Option<usize>,
+    exceeded_flag: Option<Arc<AtomicBool>>,
 ) -> ShuntBody {
     let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
 
     tokio::spawn(async move {
-        let mut ctx = RequestCtx::new(request_id, client_addr, tls_sni);
+        let mut ctx =
+            RequestCtx::new(request_id, client_addr, tls_sni).with_client_cert(client_cert);
         ctx.route_id = route_id;
         ctx.attempt = attempt;
+        let mut bytes_read: usize = 0;
 
         while let Some(frame_res) = incoming.frame().await {
             match frame_res {
@@ -1085,6 +1123,16 @@ fn spawn_request_body_stream_pump(
                             Ok(b) => b,
                             Err(_) => continue,
                         };
+                        if let Some(cap) = max_body_bytes {
+                            bytes_read = bytes_read.saturating_add(data.len());
+                            if bytes_read > cap {
+                                if let Some(ref f) = exceeded_flag {
+                                    f.store(true, Ordering::Release);
+                                }
+                                let _ = tx.send(Err(CoreError::BodyTooLarge(cap))).await;
+                                return;
+                            }
+                        }
                         for plugin in plugins.iter() {
                             if !plugin.hook_mask().contains(HookMask::REQUEST_BODY_STREAM) {
                                 continue;

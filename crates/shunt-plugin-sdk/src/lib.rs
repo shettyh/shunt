@@ -16,7 +16,7 @@ pub mod telemetry;
 
 pub use bytes::Bytes;
 pub use clock::{Clock, ManualClock, SystemClock};
-pub use context::RequestCtx;
+pub use context::{ClientCertInfo, RequestCtx};
 pub use distributed::{
     DistributedStore, DistributedStoreError, FailurePolicy, InMemoryDistributedStore, QuotaOutcome,
 };

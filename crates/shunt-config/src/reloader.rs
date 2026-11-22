@@ -65,6 +65,9 @@ impl ReloadController {
 
         if let Some(certs) = bundle.cert_store {
             self.reloader.reload_tls(certs);
+            self.reloader
+                .reload_client_auth(bundle.client_auth.as_ref())
+                .map_err(|e| ConfigError::Tls(e.to_string()))?;
         }
         self.reloader.swap_snapshot(bundle.snapshot);
         self.inspect.store(Arc::new(bundle.inspect.clone()));

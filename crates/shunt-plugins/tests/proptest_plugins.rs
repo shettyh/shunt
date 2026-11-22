@@ -1,8 +1,13 @@
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use proptest::prelude::*;
 use shunt_plugin_sdk::{Clock, ManualClock, TraceContext};
 use shunt_plugins::rate_limit::{BucketTable, TokenBucket};
+use shunt_plugins::{
+    ContentEncoding, IpNet, base64url_decode, base64url_encode, negotiate_accept_encoding,
+    parse_jwks_json, parse_jwt_unverified,
+};
 
 #[derive(Debug, Clone)]
 enum BucketOp {
@@ -155,5 +160,49 @@ proptest! {
         }
         prop_assert!(!TraceContext::should_sample_trace_id(trace_id, 0.0));
         prop_assert!(TraceContext::should_sample_trace_id(trace_id, 1.0));
+    }
+
+    #[test]
+    fn base64url_round_trip_arbitrary_bytes(data in prop::collection::vec(any::<u8>(), 0..512)) {
+        let encoded = base64url_encode(&data);
+        prop_assert!(!encoded.contains('='));
+        prop_assert!(!encoded.contains('+'));
+        prop_assert!(!encoded.contains('/'));
+        let decoded = base64url_decode(&encoded).expect("valid base64url must decode");
+        prop_assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn jwt_and_jwks_parsers_never_panic_on_arbitrary_input(input in ".*") {
+        let _ = parse_jwt_unverified(&input);
+        let _ = parse_jwks_json(&input);
+    }
+
+    #[test]
+    fn cidr_contains_monotonic_with_prefix_length(
+        ip_bits in any::<u32>(),
+        net_bits in any::<u32>(),
+        p1 in 0u8..=32,
+        p2 in 0u8..=32,
+    ) {
+        let (narrow, wide) = if p1 >= p2 { (p1, p2) } else { (p2, p1) };
+        let base_ip = Ipv4Addr::from(net_bits);
+        let target = IpAddr::V4(Ipv4Addr::from(ip_bits));
+        let narrow_net = IpNet::parse(&format!("{base_ip}/{narrow}")).unwrap();
+        let wide_net = IpNet::parse(&format!("{base_ip}/{wide}")).unwrap();
+        if narrow_net.contains(target) {
+            prop_assert!(wide_net.contains(target));
+        }
+        // Any IPv4 address always matches its own /32 and 0.0.0.0/0
+        let self_net = IpNet::parse(&format!("{}/32", Ipv4Addr::from(ip_bits))).unwrap();
+        prop_assert!(self_net.contains(target));
+    }
+
+    #[test]
+    fn accept_encoding_negotiation_never_panics_and_returns_supported(header in ".*") {
+        let supported = [ContentEncoding::Zstd, ContentEncoding::Br, ContentEncoding::Gzip];
+        if let Some(enc) = negotiate_accept_encoding(&header, &supported) {
+            prop_assert!(supported.contains(&enc));
+        }
     }
 }

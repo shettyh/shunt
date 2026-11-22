@@ -10,12 +10,25 @@ description = "First-party general HTTP plugins for Shunt built strictly on shun
 [dependencies]
 shunt-plugin-sdk.workspace = true
 
+brotli.workspace = true
+flate2.workspace = true
+ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 proptest.workspace = true
+rcgen.workspace = true
+shunt-config.workspace = true
+shunt-core.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

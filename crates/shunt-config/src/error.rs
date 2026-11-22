@@ -48,4 +48,7 @@ pub enum ConfigError {
 
     #[error("admin server error: {0}")]
     Admin(String),
+
+    #[error("Kubernetes Gateway API error: {0}")]
+    K8s(String),
 }

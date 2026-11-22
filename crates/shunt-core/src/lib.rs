@@ -37,8 +37,8 @@ pub use snapshot::{
     host_matches,
 };
 pub use tls::{
-    CertStore, DynamicCertResolver, TlsListenerConfig, UpstreamTlsConfig, ensure_crypto_provider,
-    load_certified_key_pem,
+    CertStore, ClientAuthConfig, ClientAuthMode, DynamicCertResolver, TlsListenerConfig,
+    UpstreamTlsConfig, ensure_crypto_provider, load_certified_key_pem, parse_client_cert_info,
 };
 pub use upstream::{
     ActiveHealthCheckConfig, ActiveProbeKind, EndpointHealthSnapshot, EndpointState,
