@@ -59,6 +59,12 @@ enum Commands {
         /// Warmup duration in seconds before recording samples.
         #[arg(long, default_value_t = 2)]
         warmup_secs: u64,
+        /// HTTP method (`GET`, `POST`, etc.).
+        #[arg(long, default_value = "GET")]
+        method: String,
+        /// Optional JSON body for `POST`/`PUT` requests.
+        #[arg(long)]
+        body: Option<String>,
         /// Optional extra request headers (`Name: Value`), repeatable.
         #[arg(short = 'H', long = "header")]
         headers: Vec<String>,
@@ -112,6 +118,8 @@ async fn main() {
             concurrency,
             duration_secs,
             warmup_secs,
+            method,
+            body,
             headers,
             http2,
             json,
@@ -121,6 +129,8 @@ async fn main() {
                 concurrency,
                 Duration::from_secs(duration_secs),
                 Duration::from_secs(warmup_secs),
+                &method,
+                body,
                 &headers,
                 http2,
                 json,
@@ -218,6 +228,13 @@ async fn run_upstream(
         Arc::from(frames)
     };
 
+    let openai_chat_json = Bytes::from_static(
+        br#"{"id":"chatcmpl-bench","object":"chat.completion","created":1700000000,"model":"gpt-bench","choices":[{"index":0,"message":{"role":"assistant","content":"Hello from mock OpenAI upstream!"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":20,"total_tokens":32}}"#,
+    );
+    let anthropic_msg_json = Bytes::from_static(
+        br#"{"id":"msg_bench","type":"message","role":"assistant","model":"claude-bench","content":[{"type":"text","text":"Hello from mock Anthropic upstream!"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":20}}"#,
+    );
+
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             break;
@@ -226,26 +243,56 @@ async fn run_upstream(
         let payload = fixed_payload.clone();
         let raw_frames = Arc::clone(&raw_sse_frames);
         let ant_frames = Arc::clone(&anthropic_sse_frames);
+        let openai_json = openai_chat_json.clone();
+        let ant_json = anthropic_msg_json.clone();
 
         tokio::spawn(async move {
             let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
                 let payload = payload.clone();
                 let raw_frames = Arc::clone(&raw_frames);
                 let ant_frames = Arc::clone(&ant_frames);
+                let openai_json = openai_json.clone();
+                let ant_json = ant_json.clone();
                 async move {
                     let path = req.uri().path().to_owned();
                     let resp: Response<BoxBody> = match path.as_str() {
-                        "/sse" | "/v1/chat/completions" => {
+                        "/sse" => {
                             if !req.body().is_end_stream() {
                                 let _ = req.into_body().collect().await;
                             }
                             stream_sse_response(raw_frames, interval)
                         }
-                        "/v1/messages" => {
-                            if !req.body().is_end_stream() {
-                                let _ = req.into_body().collect().await;
+                        "/v1/chat/completions" | "/chat/completions" => {
+                            let body_bytes = if !req.body().is_end_stream() {
+                                req.into_body()
+                                    .collect()
+                                    .await
+                                    .map(|c| c.to_bytes())
+                                    .unwrap_or_default()
+                            } else {
+                                Bytes::new()
+                            };
+                            if wants_stream(&body_bytes) {
+                                stream_sse_response(raw_frames, interval)
+                            } else {
+                                json_response(openai_json)
                             }
-                            stream_sse_response(ant_frames, interval)
+                        }
+                        "/v1/messages" | "/messages" => {
+                            let body_bytes = if !req.body().is_end_stream() {
+                                req.into_body()
+                                    .collect()
+                                    .await
+                                    .map(|c| c.to_bytes())
+                                    .unwrap_or_default()
+                            } else {
+                                Bytes::new()
+                            };
+                            if wants_stream(&body_bytes) {
+                                stream_sse_response(ant_frames, interval)
+                            } else {
+                                json_response(ant_json)
+                            }
                         }
                         _ => Response::builder()
                             .status(StatusCode::OK)
@@ -263,6 +310,20 @@ async fn run_upstream(
             let _ = builder.serve_connection(TokioIo::new(stream), svc).await;
         });
     }
+}
+
+fn wants_stream(body: &[u8]) -> bool {
+    body.windows(13).any(|w| w == b"\"stream\":true")
+        || body.windows(14).any(|w| w == b"\"stream\": true")
+}
+
+fn json_response(body: Bytes) -> Response<BoxBody> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONTENT_LENGTH, body.len().to_string())
+        .body(Full::new(body).boxed())
+        .unwrap()
 }
 
 fn stream_sse_response(frames: Arc<[Bytes]>, interval: Duration) -> Response<BoxBody> {
@@ -305,17 +366,33 @@ fn parse_headers(raw: &[String]) -> Vec<(HeaderName, HeaderValue)> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_http_bench(
     url: &str,
     concurrency: usize,
     duration: Duration,
     warmup: Duration,
+    method_str: &str,
+    body: Option<String>,
     raw_headers: &[String],
     http2: bool,
     json_out: bool,
 ) {
     let uri: Uri = url.parse().expect("invalid target URL");
-    let headers = Arc::new(parse_headers(raw_headers));
+    let method = Method::from_bytes(method_str.as_bytes()).expect("invalid HTTP method");
+    let body_bytes = Bytes::from(body.unwrap_or_default());
+    let mut parsed_headers = parse_headers(raw_headers);
+    if !body_bytes.is_empty()
+        && !parsed_headers
+            .iter()
+            .any(|(k, _)| *k == header::CONTENT_TYPE)
+    {
+        parsed_headers.push((
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        ));
+    }
+    let headers = Arc::new(parsed_headers);
     let host = uri.host().expect("URL missing host").to_owned();
     let port = uri.port_u16().unwrap_or(80);
     let authority = uri
@@ -351,6 +428,8 @@ async fn run_http_bench(
     for _ in 0..concurrency {
         let h2_client = h2_client.clone();
         let uri = uri.clone();
+        let method = method.clone();
+        let body_bytes = body_bytes.clone();
         let host = host.clone();
         let authority = authority.clone();
         let path_and_query = path_and_query.clone();
@@ -368,11 +447,11 @@ async fn run_http_bench(
             while !stop.load(Ordering::Relaxed) {
                 let t0 = Instant::now();
                 let res = if let Some(client) = &h2_client {
-                    let mut builder = Request::builder().method(Method::GET).uri(uri.clone());
+                    let mut builder = Request::builder().method(method.clone()).uri(uri.clone());
                     for (k, v) in headers.iter() {
                         builder = builder.header(k, v);
                     }
-                    let req = builder.body(Full::new(Bytes::new())).unwrap();
+                    let req = builder.body(Full::new(body_bytes.clone())).unwrap();
                     client.request(req).await.map_err(|_| ())
                 } else {
                     // Dedicated per-worker keep-alive H1 connection (zero client-pool lock contention).
@@ -411,13 +490,13 @@ async fn run_http_bench(
                     }
 
                     let mut builder = Request::builder()
-                        .method(Method::GET)
+                        .method(method.clone())
                         .uri(path_and_query.clone())
                         .header(header::HOST, &authority);
                     for (k, v) in headers.iter() {
                         builder = builder.header(k, v);
                     }
-                    let req = builder.body(Full::new(Bytes::new())).unwrap();
+                    let req = builder.body(Full::new(body_bytes.clone())).unwrap();
 
                     let sender = h1_sender.as_mut().unwrap();
                     if sender.ready().await.is_err() {

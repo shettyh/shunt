@@ -160,6 +160,31 @@ run_case \
     -H "Authorization: Bearer bench-secret-token"
 
 run_case \
+    "ai_json_translate" \
+    "Shunt-AI Non-Streaming Translate (\`Anthropic <-> OpenAI\` + usage)" \
+    "$CONFIG_DIR/shunt-ai-bench.toml" \
+    http \
+    --url "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" \
+    --method POST \
+    --body '{"model":"claude-bench","stream":false,"messages":[{"role":"user","content":"hi"}]}' \
+    -c "$HTTP_CONCURRENCY" \
+    -d "$DURATION_SECS" \
+    --warmup-secs "$WARMUP_SECS"
+
+run_case \
+    "ai_governed_json" \
+    "Shunt-AI 8-Plugin Governed Chain (\`vkeys\` + \`router\` + \`rpm/tpm\` + \`budget\` + \`adapter\` + \`failover\` + \`usage\`)" \
+    "$CONFIG_DIR/shunt-ai-governed.toml" \
+    http \
+    --url "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" \
+    --method POST \
+    --body '{"model":"gpt-bench","stream":false,"messages":[{"role":"user","content":"hi"}]}' \
+    -c "$HTTP_CONCURRENCY" \
+    -d "$DURATION_SECS" \
+    --warmup-secs "$WARMUP_SECS" \
+    -H "Authorization: Bearer sk-bench-virtual-key"
+
+run_case \
     "sse_passthrough" \
     "Shunt SSE Passthrough" \
     "$CONFIG_DIR/shunt-sse.toml" \

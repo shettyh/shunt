@@ -1,0 +1,24 @@
+# Equivalent LiteLLM Proxy config for head-to-head benchmarking against Shunt
+# Runs in fastest stateless/no-DB mode against local mock upstream (127.0.0.1:18080).
+model_list:
+  - model_name: gpt-bench
+    litellm_params:
+      model: openai/gpt-bench
+      api_base: http://127.0.0.1:18080/v1
+      api_key: sk-openai-bench
+  - model_name: claude-bench
+    litellm_params:
+      model: anthropic/claude-bench
+      api_base: http://127.0.0.1:18080
+      api_key: sk-ant-bench
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+  turn_off_message_logging: true
+  telemetry: false
+
+general_settings:
+  dangerously_permit_weak_or_unset_master_key: true
+  disable_spend_logs: true
+  disable_error_logs: true
