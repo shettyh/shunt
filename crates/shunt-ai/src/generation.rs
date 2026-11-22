@@ -65,13 +65,20 @@ pub struct GenerationStoreSnapshot {
     pub capacity: usize,
 }
 
+#[derive(Debug)]
+struct StoredGeneration {
+    record: Arc<AiGenerationRecord>,
+    generation: u64,
+}
+
 #[derive(Debug, Default)]
 struct StoreInner {
-    records: HashMap<String, Arc<AiGenerationRecord>>,
+    records: HashMap<String, StoredGeneration>,
     /// Alias map (`gen-<request_id>` -> canonical `id`) so lookups work by either ID.
     aliases: HashMap<String, String>,
-    /// FIFO insertion order of canonical IDs for O(1) bounded ring eviction.
-    order: VecDeque<String>,
+    /// FIFO insertion order of `(canonical_id, generation)` for O(1) bounded ring eviction.
+    order: VecDeque<(String, u64)>,
+    next_gen: u64,
     capacity: usize,
 }
 
@@ -93,7 +100,8 @@ impl AiGenerationStore {
             return;
         }
         let mut guard = self.inner.write().expect("AiGenerationStore poisoned");
-        guard.capacity = capacity;
+        let inner = &mut *guard;
+        inner.capacity = capacity;
 
         let canonical_id = record.id.clone();
         let alias = record
@@ -103,42 +111,66 @@ impl AiGenerationStore {
             .cloned();
 
         // Remove any prior alias pointing to an overwritten entry with the same canonical ID.
-        if let Some(prev) = guard.records.remove(&canonical_id)
-            && let Some(prev_alias) = &prev.gateway_id
+        if let Some(prev) = inner.records.remove(&canonical_id)
+            && let Some(prev_alias) = &prev.record.gateway_id
             && prev_alias != &canonical_id
         {
-            guard.aliases.remove(prev_alias);
+            inner.aliases.remove(prev_alias);
         }
 
-        while guard.records.len() >= capacity {
-            let Some(evicted_id) = guard.order.pop_front() else {
-                guard.records.clear();
-                guard.aliases.clear();
+        while inner.records.len() >= capacity {
+            let Some((evicted_id, evicted_gen)) = inner.order.pop_front() else {
+                inner.records.clear();
+                inner.aliases.clear();
                 break;
             };
-            if let Some(evicted) = guard.records.remove(&evicted_id)
-                && let Some(ev_alias) = &evicted.gateway_id
+            let is_live = inner
+                .records
+                .get(&evicted_id)
+                .is_some_and(|e| e.generation == evicted_gen);
+            if is_live
+                && let Some(evicted) = inner.records.remove(&evicted_id)
+                && let Some(ev_alias) = &evicted.record.gateway_id
                 && ev_alias != &evicted_id
             {
-                guard.aliases.remove(ev_alias);
+                inner.aliases.remove(ev_alias);
             }
         }
 
+        inner.next_gen = inner.next_gen.wrapping_add(1);
+        let generation = inner.next_gen;
+
         if let Some(a) = alias {
-            guard.aliases.insert(a, canonical_id.clone());
+            inner.aliases.insert(a, canonical_id.clone());
         }
-        guard.records.insert(canonical_id.clone(), Arc::new(record));
-        guard.order.push_back(canonical_id);
+        inner.records.insert(
+            canonical_id.clone(),
+            StoredGeneration {
+                record: Arc::new(record),
+                generation,
+            },
+        );
+        inner.order.push_back((canonical_id, generation));
+
+        // Compact stale overwritten entries so repeated upstream IDs cannot grow `order` unboundedly.
+        if inner.order.len() > inner.records.len().saturating_mul(2).max(64) {
+            let records = &inner.records;
+            inner.order.retain(|(id, seq)| {
+                records
+                    .get(id)
+                    .is_some_and(|entry| entry.generation == *seq)
+            });
+        }
     }
 
     /// Looks up a generation record by either its canonical ID or its `x-shunt-generation-id` alias.
     pub fn get(&self, id: &str) -> Option<Arc<AiGenerationRecord>> {
         let guard = self.inner.read().expect("AiGenerationStore poisoned");
-        if let Some(rec) = guard.records.get(id) {
-            return Some(Arc::clone(rec));
+        if let Some(entry) = guard.records.get(id) {
+            return Some(Arc::clone(&entry.record));
         }
         if let Some(canonical) = guard.aliases.get(id) {
-            return guard.records.get(canonical).cloned();
+            return guard.records.get(canonical).map(|e| Arc::clone(&e.record));
         }
         None
     }
@@ -199,5 +231,41 @@ mod tests {
         assert_eq!(store.get("chatcmpl-2").unwrap().id, "chatcmpl-2");
         assert_eq!(store.get("gen-3").unwrap().id, "chatcmpl-3");
         assert_eq!(store.snapshot().stored_records, 2);
+    }
+
+    #[test]
+    fn generation_store_bounds_order_queue_and_preserves_overwritten_records() {
+        let store = AiGenerationStore::new();
+        for i in 0..500u64 {
+            let gw = format!("gen-{i}");
+            store.insert(sample_record("chatcmpl-dup", Some(&gw), Some("k1")), 4);
+        }
+
+        {
+            let guard = store.inner.read().unwrap();
+            assert_eq!(guard.records.len(), 1);
+            assert_eq!(guard.aliases.len(), 1);
+            assert!(
+                guard.order.len() <= 64,
+                "order queue should stay bounded on repeated IDs, got {}",
+                guard.order.len()
+            );
+        }
+        assert!(store.get("gen-0").is_none());
+        assert_eq!(store.get("gen-499").unwrap().id, "chatcmpl-dup");
+
+        // Overwriting an existing ID refreshes its FIFO age so stale queue entries cannot evict it.
+        let store2 = AiGenerationStore::new();
+        store2.insert(sample_record("id-a", Some("gen-a1"), Some("k1")), 2);
+        store2.insert(sample_record("id-b", Some("gen-b1"), Some("k1")), 2);
+        store2.insert(sample_record("id-a", Some("gen-a2"), Some("k1")), 2);
+        // Inserting id-c must evict id-b (oldest live entry), NOT id-a.
+        store2.insert(sample_record("id-c", Some("gen-c1"), Some("k1")), 2);
+        assert!(store2.get("id-b").is_none());
+        assert_eq!(
+            store2.get("id-a").unwrap().gateway_id.as_deref(),
+            Some("gen-a2")
+        );
+        assert_eq!(store2.get("id-c").unwrap().id, "id-c");
     }
 }

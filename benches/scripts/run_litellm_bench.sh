@@ -253,7 +253,60 @@ run_suite_for_gateway \
     "env RUST_LOG=error $SHUNT_BIN run --no-watch -c $CONFIG_DIR/shunt-ai-governed.toml" \
     "Authorization: Bearer sk-bench-virtual-key" 1
 
-# 3. LiteLLM Proxy (if installed)
+# 3. Shunt (inline AI Guardrails: PII + secrets + prompt_injection + regex + keywords, both directions)
+run_suite_for_gateway \
+    "Shunt AI Guardrailed (req-id + router + ai-guardrails PII/secrets/injection + adapter + usage)" \
+    "env RUST_LOG=error $SHUNT_BIN run --no-watch -c $CONFIG_DIR/shunt-ai-guardrails.toml" \
+    "" 1
+
+# 4. Shunt (Exact-Match + Streaming AI Cache Hit Path)
+echo ""
+echo "===================================================================="
+echo "Gateway: Shunt AI Cached (8-plugin + ai-cache exact & streaming replay)"
+echo "===================================================================="
+start_gw "env RUST_LOG=error $SHUNT_BIN run --no-watch -c $CONFIG_DIR/shunt-ai-cache.toml"
+
+echo ""
+echo "--- [W-AI-4a] Exact-Match JSON Cache Hit (c=$HTTP_CONCURRENCY, d=${DURATION_SECS}s) ---"
+"$BENCH_BIN" http \
+    --url "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" \
+    --method POST \
+    --body '{"model":"gpt-bench","temperature":0,"stream":false,"messages":[{"role":"user","content":"hi"}]}' \
+    -c "$HTTP_CONCURRENCY" -d "$DURATION_SECS" --warmup-secs "$WARMUP_SECS" \
+    -H "Authorization: Bearer sk-bench-virtual-key"
+echo "  Post-W4a RSS: $(tree_rss_mb "$GW_PID")"
+
+# Prime the streaming SSE cache entry with a single request before measuring concurrent replay.
+"$BENCH_BIN" sse \
+    --url "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" \
+    --method POST \
+    --body '{"model":"claude-bench","temperature":0,"stream":true,"messages":[{"role":"user","content":"hi"}]}' \
+    -c 1 --waves 1 \
+    -H "Authorization: Bearer sk-bench-virtual-key" >/dev/null
+
+echo ""
+echo "--- [W-AI-4b] Streaming SSE Cache Replay Hit (c=$SSE_MED_CONCURRENCY) ---"
+"$BENCH_BIN" sse \
+    --url "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" \
+    --method POST \
+    --body '{"model":"claude-bench","temperature":0,"stream":true,"messages":[{"role":"user","content":"hi"}]}' \
+    -c "$SSE_MED_CONCURRENCY" --waves 1 \
+    -H "Authorization: Bearer sk-bench-virtual-key"
+echo "  Post-W4b RSS: $(tree_rss_mb "$GW_PID")"
+
+echo ""
+echo "--- [W-AI-4c] High-Concurrency Streaming SSE Cache Replay Hit (c=$SSE_HIGH_CONCURRENCY) ---"
+"$BENCH_BIN" sse \
+    --url "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" \
+    --method POST \
+    --body '{"model":"claude-bench","temperature":0,"stream":true,"messages":[{"role":"user","content":"hi"}]}' \
+    -c "$SSE_HIGH_CONCURRENCY" --waves 1 \
+    -H "Authorization: Bearer sk-bench-virtual-key"
+echo "  Post-W4c RSS: $(tree_rss_mb "$GW_PID")"
+
+stop_gw
+
+# 5. LiteLLM Proxy (if installed)
 if [[ -n "$LITELLM_BIN" ]]; then
     run_suite_for_gateway \
         "LiteLLM Proxy (1 worker, no-DB, stateless)" \

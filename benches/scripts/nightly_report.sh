@@ -159,6 +159,32 @@ run_case \
     --warmup-secs "$WARMUP_SECS" \
     -H "Authorization: Bearer bench-secret-token"
 
+# Deterministic HS256 JWT (iss=https://bench.shunt.dev, aud=shunt-api, scope="read write", exp=2100)
+BENCH_JWT="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImJlbmNoLWhzMSJ9.eyJpc3MiOiJodHRwczovL2JlbmNoLnNodW50LmRldiIsImF1ZCI6InNodW50LWFwaSIsInN1YiI6ImJlbmNoLXVzZXIiLCJzY29wZSI6InJlYWQgd3JpdGUiLCJvcmciOnsiaWQiOiJhY21lIn0sImV4cCI6NDEwMjQ0NDgwMH0.oNwB3NTg0O9xnqR3IhQ9CqJfbgpiN597a1vthqYA7G0"
+
+run_case \
+    "security_jwt_http" \
+    "Shunt JWT & Security Chain (\`ip-filter\` + \`jwt-auth\` HS256 + \`body-limit\`)" \
+    "$CONFIG_DIR/shunt-security-compression.toml" \
+    http \
+    --url "http://127.0.0.1:$GATEWAY_PORT/ping" \
+    -c "$HTTP_CONCURRENCY" \
+    -d "$DURATION_SECS" \
+    --warmup-secs "$WARMUP_SECS" \
+    -H "Authorization: Bearer $BENCH_JWT"
+
+run_case \
+    "security_jwt_zstd_http" \
+    "Shunt JWT + Security + Streaming \`zstd\` (~4KB JSON)" \
+    "$CONFIG_DIR/shunt-security-compression.toml" \
+    http \
+    --url "http://127.0.0.1:$GATEWAY_PORT/json" \
+    -c "$HTTP_CONCURRENCY" \
+    -d "$DURATION_SECS" \
+    --warmup-secs "$WARMUP_SECS" \
+    -H "Authorization: Bearer $BENCH_JWT" \
+    -H "Accept-Encoding: zstd"
+
 run_case \
     "ai_json_translate" \
     "Shunt-AI Non-Streaming Translate (\`Anthropic <-> OpenAI\` + usage)" \
@@ -185,6 +211,31 @@ run_case \
     -H "Authorization: Bearer sk-bench-virtual-key"
 
 run_case \
+    "ai_guardrails_json" \
+    "Shunt-AI Inline Guardrails (\`pii\` + \`secrets\` + \`prompt_injection\` + regex/keywords)" \
+    "$CONFIG_DIR/shunt-ai-guardrails.toml" \
+    http \
+    --url "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" \
+    --method POST \
+    --body '{"model":"gpt-bench","stream":false,"messages":[{"role":"user","content":"hi"}]}' \
+    -c "$HTTP_CONCURRENCY" \
+    -d "$DURATION_SECS" \
+    --warmup-secs "$WARMUP_SECS"
+
+run_case \
+    "ai_cache_hit_json" \
+    "Shunt-AI Exact-Match Cache Hit (\`ai-cache\`, zero upstream I/O)" \
+    "$CONFIG_DIR/shunt-ai-cache.toml" \
+    http \
+    --url "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" \
+    --method POST \
+    --body '{"model":"gpt-bench","temperature":0,"stream":false,"messages":[{"role":"user","content":"hi"}]}' \
+    -c "$HTTP_CONCURRENCY" \
+    -d "$DURATION_SECS" \
+    --warmup-secs "$WARMUP_SECS" \
+    -H "Authorization: Bearer sk-bench-virtual-key"
+
+run_case \
     "sse_passthrough" \
     "Shunt SSE Passthrough" \
     "$CONFIG_DIR/shunt-sse.toml" \
@@ -204,6 +255,45 @@ run_case \
     --waves 1 \
     --method POST \
     --body '{"model":"claude-bench","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+
+run_case \
+    "sse_ai_guardrails" \
+    "Shunt-AI Guardrailed SSE (\`Anthropic -> OpenAI\` + streaming holdback PII/secrets scan)" \
+    "$CONFIG_DIR/shunt-ai-guardrails.toml" \
+    sse \
+    --url "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" \
+    -c "$SSE_CONCURRENCY" \
+    --waves 1 \
+    --method POST \
+    --body '{"model":"claude-bench","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+
+# Primed streaming SSE cache replay workload.
+echo "==> Running [sse_ai_cache_hit] Shunt-AI Streaming SSE Cache Replay Hit..." >&2
+wait_for_port_free "$GATEWAY_PORT"
+: >"$GW_LOG"
+RUST_LOG=error "$SHUNT_BIN" run --no-watch -c "$CONFIG_DIR/shunt-ai-cache.toml" >"$GW_LOG" 2>&1 &
+GW_PID=$!
+wait_for_port_and_pid "$GATEWAY_PORT" "$GW_PID" "$GW_LOG"
+"$BENCH_BIN" sse \
+    --url "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" \
+    -c 1 --waves 1 --method POST \
+    --body '{"model":"claude-bench","temperature":0,"stream":true,"messages":[{"role":"user","content":"hi"}]}' \
+    -H "Authorization: Bearer sk-bench-virtual-key" >/dev/null
+raw_json="$("$BENCH_BIN" sse \
+    --url "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" \
+    -c "$SSE_CONCURRENCY" --waves 1 --method POST \
+    --body '{"model":"claude-bench","temperature":0,"stream":true,"messages":[{"role":"user","content":"hi"}]}' \
+    -H "Authorization: Bearer sk-bench-virtual-key" --json)"
+rss="$(rss_mb "$GW_PID")"
+stop_gw
+python3 -c '
+import json, sys
+row = json.loads(sys.argv[1])
+row["id"] = sys.argv[2]
+row["label"] = sys.argv[3]
+row["rss_mb"] = float(sys.argv[4])
+print(json.dumps(row))
+' "$raw_json" "sse_ai_cache_hit" "Shunt-AI Streaming SSE Cache Replay Hit (\`ai-cache\`, zero upstream I/O)" "$rss" >>"$RESULTS_JSONL"
 
 # Collect host / runner environment metadata.
 RUN_UTC="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"

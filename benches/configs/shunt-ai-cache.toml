@@ -1,0 +1,109 @@
+# AI Benchmark: Exact-Match + Streaming AI Cache Chain (RFC 0011 + RFC 0016)
+# request-id + ai-virtual-keys + ai-model-router + ai-cache (exact + streaming + singleflight)
+# + ai-token-rate-limit + ai-budget + ai-provider-adapter + ai-usage-tracker
+[server]
+listen = "127.0.0.1:18081"
+drain_timeout_ms = 10000
+
+[admin]
+enabled = false
+
+[state]
+backend = "memory"
+
+[[upstreams]]
+name = "mock_ai"
+endpoints = ["http://127.0.0.1:18080"]
+connect_timeout_ms = 5000
+pool_max_idle_per_host = 2048
+
+[[routes]]
+id = "ai_cache_bench"
+path_prefix = "/v1"
+upstream = "mock_ai"
+max_body_bytes = 2097152
+max_attempts = 1
+response_headers_timeout_ms = 30000
+idle_chunk_timeout_ms = 30000
+allow_websockets = false
+
+[[routes.plugins]]
+name = "request-id"
+
+[[routes.plugins]]
+name = "ai-virtual-keys"
+id = "vkeys"
+[routes.plugins.config]
+strip_key_header = true
+accept_bearer = true
+accept_x_api_key = true
+
+[[routes.plugins.config.keys]]
+id = "bench-key"
+api_key = "sk-bench-virtual-key"
+team = "bench"
+allowed_models = ["gpt-bench", "claude-bench"]
+rpm = 10000000
+tpm = 1000000000
+budget_usd = 1000000.0
+budget_window = "daily"
+
+[[routes.plugins]]
+name = "ai-model-router"
+id = "router"
+[routes.plugins.config.models]
+gpt-bench = [{ provider = "openai", upstream = "mock_ai", model = "gpt-bench" }]
+claude-bench = [{ provider = "anthropic", upstream = "mock_ai", model = "claude-bench" }]
+
+[[routes.plugins]]
+name = "ai-cache"
+id = "cache"
+[routes.plugins.config]
+ttl_secs = 600
+max_entries = 1024
+max_total_bytes = 33554432
+max_entry_bytes = 524288
+scope = "virtual_key"
+require_deterministic = true
+cache_streaming = true
+singleflight = true
+singleflight_timeout_ms = 30000
+respect_cache_control = true
+emit_headers = true
+
+[[routes.plugins]]
+name = "ai-token-rate-limit"
+id = "token_rl"
+[routes.plugins.config]
+rpm = 10000000
+tpm = 1000000000
+window_secs = 60
+key_by = "virtual_key"
+reconcile_usage = true
+
+[[routes.plugins]]
+name = "ai-budget"
+id = "budget"
+[routes.plugins.config]
+scope = "virtual_key"
+default_limit_usd = 1000000.0
+window = "daily"
+mode = "hard"
+use_builtin_pricing = false
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+id = "adapter"
+[routes.plugins.config.providers.openai]
+dialect = "openai_compatible"
+auth = { type = "bearer", api_key = "sk-openai-bench" }
+
+[routes.plugins.config.providers.anthropic]
+dialect = "anthropic"
+auth = { type = "header", header = "x-api-key", api_key = "sk-ant-bench" }
+
+[[routes.plugins]]
+name = "ai-usage-tracker"
+id = "usage"
+[routes.plugins.config]
+log_usage = false

@@ -26,24 +26,27 @@ It pairs a tiny, zero-allocation-fast-path HTTP data plane (`shunt-core`) with a
 
 ## Benchmarks
 
-Reproducible head-to-head results on Apple Silicon (local loopback, `c=64` HTTP / `c=1,000` SSE) comparing **Shunt (`--release`)**, **Envoy 1.40.2**, and **Caddy 2.11.9** against the same `shunt-bench` upstream:
+Reproducible head-to-head results on Apple M5 Pro (local loopback, `c=64` HTTP / `c=1,000` SSE) comparing **Shunt (`--release`, 14.2 MiB binary)**, **Envoy 1.40.2**, and **Caddy 2.11.9** against the same `shunt-bench` upstream:
 
 | Workload | Shunt | Envoy 1.40.2 | Caddy 2.11.9 |
 | --- | ---: | ---: | ---: |
-| **Raw HTTP/1.1 Passthrough** (`c=64`, 0 plugins) | **89,240 req/s** · p99 **922 µs** · 20.1 MB RSS | 75,515 req/s · p99 1,010 µs · 57.5 MB RSS | 69,264 req/s · p99 2,089 µs · 71.4 MB RSS |
-| **3-Plugin Chain** (`c=64`, req-id + auth + rate-limit) | **87,714 req/s** · p99 **956 µs** · 21.0 MB RSS | 76,431 req/s · p99 1,018 µs · 55.6 MB RSS | 45,557 req/s · p99 12,083 µs · 71.6 MB RSS |
-| **1,000 Concurrent SSE Streams** (20 chunks @ 25ms) | **1,000/0** · 30,456 chunks/s · **83.3 MB RSS** | 1,000/0 · 30,749 chunks/s · 92.2 MB RSS | 1,000/0 · 30,316 chunks/s · 159.2 MB RSS |
-| **Shunt-AI SSE** *(live Anthropic → OpenAI translate + usage)* | **1,000/0** · 28,990 chunks/s · **93.8 MB RSS** | — | — |
+| **Raw HTTP/1.1 Passthrough** (`c=64`, 0 plugins) | **88,649 req/s** · p99 **930 µs** · 22.4 MB RSS | 80,314 req/s · p99 1,210 µs · 53.7 MB RSS | 68,802 req/s · p99 2,107 µs · 72.1 MB RSS |
+| **3-Plugin Chain** (`c=64`, req-id + auth + rate-limit) | **87,820 req/s** · p99 **946 µs** · 23.8 MB RSS | 74,943 req/s · p99 1,024 µs · 55.6 MB RSS | 59,076 req/s · p99 6,744 µs · 72.3 MB RSS |
+| **JWT & Security Chain** (`c=64`, ip-filter + jwt-auth HS256 + body-limit) | **73,418 req/s** · p99 **1.12 ms** · 24.6 MB RSS | — | — |
+| **JWT + Security + Streaming `zstd`** (`c=64`, ~4.3 KB JSON → 321 B) | **70,187 req/s** · p99 **1.17 ms** · 33.9 MB RSS | — | — |
+| **1,000 Concurrent SSE Streams** (20 chunks @ 25ms) | **1,000/0** · **32,822 ch/s** · **87.6 MB RSS** | 1,000/0 · 32,696 ch/s · 92.2 MB RSS | 1,000/0 · 26,107 ch/s · 157.4 MB RSS |
+| **Shunt-AI SSE** *(live Anthropic → OpenAI translate + usage)* | **1,000/0** · **32,260 ch/s** · **100.1 MB RSS** | — | — |
 
 Head-to-head AI Gateway benchmark (`./benches/scripts/run_litellm_bench.sh`) on **Apple M5 Pro** against **LiteLLM Proxy 1.110.2** (stateless no-DB mode, both 1-worker default and 4-worker `--num_workers 4`, total process-tree RSS):
 
-| AI Workload (`POST /v1/chat/completions`) | Shunt AI *(8-plugin governed)* | LiteLLM 1.110.2 *(4 workers)* | LiteLLM 1.110.2 *(1 worker)* |
-| --- | ---: | ---: | ---: |
-| **Cold Start & Idle RSS** | **33 ms** · **10.5 MB RSS** | 4,151 ms · 1,852 MB RSS | 2,326 ms · 363 MB RSS |
-| **OpenAI Passthrough** (`c=64`, JSON) | **71,185 req/s** · p99 **1.15 ms** · **26 MB** | 987 req/s · p99 101.7 ms · 1,921 MB | 361 req/s · p99 186.5 ms · 385 MB |
-| **Anthropic ↔ OpenAI Translate** (`c=64`, JSON) | **70,551 req/s** · p99 **1.17 ms** · **27 MB** | 985 req/s · p99 72.6 ms · 2,051 MB | 340 req/s · p99 223.7 ms · 416 MB |
-| **200 Concurrent SSE Streams** *(Anthropic → OpenAI)* | **200/0** · TTFC p50 **6.3 ms** · **38 MB** | 200/0 · TTFC p50 233.2 ms · 2,081 MB | 200/0 · TTFC p50 535.9 ms · 439 MB |
-| **1,000 Concurrent SSE Streams** *(Anthropic → OpenAI)* | **1,000/0** · 0.82s · **103 MB** | 1,000/0 · 2.74s · 2,209 MB | 1,000/0 · 7.95s · 538 MB |
+| AI Workload (`POST /v1/chat/completions`) | Shunt AI *(8-plugin governed)* | Shunt AI *(guardrails / cached)* | LiteLLM 1.110.2 *(4 workers, auth+rl)* | LiteLLM 1.110.2 *(1 worker)* |
+| --- | ---: | ---: | ---: | ---: |
+| **Cold Start & Idle RSS** | **35 ms** · **11.6 MB RSS** | **32–33 ms** · **11.7–12.9 MB** | 15,067 ms · 1,873 MB RSS | 7,360 ms · 369 MB RSS |
+| **OpenAI Passthrough** (`c=64`, JSON) | **69,537 req/s** · p99 **1.20 ms** · **28.8 MB** | Guardrailed: **69,278 req/s** · **35.9 MB** | 1,024 req/s · p99 82.5 ms · 1,945 MB | 341 req/s · p99 223.2 ms · 391 MB |
+| **Anthropic ↔ OpenAI Translate** (`c=64`, JSON) | **68,845 req/s** · p99 **1.22 ms** · **30.0 MB** | Guardrailed: **69,165 req/s** · **36.9 MB** | 832 req/s · p99 100.8 ms · 2,071 MB | 335 req/s · p99 209.0 ms · 422 MB |
+| **Exact-Match AI Cache Hit** (`c=64`, JSON, 0 upstream I/O) | — | Cached: **165,876 req/s** · p99 **0.63 ms** · **27.5 MB** | — | — |
+| **200 Concurrent SSE Streams** *(Anthropic → OpenAI)* | **200/0** · TTFC p50 **6.5 ms** · **40.9 MB** | Cached replay: **200/0** · **3.9 ms** · **0.01s** | 200/0 · TTFC p50 255.3 ms · 2,104 MB | 200/0 · TTFC p50 542.8 ms · 447 MB |
+| **1,000 Concurrent SSE Streams** *(Anthropic → OpenAI)* | **1,000/0** · **0.76s** · **107.9 MB** | Cached replay: **1,000/0** · **0.02s** · **50.6 MB** | 1,000/0 · 2.99s · 2,228 MB | 1,000/0 · 8.43s · 528 MB |
 
 See [`benches/README.md`](benches/README.md) for full methodology, configurations, and reproduction commands.
 

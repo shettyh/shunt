@@ -234,6 +234,21 @@ async fn run_upstream(
     let anthropic_msg_json = Bytes::from_static(
         br#"{"id":"msg_bench","type":"message","role":"assistant","model":"claude-bench","content":[{"type":"text","text":"Hello from mock Anthropic upstream!"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":20}}"#,
     );
+    // Realistic ~4 KB compressible JSON document for HTTP compression benchmarks (`/json`).
+    let compressible_json = {
+        let mut s = String::with_capacity(4300);
+        s.push_str("{\"object\":\"list\",\"service\":\"shunt-bench\",\"items\":[");
+        for i in 0..32 {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"id\":\"item-{i:03}\",\"status\":\"active\",\"region\":\"us-east-1\",\"tier\":\"enterprise\",\"description\":\"Reproducible JSON API response payload for streaming compression benchmarking\",\"tags\":[\"gateway\",\"rust\",\"http\",\"zstd\"]}}"
+            ));
+        }
+        s.push_str("]}");
+        Bytes::from(s)
+    };
 
     loop {
         let Ok((stream, _)) = listener.accept().await else {
@@ -245,6 +260,7 @@ async fn run_upstream(
         let ant_frames = Arc::clone(&anthropic_sse_frames);
         let openai_json = openai_chat_json.clone();
         let ant_json = anthropic_msg_json.clone();
+        let comp_json = compressible_json.clone();
 
         tokio::spawn(async move {
             let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
@@ -253,9 +269,16 @@ async fn run_upstream(
                 let ant_frames = Arc::clone(&ant_frames);
                 let openai_json = openai_json.clone();
                 let ant_json = ant_json.clone();
+                let comp_json = comp_json.clone();
                 async move {
                     let path = req.uri().path().to_owned();
                     let resp: Response<BoxBody> = match path.as_str() {
+                        "/json" => {
+                            if !req.body().is_end_stream() {
+                                let _ = req.into_body().collect().await;
+                            }
+                            json_response(comp_json)
+                        }
                         "/sse" => {
                             if !req.body().is_end_stream() {
                                 let _ = req.into_body().collect().await;
