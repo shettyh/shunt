@@ -35,6 +35,16 @@ Reproducible head-to-head results on Apple Silicon (local loopback, `c=64` HTTP 
 | **1,000 Concurrent SSE Streams** (20 chunks @ 25ms) | **1,000/0** · 30,456 chunks/s · **83.3 MB RSS** | 1,000/0 · 30,749 chunks/s · 92.2 MB RSS | 1,000/0 · 30,316 chunks/s · 159.2 MB RSS |
 | **Shunt-AI SSE** *(live Anthropic → OpenAI translate + usage)* | **1,000/0** · 28,990 chunks/s · **93.8 MB RSS** | — | — |
 
+Head-to-head AI Gateway benchmark (`./benches/scripts/run_litellm_bench.sh`) on **Apple M5 Pro** against **LiteLLM Proxy 1.110.2** (stateless no-DB mode, both 1-worker default and 4-worker `--num_workers 4`, total process-tree RSS):
+
+| AI Workload (`POST /v1/chat/completions`) | Shunt AI *(8-plugin governed)* | LiteLLM 1.110.2 *(4 workers)* | LiteLLM 1.110.2 *(1 worker)* |
+| --- | ---: | ---: | ---: |
+| **Cold Start & Idle RSS** | **33 ms** · **10.5 MB RSS** | 4,151 ms · 1,852 MB RSS | 2,326 ms · 363 MB RSS |
+| **OpenAI Passthrough** (`c=64`, JSON) | **71,185 req/s** · p99 **1.15 ms** · **26 MB** | 987 req/s · p99 101.7 ms · 1,921 MB | 361 req/s · p99 186.5 ms · 385 MB |
+| **Anthropic ↔ OpenAI Translate** (`c=64`, JSON) | **70,551 req/s** · p99 **1.17 ms** · **27 MB** | 985 req/s · p99 72.6 ms · 2,051 MB | 340 req/s · p99 223.7 ms · 416 MB |
+| **200 Concurrent SSE Streams** *(Anthropic → OpenAI)* | **200/0** · TTFC p50 **6.3 ms** · **38 MB** | 200/0 · TTFC p50 233.2 ms · 2,081 MB | 200/0 · TTFC p50 535.9 ms · 439 MB |
+| **1,000 Concurrent SSE Streams** *(Anthropic → OpenAI)* | **1,000/0** · 0.82s · **103 MB** | 1,000/0 · 2.74s · 2,209 MB | 1,000/0 · 7.95s · 538 MB |
+
 See [`benches/README.md`](benches/README.md) for full methodology, configurations, and reproduction commands.
 
 ---
