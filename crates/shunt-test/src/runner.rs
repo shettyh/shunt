@@ -180,14 +180,17 @@ fn rebind_config_to_mocks(
     config.admin.listen = "127.0.0.1:0".to_owned();
 
     if let Some(ep) = config.telemetry.endpoint.as_deref()
-        && let Some(rest) = ep.strip_prefix("mock://")
+        && let Some(rewritten) = rewrite_mock_url(ep, mock_endpoints)
     {
-        let (mock_name, suffix) = match rest.split_once('/') {
-            Some((name, path)) => (name, format!("/{path}")),
-            None => (rest, String::new()),
-        };
-        if let Some(base_url) = mock_endpoints.get(mock_name).and_then(|v| v.first()) {
-            config.telemetry.endpoint = Some(format!("{}{suffix}", base_url.trim_end_matches('/')));
+        config.telemetry.endpoint = Some(rewritten);
+    }
+
+    for plugin in &mut config.plugins {
+        rewrite_mock_urls_in_value(&mut plugin.config, mock_endpoints);
+    }
+    for route in &mut config.routes {
+        for plugin in &mut route.plugins {
+            rewrite_mock_urls_in_value(&mut plugin.config, mock_endpoints);
         }
     }
 
@@ -210,6 +213,41 @@ fn rebind_config_to_mocks(
                 })
                 .collect();
         }
+    }
+}
+
+fn rewrite_mock_url(raw: &str, mock_endpoints: &HashMap<String, Vec<String>>) -> Option<String> {
+    let rest = raw.strip_prefix("mock://")?;
+    let (mock_name, suffix) = match rest.split_once('/') {
+        Some((name, path)) => (name, format!("/{path}")),
+        None => (rest, String::new()),
+    };
+    let base_url = mock_endpoints
+        .get(mock_name)
+        .and_then(|v| v.first())
+        .map(String::as_str)
+        .unwrap_or("http://127.0.0.1:1");
+    Some(format!("{}{suffix}", base_url.trim_end_matches('/')))
+}
+
+fn rewrite_mock_urls_in_value(val: &mut Value, mock_endpoints: &HashMap<String, Vec<String>>) {
+    match val {
+        Value::String(s) => {
+            if let Some(rewritten) = rewrite_mock_url(s, mock_endpoints) {
+                *s = rewritten;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                rewrite_mock_urls_in_value(item, mock_endpoints);
+            }
+        }
+        Value::Object(map) => {
+            for v in map.values_mut() {
+                rewrite_mock_urls_in_value(v, mock_endpoints);
+            }
+        }
+        _ => {}
     }
 }
 

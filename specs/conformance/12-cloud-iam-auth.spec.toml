@@ -1,0 +1,337 @@
+[spec]
+name = "rfc0014-cloud-iam-auth"
+config_inline = """
+[server]
+listen = "127.0.0.1:0"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+[[upstreams]]
+name = "bedrock"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "vertex"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "azure_imds_up"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "azure_cc_up"
+endpoints = ["http://127.0.0.1:1"]
+
+[[routes]]
+id = "ai"
+path_prefix = "/v1/"
+upstream = "bedrock"
+
+[[routes.plugins]]
+name = "ai-model-router"
+[routes.plugins.config.models]
+bedrock-imds = [{ provider = "bedrock_imds", upstream = "bedrock", model = "anthropic.claude-3-5-sonnet-20241022-v2:0" }]
+bedrock-ecs-sts = [{ provider = "bedrock_ecs_sts", upstream = "bedrock", model = "anthropic.claude-3-5-sonnet-20241022-v2:0" }]
+vertex-meta = [{ provider = "vertex_meta", upstream = "vertex", model = "gemini-2.5-flash" }]
+azure-imds = [{ provider = "azure_imds", upstream = "azure_imds_up", model = "gpt-4o" }]
+azure-cc = [{ provider = "azure_cc", upstream = "azure_cc_up", model = "gpt-4o" }]
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+[routes.plugins.config.providers.bedrock_imds]
+dialect = "bedrock"
+region = "us-east-1"
+[routes.plugins.config.providers.bedrock_imds.auth]
+type = "aws_iam"
+mode = "imds"
+imds_endpoint = "mock://aws_imds"
+refresh_margin_secs = 15
+max_cache_ttl_secs = 60
+
+[routes.plugins.config.providers.bedrock_ecs_sts]
+dialect = "bedrock"
+region = "us-west-2"
+[routes.plugins.config.providers.bedrock_ecs_sts.auth]
+type = "aws_iam"
+mode = "ecs"
+ecs_credentials_uri = "mock://aws_ecs/v2/credentials/task-42"
+ecs_auth_token = "env:TEST_ECS_AUTH_TOKEN"
+role_arn = "arn:aws:iam::111122223333:role/cross-account-bedrock"
+external_id = "ext-99"
+sts_endpoint = "mock://aws_sts"
+refresh_margin_secs = 15
+max_cache_ttl_secs = 60
+
+[routes.plugins.config.providers.vertex_meta]
+dialect = "gemini"
+vertex_project = "demo-proj"
+vertex_location = "us-central1"
+[routes.plugins.config.providers.vertex_meta.auth]
+type = "gcp_iam"
+mode = "metadata"
+metadata_endpoint = "mock://gcp_meta"
+refresh_margin_secs = 15
+
+[routes.plugins.config.providers.azure_imds]
+dialect = "azure_openai"
+[routes.plugins.config.providers.azure_imds.auth]
+type = "azure_ad"
+mode = "managed_identity"
+client_id = "uami-client-id"
+imds_endpoint = "mock://azure_imds"
+refresh_margin_secs = 15
+
+[routes.plugins.config.providers.azure_cc]
+dialect = "azure_openai"
+[routes.plugins.config.providers.azure_cc.auth]
+type = "azure_ad"
+mode = "client_credentials"
+tenant_id = "tenant-001"
+client_id = "app-001"
+client_secret = "env:TEST_AZURE_CLIENT_SECRET"
+authority_host = "mock://azure_entra"
+refresh_margin_secs = 15
+"""
+
+[env]
+TEST_ECS_AUTH_TOKEN = "ecs-secret-token-xyz"
+TEST_AZURE_CLIENT_SECRET = "azure-super-secret-value-999"
+
+# --- AWS IMDSv2 mock (2 full 3-step cycles) ---
+[[mocks]]
+name = "aws_imds_cycles"
+upstream = "aws_imds"
+sequence = [
+  { status = 200, body = "imds-v2-session-1" },
+  { status = 200, body = "shunt-ec2-bedrock-role\n" },
+  { status = 200, json = { AccessKeyId = "ASIAIMDS1", SecretAccessKey = "SECIMDS1", Token = "IMDS_TOK_1", Expiration = "2099-01-01T00:00:00Z" } },
+  { status = 200, body = "imds-v2-session-2" },
+  { status = 200, body = "shunt-ec2-bedrock-role\n" },
+  { status = 200, json = { AccessKeyId = "ASIAIMDS2", SecretAccessKey = "SECIMDS2", Token = "IMDS_TOK_2", Expiration = "2099-01-01T00:00:00Z" } }
+]
+
+# --- AWS ECS Task Role + STS AssumeRole mocks ---
+[[mocks]]
+name = "aws_ecs_ok"
+upstream = "aws_ecs"
+status = 200
+json = { AccessKeyId = "ASIAECSBASE", SecretAccessKey = "SECECSBASE", Token = "ECS_BASE_TOK", Expiration = "2099-01-01T00:00:00Z" }
+
+[[mocks]]
+name = "aws_sts_assume_ok"
+upstream = "aws_sts"
+status = 200
+headers = { "content-type" = "text/xml" }
+body = "<AssumeRoleResponse><AssumeRoleResult><Credentials><AccessKeyId>ASIAASSUMED1</AccessKeyId><SecretAccessKey>SECASSUMED1</SecretAccessKey><SessionToken>STS_ASSUMED_TOK_1</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration></Credentials></AssumeRoleResult></AssumeRoleResponse>"
+
+# --- Bedrock upstream mock ---
+[[mocks]]
+name = "bedrock_ok"
+upstream = "bedrock"
+status = 200
+json = { output = { message = { role = "assistant", content = [{ text = "bedrock-iam-ok" }] } }, stopReason = "end_turn", usage = { inputTokens = 4, outputTokens = 3 } }
+
+# --- GCP Metadata server mock ---
+[[mocks]]
+name = "gcp_meta_cycles"
+upstream = "gcp_meta"
+sequence = [
+  { status = 200, json = { access_token = "gcp-meta-tok-1", expires_in = 60, token_type = "Bearer" } },
+  { status = 200, json = { access_token = "gcp-meta-tok-2", expires_in = 60, token_type = "Bearer" } }
+]
+
+[[mocks]]
+name = "vertex_ok"
+upstream = "vertex"
+status = 200
+json = { candidates = [{ content = { role = "model", parts = [{ text = "vertex-iam-ok" }] }, finishReason = "STOP" }], usageMetadata = { promptTokenCount = 4, candidatesTokenCount = 3 } }
+
+# --- Azure IMDS + Entra ID mocks ---
+[[mocks]]
+name = "azure_imds_ok"
+upstream = "azure_imds"
+status = 200
+json = { access_token = "az-imds-tok-1", expires_in = "3599", token_type = "Bearer" }
+
+[[mocks]]
+name = "azure_imds_upstream_ok"
+upstream = "azure_imds_up"
+status = 200
+json = { id = "chatcmpl_az_imds", object = "chat.completion", model = "gpt-4o", choices = [{ index = 0, message = { role = "assistant", content = "azure-imds-ok" }, finish_reason = "stop" }], usage = { prompt_tokens = 3, completion_tokens = 3, total_tokens = 6 } }
+
+[[mocks]]
+name = "azure_entra_cycles"
+upstream = "azure_entra"
+sequence = [
+  { status = 200, json = { access_token = "az-cc-tok-revoked", expires_in = 3600, token_type = "Bearer" } },
+  { status = 200, json = { access_token = "az-cc-tok-fresh", expires_in = 3600, token_type = "Bearer" } }
+]
+
+[[mocks]]
+name = "azure_cc_401_then_200"
+upstream = "azure_cc_up"
+sequence = [
+  { status = 401, json = { error = { message = "token revoked", type = "authentication_error" } } },
+  { status = 200, json = { id = "chatcmpl_az_cc", object = "chat.completion", model = "gpt-4o", choices = [{ index = 0, message = { role = "assistant", content = "azure-cc-recovered" }, finish_reason = "stop" }], usage = { prompt_tokens = 3, completion_tokens = 3, total_tokens = 6 } } }
+]
+
+# =====================================================================
+# Case 1: AWS IMDSv2 -> Bedrock SigV4, cache hit, clock expiry refresh,
+#         and hot-reload persistence of cached credentials.
+# =====================================================================
+[[cases]]
+name = "aws_imds_v2_caches_refreshes_and_survives_reload"
+use_mocks = ["aws_imds_cycles", "bedrock_ok"]
+
+[[cases.steps]]
+name = "initial_fetch_via_imdsv2"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "bedrock-imds", messages = [{ role = "user", content = "hello" }] } }
+expect = { status = 200, json_path = { "/choices/0/message/content" = "bedrock-iam-ok" }, snapshot_redacts = ["ecs-secret-token-xyz", "azure-super-secret-value-999"], upstream_calls = [
+  { upstream = "aws_imds", count = 3, call_index = 0, method = "PUT", path = "/latest/api/token", headers = { "x-aws-ec2-metadata-token-ttl-seconds" = "21600" } },
+  { upstream = "aws_imds", count = 3, call_index = 2, method = "GET", path = "/latest/meta-data/iam/security-credentials/shunt-ec2-bedrock-role", headers = { "x-aws-ec2-metadata-token" = "imds-v2-session-1" } },
+  { upstream = "bedrock", count = 1, headers = { "x-amz-security-token" = "IMDS_TOK_1" }, headers_contains = { authorization = "Credential=ASIAIMDS1/" } }
+] }
+
+[[cases.steps]]
+name = "warm_cache_hit_no_imds_call"
+advance_clock_ms = 20000
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "bedrock-imds", messages = [{ role = "user", content = "again" }] } }
+expect = { status = 200, upstream_calls = [
+  { upstream = "aws_imds", count = 3 },
+  { upstream = "bedrock", count = 2, headers = { "x-amz-security-token" = "IMDS_TOK_1" } }
+] }
+
+[[cases.steps]]
+name = "hot_reload_preserves_cached_cloud_token"
+reload_config_inline = """
+[server]
+listen = "127.0.0.1:0"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+[[upstreams]]
+name = "bedrock"
+endpoints = ["http://127.0.0.1:1"]
+
+[[routes]]
+id = "ai"
+path_prefix = "/v1/"
+upstream = "bedrock"
+
+[[routes.plugins]]
+name = "ai-model-router"
+[routes.plugins.config.models]
+bedrock-imds = [{ provider = "bedrock_imds", upstream = "bedrock", model = "anthropic.claude-3-5-sonnet-20241022-v2:0" }]
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+[routes.plugins.config.providers.bedrock_imds]
+dialect = "bedrock"
+region = "us-east-1"
+[routes.plugins.config.providers.bedrock_imds.auth]
+type = "aws_iam"
+mode = "imds"
+imds_endpoint = "mock://aws_imds"
+refresh_margin_secs = 15
+max_cache_ttl_secs = 60
+"""
+expect_reload_ok = true
+expect_pool_reused = ["bedrock"]
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "bedrock-imds", messages = [{ role = "user", content = "post-reload" }] } }
+expect = { status = 200, upstream_calls = [
+  { upstream = "aws_imds", count = 3 },
+  { upstream = "bedrock", count = 3, headers = { "x-amz-security-token" = "IMDS_TOK_1" } }
+] }
+
+[[cases.steps]]
+name = "proactive_expiry_refreshes_imdsv2_credentials"
+advance_clock_ms = 30000
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "bedrock-imds", messages = [{ role = "user", content = "refresh" }] } }
+expect = { status = 200, upstream_calls = [
+  { upstream = "aws_imds", count = 6, call_index = 5, headers = { "x-aws-ec2-metadata-token" = "imds-v2-session-2" } },
+  { upstream = "bedrock", count = 4, headers = { "x-amz-security-token" = "IMDS_TOK_2" }, headers_contains = { authorization = "Credential=ASIAIMDS2/" } }
+] }
+
+# =====================================================================
+# Case 2: AWS ECS Task Role + SigV4-signed STS AssumeRole chaining
+# =====================================================================
+[[cases]]
+name = "aws_ecs_task_role_with_sts_assume_role_chaining"
+use_mocks = ["aws_ecs_ok", "aws_sts_assume_ok", "bedrock_ok"]
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "bedrock-ecs-sts", messages = [{ role = "user", content = "hello ecs" }] } }
+expect = { status = 200, json_path = { "/choices/0/message/content" = "bedrock-iam-ok" }, upstream_calls = [
+  { upstream = "aws_ecs", count = 1, method = "GET", path = "/v2/credentials/task-42", headers = { authorization = "ecs-secret-token-xyz" } },
+  { upstream = "aws_sts", count = 1, method = "POST", headers = { "x-amz-security-token" = "ECS_BASE_TOK" }, headers_contains = { authorization = "Credential=ASIAECSBASE/" }, body_contains = "Action=AssumeRole&Version=2011-06-15&RoleArn=arn%3Aaws%3Aiam%3A%3A111122223333%3Arole%2Fcross-account-bedrock" },
+  { upstream = "bedrock", count = 1, headers = { "x-amz-security-token" = "STS_ASSUMED_TOK_1" }, headers_contains = { authorization = "Credential=ASIAASSUMED1/" } }
+] }
+
+# =====================================================================
+# Case 3: GCP Metadata Server / GKE Workload Identity -> Vertex AI
+# =====================================================================
+[[cases]]
+name = "gcp_metadata_server_caches_and_refreshes_vertex_bearer"
+use_mocks = ["gcp_meta_cycles", "vertex_ok"]
+
+[[cases.steps]]
+name = "cold_fetch_gcp_metadata"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "vertex-meta", messages = [{ role = "user", content = "hi gcp" }] } }
+expect = { status = 200, json_path = { "/choices/0/message/content" = "vertex-iam-ok" }, upstream_calls = [
+  { upstream = "gcp_meta", count = 1, method = "GET", headers = { "metadata-flavor" = "Google" } },
+  { upstream = "vertex", count = 1, headers = { authorization = "Bearer gcp-meta-tok-1" } }
+] }
+
+[[cases.steps]]
+name = "warm_cache_hit_gcp_metadata"
+advance_clock_ms = 25000
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "vertex-meta", messages = [{ role = "user", content = "hi gcp 2" }] } }
+expect = { status = 200, upstream_calls = [
+  { upstream = "gcp_meta", count = 1 },
+  { upstream = "vertex", count = 2, headers = { authorization = "Bearer gcp-meta-tok-1" } }
+] }
+
+[[cases.steps]]
+name = "expiry_refresh_gcp_metadata"
+advance_clock_ms = 25000
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "vertex-meta", messages = [{ role = "user", content = "hi gcp 3" }] } }
+expect = { status = 200, upstream_calls = [
+  { upstream = "gcp_meta", count = 2 },
+  { upstream = "vertex", count = 3, headers = { authorization = "Bearer gcp-meta-tok-2" } }
+] }
+
+# =====================================================================
+# Case 4: Azure Managed Identity (IMDS) with stringified expires_in
+# =====================================================================
+[[cases]]
+name = "azure_managed_identity_imds_bearer"
+use_mocks = ["azure_imds_ok", "azure_imds_upstream_ok"]
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "azure-imds", messages = [{ role = "user", content = "hi azure imds" }] } }
+expect = { status = 200, json_path = { "/choices/0/message/content" = "azure-imds-ok" }, upstream_calls = [
+  { upstream = "azure_imds", count = 1, method = "GET", headers = { metadata = "true" } },
+  { upstream = "azure_imds_up", count = 1, headers = { authorization = "Bearer az-imds-tok-1" } }
+] }
+
+# =====================================================================
+# Case 5: Azure client_credentials + reactive 401 forced refresh retry
+#         + Admin /api/status cloud_tokens inspection
+# =====================================================================
+[[cases]]
+name = "azure_client_credentials_recovers_from_401_and_exposes_status"
+use_mocks = ["azure_entra_cycles", "azure_cc_401_then_200"]
+
+[[cases.steps]]
+name = "initial_token_rejected_401_triggers_single_refresh_retry"
+request = { method = "POST", path = "/v1/chat/completions", json = { model = "azure-cc", messages = [{ role = "user", content = "hi azure cc" }] } }
+expect = { status = 200, json_path = { "/choices/0/message/content" = "azure-cc-recovered" }, snapshot_redacts = ["azure-super-secret-value-999"], upstream_calls = [
+  { upstream = "azure_entra", count = 2, call_index = 0, method = "POST", path = "/tenant-001/oauth2/v2.0/token", body_contains = "grant_type=client_credentials&client_id=app-001" },
+  { upstream = "azure_cc_up", count = 2, call_index = 0, headers = { authorization = "Bearer az-cc-tok-revoked" } },
+  { upstream = "azure_cc_up", count = 2, call_index = 1, headers = { authorization = "Bearer az-cc-tok-fresh" } }
+] }
+
+[[cases.steps]]
+name = "admin_status_exposes_non_secret_cloud_token_state"
+request = { method = "GET", path = "/api/status", admin = true }
+expect = { status = 200, body_contains = "\"azure_cc\"", body_not_contains = "az-cc-tok-fresh" }

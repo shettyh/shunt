@@ -87,5 +87,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_cloud_auth_parsers"
+path = "fuzz_targets/fuzz_cloud_auth_parsers.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

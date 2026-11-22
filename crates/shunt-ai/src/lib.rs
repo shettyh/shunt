@@ -21,6 +21,7 @@ pub mod aws_eventstream;
 pub mod aws_sigv4;
 pub mod budget;
 pub mod cache;
+pub mod cloud_auth;
 pub mod dialects;
 pub mod failover;
 pub mod ingress;
@@ -53,6 +54,14 @@ pub use cache::{
     AiTranslatedResponseBody, CacheScope, CachedAiResponse, canonical_json_bytes,
     compute_cache_key, is_deterministic_request,
 };
+pub use cloud_auth::{
+    AwsIamAuthConfig, AwsIamMode, AwsStsCredentials, AzureAdAuthConfig, AzureAdMode, CacheLookup,
+    CloudTokenCache, CloudTokenSnapshot, CompiledCloudAuth, GcpIamAuthConfig, GcpIamMode,
+    GcpServiceAccountKey, ResolvedCloudCredential, base64_std_decode, base64url_encode,
+    compute_token_deadlines, decode_pem_pkcs8_private_key, parse_aws_json_credentials,
+    parse_aws_sts_xml_credentials, parse_expires_in_value, parse_oauth_bearer_response,
+    parse_rfc3339_utc_secs, sign_gcp_service_account_jwt,
+};
 pub use dialects::bedrock::{
     BedrockStreamTranslator, bedrock_converse_path, bedrock_converse_to_openai_response,
     bedrock_embeddings_to_openai_response, bedrock_invoke_path, map_bedrock_stop_reason,
@@ -74,8 +83,8 @@ pub use ingress::responses::{
     rewrite_openai_responses_request,
 };
 pub use inspector::{
-    AiRuntimeInspect, ScopedCacheSnapshot, ScopedCooldownSnapshot, ScopedKeyPoolSnapshot,
-    ScopedLatencySnapshot, inspect_ai_runtime,
+    AiRuntimeInspect, ScopedCacheSnapshot, ScopedCloudTokenSnapshot, ScopedCooldownSnapshot,
+    ScopedKeyPoolSnapshot, ScopedLatencySnapshot, inspect_ai_runtime,
 };
 pub use model_router::{
     AiModelRouterFactory, AiModelRouterPlugin, ModelEntryConfig, ModelRule, TargetSpec,

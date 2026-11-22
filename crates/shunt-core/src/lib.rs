@@ -5,6 +5,7 @@
 pub mod body;
 pub mod catch;
 pub mod error;
+pub mod http_client;
 pub mod otlp;
 pub mod pipeline;
 pub mod probe;
@@ -18,6 +19,10 @@ pub mod ws;
 
 pub use body::ShuntBody;
 pub use error::CoreError;
+pub use http_client::{
+    CoreHttpClient, CoreHttpClientConfig, DEFAULT_HTTP_CLIENT_CONNECT_TIMEOUT,
+    DEFAULT_HTTP_CLIENT_MAX_RESPONSE_BYTES, DEFAULT_HTTP_CLIENT_TIMEOUT,
+};
 pub use otlp::{OtlpExporterConfig, OtlpExporterStats, OtlpHttpExporter, encode_otlp_traces_json};
 pub use probe::ProbeSupervisor;
 pub use redis::{

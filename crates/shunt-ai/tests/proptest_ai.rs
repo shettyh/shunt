@@ -1390,4 +1390,72 @@ proptest! {
         );
         let _ = shunt_ai::adapt_anthropic_body_for_vertex(&raw, Some("vertex-2023-10-16"));
     }
+
+    #[test]
+    fn rfc3339_roundtrips_with_amz_timestamps(unix_secs in 0u64..4_102_444_800u64) {
+        // Construct an RFC 3339 UTC string from `aws_sigv4::format_amz_timestamps` and verify exact round-trip.
+        let (amz, _) = shunt_ai::aws_sigv4::format_amz_timestamps(unix_secs);
+        // amz is YYYYMMDDTHHMMSSZ
+        let iso = format!(
+            "{}-{}-{}T{}:{}:{}Z",
+            &amz[0..4],
+            &amz[4..6],
+            &amz[6..8],
+            &amz[9..11],
+            &amz[11..13],
+            &amz[13..15],
+        );
+        let parsed = shunt_ai::parse_rfc3339_utc_secs(&iso).expect("valid UTC timestamp");
+        prop_assert_eq!(parsed, unix_secs);
+    }
+
+    #[test]
+    fn cloud_auth_parsers_never_panic(raw in prop::collection::vec(any::<u8>(), 0..512)) {
+        if let Ok(s) = std::str::from_utf8(&raw) {
+            let _ = shunt_ai::parse_rfc3339_utc_secs(s);
+            let _ = shunt_ai::parse_aws_sts_xml_credentials(s);
+            let _ = shunt_ai::decode_pem_pkcs8_private_key(s);
+            let _ = shunt_ai::base64_std_decode(s);
+        }
+        let _ = shunt_ai::parse_aws_json_credentials(&raw);
+        let _ = shunt_ai::parse_oauth_bearer_response(&raw, "fuzz");
+    }
+
+    #[test]
+    fn cloud_token_deadlines_and_sts_xml_roundtrip(
+        now_secs in 0u64..100_000u64,
+        ttl_secs in 1u64..86_400u64,
+        margin_secs in 0u64..3_600u64,
+        cap_secs in prop::option::of(1u64..3_600u64),
+        ak in "[A-Z0-9]{4,24}",
+        sk in "[A-Za-z0-9/+=]{8,40}",
+        tok in "[A-Za-z0-9/+=]{8,40}",
+    ) {
+        let now = Duration::from_secs(now_secs);
+        let ttl = Duration::from_secs(ttl_secs);
+        let margin = Duration::from_secs(margin_secs);
+        let cap = cap_secs.map(Duration::from_secs);
+
+        let (refresh_at, hard_exp) = shunt_ai::compute_token_deadlines(now, ttl, margin, cap);
+        prop_assert!(refresh_at >= now);
+        prop_assert!(refresh_at <= hard_exp);
+        prop_assert!(hard_exp >= now + Duration::from_secs(1));
+        if let Some(c) = cap {
+            prop_assert!(hard_exp <= now + c);
+        }
+
+        let xml = format!(
+            "<AssumeRoleResponse><AssumeRoleResult><Credentials>\
+             <AccessKeyId>{ak}</AccessKeyId>\
+             <SecretAccessKey>{sk}</SecretAccessKey>\
+             <SessionToken>{tok}</SessionToken>\
+             <Expiration>2030-06-15T12:00:00Z</Expiration>\
+             </Credentials></AssumeRoleResult></AssumeRoleResponse>"
+        );
+        let parsed = shunt_ai::parse_aws_sts_xml_credentials(&xml).expect("valid STS XML");
+        prop_assert_eq!(parsed.access_key_id, ak);
+        prop_assert_eq!(parsed.secret_access_key, sk);
+        prop_assert_eq!(parsed.session_token.as_deref(), Some(tok.as_str()));
+        prop_assert!(parsed.expiration_unix_secs.is_some());
+    }
 }
