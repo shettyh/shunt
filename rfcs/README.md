@@ -20,6 +20,7 @@ This directory contains Request for Comments (RFC) design documents for **Shunt*
 | [0012](./0012-admin-inspector-ui.md) | Admin Read-Only Inspector UI (`--ui`) | Implemented | `shunt-plugin-sdk`, `shunt-config`, `shunt-ai`, `shunt-cli`, `shunt-test` |
 | [0013](./0013-protocol-parity-and-provider-presets.md) | Deep Protocol Parity, Provider Presets & Multi-Key Pools | Implemented | `shunt-ai`, `specs/`, `examples/`, `fuzz/` |
 | [0014](./0014-cloud-iam-and-http-client.md) | Dynamic Cloud IAM Auth & Outbound `HttpClient` Primitive | Implemented | `shunt-plugin-sdk`, `shunt-core`, `shunt-ai`, `shunt-test`, `specs/`, `examples/`, `fuzz/` |
+| [0015](./0015-guardrails-audit-and-webhooks.md) | Pluggable AI Guardrails (`ai-guardrails`), Audit Sinks (`ai-audit`) & Alert Webhooks (`ai-alerts`) | Implemented | `shunt-plugin-sdk`, `shunt-core`, `shunt-config`, `shunt-ai`, `specs/`, `examples/`, `fuzz/` |
 
 ## Status Definitions
 

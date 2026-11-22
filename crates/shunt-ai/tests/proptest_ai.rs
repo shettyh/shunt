@@ -1458,4 +1458,78 @@ proptest! {
         prop_assert_eq!(parsed.session_token.as_deref(), Some(tok.as_str()));
         prop_assert!(parsed.expiration_unix_secs.is_some());
     }
+
+    #[test]
+    fn guardrail_luhn_detects_valid_generated_cards_and_rejects_single_digit_flip(
+        prefix in prop::collection::vec(0u8..10u8, 12..18),
+        flip_idx in 0usize..12,
+    ) {
+        // Skip trivial all-identical digit prefixes.
+        let mut digits = prefix;
+        if digits.iter().all(|&d| d == digits[0]) {
+            digits[0] = (digits[0] + 1) % 10;
+        }
+        // Compute valid Luhn check digit.
+        let mut sum = 0u32;
+        let mut double = true;
+        for &d in digits.iter().rev() {
+            let mut v = d as u32;
+            if double {
+                v *= 2;
+                if v > 9 {
+                    v -= 9;
+                }
+            }
+            sum += v;
+            double = !double;
+        }
+        let check = ((10 - (sum % 10)) % 10) as u8;
+        digits.push(check);
+
+        let card: String = digits.iter().map(|d| (b'0' + d) as char).collect();
+        prop_assert!(shunt_ai::is_valid_luhn(&card), "expected valid Luhn card: {card}");
+
+        // Flip a single digit -> must fail Luhn check.
+        let mut corrupted = digits.clone();
+        let idx = flip_idx % corrupted.len();
+        corrupted[idx] = (corrupted[idx] + 1) % 10;
+        let bad_card: String = corrupted.iter().map(|d| (b'0' + d) as char).collect();
+        prop_assert!(!shunt_ai::is_valid_luhn(&bad_card), "corrupted card passed Luhn: {bad_card}");
+    }
+
+    #[test]
+    fn guardrail_redactor_is_idempotent_and_never_leaks_injected_secrets(
+        prefix in "[a-zA-Z0-9 ]{0,32}",
+        suffix in "[a-zA-Z0-9 ]{0,32}",
+        aws_tail in "[A-Z0-9]{16}",
+        user in "[a-z]{3,10}",
+        domain in "[a-z]{3,10}",
+    ) {
+        let redactor = shunt_ai::LocalRedactor::new(true, true, &[], shunt_ai::RedactionMode::Mask)
+            .expect("redactor builds");
+        let aws_key = format!("AKIA{aws_tail}");
+        let email = format!("{user}@{domain}.com");
+        let text = format!("{prefix} {aws_key} {email} {suffix}");
+        let (once, count1) = redactor.redact_text(&text);
+        prop_assert!(count1 >= 2);
+        prop_assert!(!once.contains(&aws_key), "AWS key leaked: {once}");
+        prop_assert!(!once.contains(&email), "email leaked: {once}");
+
+        // Idempotence: redacting already-redacted text changes nothing.
+        let (twice, count2) = redactor.redact_text(&once);
+        prop_assert_eq!(once, twice);
+        prop_assert_eq!(count2, 0);
+    }
+
+    #[test]
+    fn guardrail_external_parsers_and_extractors_never_panic(raw in prop::collection::vec(any::<u8>(), 0..512)) {
+        let _ = shunt_ai::parse_webhook_guardrail_response(&raw, shunt_ai::GuardrailAction::Block);
+        let _ = shunt_ai::parse_opa_guardrail_response(&raw, shunt_ai::GuardrailAction::Block);
+        let _ = shunt_ai::parse_presidio_analyze_response(&raw, 0.5, shunt_ai::GuardrailAction::Redact);
+        let _ = shunt_ai::parse_lakera_guardrail_response(&raw, shunt_ai::GuardrailAction::Block);
+        let _ = shunt_ai::parse_bedrock_guardrail_response(&raw, shunt_ai::GuardrailAction::Block);
+        let _ = shunt_ai::parse_llama_guard_response(&raw, shunt_ai::GuardrailAction::Block);
+        let _ = shunt_ai::extract_request_text(&raw, &[]);
+        let _ = shunt_ai::extract_response_text(&raw);
+    }
 }

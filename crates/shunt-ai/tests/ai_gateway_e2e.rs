@@ -1398,3 +1398,43 @@ fn example_shunt_ai_cloud_iam_toml_compiles_and_verifies_cleanly() {
         report.diagnostics
     );
 }
+
+#[test]
+fn example_shunt_ai_guardrails_audit_alerts_toml_compiles_and_verifies_cleanly() {
+    for (k, v) in [
+        ("OPENAI_API_KEY", "sk-example-openai-key"),
+        ("ANTHROPIC_API_KEY", "sk-ant-example-anthropic-key"),
+    ] {
+        if std::env::var(k).is_err() {
+            // SAFETY: test-only env initialization for example config compilation.
+            unsafe {
+                std::env::set_var(k, v);
+            }
+        }
+    }
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/shunt-ai-guardrails-audit-alerts.toml");
+    let provider = shunt_config::FileConfigProvider::new(&path);
+    let loaded = provider
+        .load()
+        .expect("examples/shunt-ai-guardrails-audit-alerts.toml should parse");
+
+    let mut reg = PluginRegistry::new();
+    let prom = Arc::new(PrometheusMetrics::new());
+    let ai_metrics = Arc::new(AiMetrics::new());
+    register_builtin_plugins(&mut reg, prom);
+    register_ai_plugins(&mut reg, ai_metrics);
+
+    let compiler = SnapshotCompiler::new(Arc::new(reg), Arc::new(RuntimeRegistry::new()));
+    let bundle = compiler
+        .compile(&loaded)
+        .expect("examples/shunt-ai-guardrails-audit-alerts.toml should compile cleanly");
+
+    let report = shunt_config::verify_bundle(&bundle, None, true);
+    assert!(
+        report.passed,
+        "guardrails-audit-alerts example failed verify: {:?}",
+        report.diagnostics
+    );
+}

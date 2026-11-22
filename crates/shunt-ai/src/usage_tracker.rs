@@ -73,6 +73,14 @@ struct AiMetricsData {
     duration_seconds: BTreeMap<(String, String, bool), HistogramState>,
     /// (status="hit"|"miss"|"bypass", endpoint, model) -> count
     cache_requests_total: BTreeMap<(&'static str, String, String), u64>,
+    /// (stage, action, rule) -> count
+    guardrail_evaluations_total: BTreeMap<(String, String, String), u64>,
+    /// (guardrail, fail_open) -> count
+    guardrail_errors_total: BTreeMap<(String, bool), u64>,
+    /// (sink, result="written"|"dropped"|"error") -> count
+    audit_events_total: BTreeMap<(String, &'static str), u64>,
+    /// (event, target, result="sent"|"deduplicated"|"dropped"|"error") -> count
+    alerts_total: BTreeMap<(String, String, &'static str), u64>,
 }
 
 /// Point-in-time aggregate counters from [`AiMetrics`] (useful for programmatic checks/tests).
@@ -257,6 +265,42 @@ impl AiMetrics {
             .or_insert(0) += 1;
     }
 
+    /// Records a guardrail evaluation outcome (`stage`, `action`, `rule`).
+    pub fn record_guardrail(&self, stage: &str, action: &str, rule: &str) {
+        let mut data = self.inner.write().expect("AiMetrics lock poisoned");
+        *data
+            .guardrail_evaluations_total
+            .entry((stage.to_owned(), action.to_owned(), rule.to_owned()))
+            .or_insert(0) += 1;
+    }
+
+    /// Records an external guardrail callout error (`guardrail` name and whether `fail_open` applied).
+    pub fn record_guardrail_error(&self, guardrail: &str, fail_open: bool) {
+        let mut data = self.inner.write().expect("AiMetrics lock poisoned");
+        *data
+            .guardrail_errors_total
+            .entry((guardrail.to_owned(), fail_open))
+            .or_insert(0) += 1;
+    }
+
+    /// Records an audit sink delivery result (`"written"`, `"dropped"`, or `"error"`).
+    pub fn record_audit(&self, sink: &str, result: &'static str) {
+        let mut data = self.inner.write().expect("AiMetrics lock poisoned");
+        *data
+            .audit_events_total
+            .entry((sink.to_owned(), result))
+            .or_insert(0) += 1;
+    }
+
+    /// Records an alert webhook dispatch outcome (`"sent"`, `"deduplicated"`, `"dropped"`, or `"error"`).
+    pub fn record_alert(&self, event: &str, target: &str, result: &'static str) {
+        let mut data = self.inner.write().expect("AiMetrics lock poisoned");
+        *data
+            .alerts_total
+            .entry((event.to_owned(), target.to_owned(), result))
+            .or_insert(0) += 1;
+    }
+
     pub fn snapshot(&self) -> AiMetricsSnapshot {
         let data = self.inner.read().expect("AiMetrics lock poisoned");
         let total_requests = data.requests_total.values().copied().sum();
@@ -435,6 +479,10 @@ impl AiMetrics {
         if data.requests_total.is_empty()
             && data.cost_nano_usd_total.is_empty()
             && data.cache_requests_total.is_empty()
+            && data.guardrail_evaluations_total.is_empty()
+            && data.guardrail_errors_total.is_empty()
+            && data.audit_events_total.is_empty()
+            && data.alerts_total.is_empty()
         {
             return String::new();
         }
@@ -547,6 +595,72 @@ impl AiMetrics {
                     status,
                     escape_label(endpoint),
                     escape_label(model),
+                    count
+                );
+            }
+        }
+
+        if !data.guardrail_evaluations_total.is_empty() {
+            out.push_str(
+                "# HELP shunt_ai_guardrail_evaluations_total Total AI guardrail evaluations by stage, action, and rule.\n",
+            );
+            out.push_str("# TYPE shunt_ai_guardrail_evaluations_total counter\n");
+            for ((stage, action, rule), count) in &data.guardrail_evaluations_total {
+                let _ = writeln!(
+                    out,
+                    "shunt_ai_guardrail_evaluations_total{{stage=\"{}\",action=\"{}\",rule=\"{}\"}} {}",
+                    escape_label(stage),
+                    escape_label(action),
+                    escape_label(rule),
+                    count
+                );
+            }
+        }
+
+        if !data.guardrail_errors_total.is_empty() {
+            out.push_str(
+                "# HELP shunt_ai_guardrail_errors_total Total external AI guardrail callout errors.\n",
+            );
+            out.push_str("# TYPE shunt_ai_guardrail_errors_total counter\n");
+            for ((guardrail, fail_open), count) in &data.guardrail_errors_total {
+                let _ = writeln!(
+                    out,
+                    "shunt_ai_guardrail_errors_total{{guardrail=\"{}\",fail_open=\"{}\"}} {}",
+                    escape_label(guardrail),
+                    fail_open,
+                    count
+                );
+            }
+        }
+
+        if !data.audit_events_total.is_empty() {
+            out.push_str(
+                "# HELP shunt_ai_audit_events_total Total AI prompt/completion audit events processed by sink.\n",
+            );
+            out.push_str("# TYPE shunt_ai_audit_events_total counter\n");
+            for ((sink, result), count) in &data.audit_events_total {
+                let _ = writeln!(
+                    out,
+                    "shunt_ai_audit_events_total{{sink=\"{}\",result=\"{}\"}} {}",
+                    escape_label(sink),
+                    result,
+                    count
+                );
+            }
+        }
+
+        if !data.alerts_total.is_empty() {
+            out.push_str(
+                "# HELP shunt_ai_alerts_total Total AI operational alert webhook events by kind, target, and result.\n",
+            );
+            out.push_str("# TYPE shunt_ai_alerts_total counter\n");
+            for ((event, target, result), count) in &data.alerts_total {
+                let _ = writeln!(
+                    out,
+                    "shunt_ai_alerts_total{{event=\"{}\",target=\"{}\",result=\"{}\"}} {}",
+                    escape_label(event),
+                    escape_label(target),
+                    result,
                     count
                 );
             }

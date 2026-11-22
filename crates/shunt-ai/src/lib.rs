@@ -17,6 +17,8 @@
 //!   across OpenAI, Anthropic, Gemini, Bedrock, and Embeddings formats, records Prometheus metrics
 //!   in [`AiMetrics`], and emits structured usage logs in `on_complete`.
 
+pub mod alerts;
+pub mod audit;
 pub mod aws_eventstream;
 pub mod aws_sigv4;
 pub mod budget;
@@ -24,6 +26,7 @@ pub mod cache;
 pub mod cloud_auth;
 pub mod dialects;
 pub mod failover;
+pub mod guardrails;
 pub mod ingress;
 pub mod inspector;
 pub mod model_router;
@@ -43,6 +46,13 @@ use std::sync::Arc;
 
 use shunt_plugin_sdk::PluginRegistry;
 
+pub use alerts::{
+    AiAlertBus, AiAlertEvent, AiAlertKind, AiAlertSeverity, AiAlertsFactory, AiAlertsPlugin,
+    AlertDedupTable, AlertStatsSnapshot, AlertStatsTable, compute_hmac_sha256_hex,
+    ensure_alert_bus, format_http_alert_payload, format_pagerduty_alert_payload,
+    format_slack_alert_payload, push_alert_event, push_alert_event_ref,
+};
+pub use audit::{AiAuditFactory, AiAuditPlugin, AuditRecord, AuditStatsSnapshot, AuditStatsTable};
 pub use aws_eventstream::{
     AwsEventStreamDecoder, EventStreamError, EventStreamHeaderValue, EventStreamMessage,
     crc32_ieee, encode_eventstream_frame,
@@ -74,6 +84,17 @@ pub use dialects::gemini::{
     openai_to_gemini_embeddings_request, openai_to_gemini_request,
 };
 pub use failover::{AiFailoverFactory, AiFailoverPlugin, CooldownSnapshot, FailoverCircuitState};
+pub use guardrails::{
+    AiGuardrailsFactory, AiGuardrailsPlugin, BuiltinDetector, ExternalGuardrailKind,
+    ExternalGuardrailVerdict, GuardrailAction, GuardrailDirection, GuardrailFinding,
+    GuardrailStage, GuardrailStatsSnapshot, GuardrailStatsTable, GuardrailSummary, LocalRedactor,
+    RedactionMode, StreamViolationMode, TextSpanMatch, apply_char_span_redactions,
+    apply_span_redactions, extract_request_text, extract_response_text, extract_sse_delta_text,
+    format_redaction, is_valid_ipv4, is_valid_luhn, is_valid_ssn, parse_bedrock_guardrail_response,
+    parse_lakera_guardrail_response, parse_llama_guard_response, parse_opa_guardrail_response,
+    parse_presidio_analyze_response, parse_webhook_guardrail_response, scan_builtin_detector,
+    visit_request_text_fields, visit_response_text_fields,
+};
 pub use ingress::anthropic::{
     OpenAiToAnthropicSseTranslator, anthropic_to_openai_request,
     map_openai_finish_to_anthropic_stop, openai_to_anthropic_response, rewrite_anthropic_request,
@@ -83,7 +104,8 @@ pub use ingress::responses::{
     rewrite_openai_responses_request,
 };
 pub use inspector::{
-    AiRuntimeInspect, ScopedCacheSnapshot, ScopedCloudTokenSnapshot, ScopedCooldownSnapshot,
+    AiRuntimeInspect, ScopedAlertSnapshot, ScopedAuditSnapshot, ScopedCacheSnapshot,
+    ScopedCloudTokenSnapshot, ScopedCooldownSnapshot, ScopedGuardrailSnapshot,
     ScopedKeyPoolSnapshot, ScopedLatencySnapshot, inspect_ai_runtime,
 };
 pub use model_router::{
@@ -127,17 +149,20 @@ pub use usage_tracker::{
 };
 pub use virtual_keys::{AiVirtualKeysFactory, AiVirtualKeysPlugin};
 
-/// Registers all `shunt-ai` plugins (`ai-virtual-keys`, `ai-model-router`, `ai-cache`,
-/// `ai-token-rate-limit`, `ai-budget`, `ai-provider-adapter`, `ai-failover`,
-/// `ai-usage-tracker`) into `registry`.
+/// Registers all `shunt-ai` plugins (`ai-virtual-keys`, `ai-model-router`, `ai-guardrails`,
+/// `ai-cache`, `ai-token-rate-limit`, `ai-budget`, `ai-provider-adapter`, `ai-failover`,
+/// `ai-usage-tracker`, `ai-audit`, `ai-alerts`) into `registry`.
 pub fn register_ai_plugins(registry: &mut PluginRegistry, ai_metrics: Arc<AiMetrics>) {
     registry
         .register(AiVirtualKeysFactory)
         .register(AiModelRouterFactory)
+        .register(AiGuardrailsFactory::new(Arc::clone(&ai_metrics)))
         .register(AiCacheFactory::new(Arc::clone(&ai_metrics)))
         .register(AiTokenRateLimitFactory)
         .register(AiBudgetFactory::new(Arc::clone(&ai_metrics)))
         .register(AiProviderAdapterFactory)
         .register(AiFailoverFactory)
-        .register(AiUsageTrackerFactory::new(ai_metrics));
+        .register(AiUsageTrackerFactory::new(Arc::clone(&ai_metrics)))
+        .register(AiAuditFactory::new(Arc::clone(&ai_metrics)))
+        .register(AiAlertsFactory::new(ai_metrics));
 }

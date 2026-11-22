@@ -94,5 +94,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_guardrails"
+path = "fuzz_targets/fuzz_guardrails.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
