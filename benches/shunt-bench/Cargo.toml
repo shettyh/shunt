@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Reproducible mock upstream and HTTP/SSE load generator for benchmarking Shunt vs. Envoy & Caddy"
+description = "Reproducible mock upstream, TLS cert generator, and HTTP/H2/TLS/SSE/MCP load generator for Shunt benchmarks"
 
 [[bin]]
 name = "shunt-bench"
@@ -20,7 +20,12 @@ http-body.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 
 [lints]
 workspace = true

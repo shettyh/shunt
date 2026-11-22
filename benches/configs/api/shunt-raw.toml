@@ -1,4 +1,4 @@
-# Workload 1: Raw HTTP/1.1 & HTTP/2 passthrough (0 plugins, HookMask::EMPTY)
+# API Workload: Raw HTTP/1.1 passthrough (0 plugins, HookMask::EMPTY)
 [server]
 listen = "127.0.0.1:18081"
 drain_timeout_ms = 5000

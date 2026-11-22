@@ -1,4 +1,4 @@
-# Workload 3a: High-concurrency SSE streaming passthrough (1,000+ concurrent streams)
+# API Workload: High-concurrency SSE streaming passthrough
 [server]
 listen = "127.0.0.1:18081"
 drain_timeout_ms = 10000

@@ -1,0 +1,38 @@
+# API Workload: mTLS client certificate verification + mtls-auth plugin (HTTP/2)
+[server]
+listen = "127.0.0.1:18081"
+drain_timeout_ms = 5000
+
+[server.tls]
+cert = "{{CERT_DIR}}/server.pem"
+key = "{{CERT_DIR}}/server-key.pem"
+client_ca = "{{CERT_DIR}}/ca.pem"
+client_auth = "required"
+
+[admin]
+enabled = false
+
+[[upstreams]]
+name = "bench_upstream"
+endpoints = ["http://127.0.0.1:18080"]
+connect_timeout_ms = 5000
+pool_max_idle_per_host = 512
+
+[[routes]]
+id = "mtls_protected"
+path_prefix = "/"
+upstream = "bench_upstream"
+max_attempts = 1
+allow_websockets = false
+
+[[routes.plugins]]
+name = "request-id"
+
+[[routes.plugins]]
+name = "mtls-auth"
+[routes.plugins.config]
+require_cert = true
+allowed_cns = ["bench-client"]
+allowed_san_uris = ["spiffe://shunt.local/ns/bench/*"]
+subject_header = "x-client-cn"
+san_uri_header = "x-client-spiffe"

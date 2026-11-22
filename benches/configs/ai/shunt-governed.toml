@@ -1,4 +1,4 @@
-# AI Benchmark: Full Shunt AI Governance Chain (8 plugins)
+# AI Workload: Full 8-Plugin AI Governance Chain
 # request-id + ai-virtual-keys + ai-model-router + ai-token-rate-limit
 # + ai-budget + ai-provider-adapter + ai-failover + ai-usage-tracker
 [server]

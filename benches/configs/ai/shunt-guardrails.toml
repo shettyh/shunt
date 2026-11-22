@@ -1,6 +1,4 @@
-# AI Benchmark: Guardrailed AI Chain (RFC 0015)
-# request-id + ai-model-router + ai-guardrails (PII + secrets + prompt_injection + regex + keywords, both directions)
-# + ai-provider-adapter + ai-usage-tracker
+# AI Workload: Inline AI Guardrails (PII + secrets + prompt_injection + regex + keywords, both directions)
 [server]
 listen = "127.0.0.1:18081"
 drain_timeout_ms = 10000
@@ -51,8 +49,8 @@ action = "redact"
 replacement = "[REDACTED:TICKET]"
 
 [[routes.plugins.config.keyword_rules]]
-name = "confidential_codenames"
-keywords = ["project_obsidian", "internal_merger"]
+name = "prompt_injection_block"
+keywords = ["ignore all previous instructions", "project_obsidian"]
 direction = "request"
 action = "block"
 

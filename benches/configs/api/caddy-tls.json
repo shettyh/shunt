@@ -1,0 +1,43 @@
+{
+  "admin": { "disabled": true },
+  "logging": { "logs": { "default": { "level": "ERROR" } } },
+  "apps": {
+    "tls": {
+      "certificates": {
+        "load_files": [
+          {
+            "certificate": "{{CERT_DIR}}/server.pem",
+            "key": "{{CERT_DIR}}/server-key.pem"
+          }
+        ]
+      }
+    },
+    "http": {
+      "servers": {
+        "bench_tls": {
+          "listen": ["127.0.0.1:18081"],
+          "automatic_https": { "disable": true },
+          "tls_connection_policies": [{}],
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "transport": {
+                    "protocol": "http",
+                    "keep_alive": {
+                      "enabled": true,
+                      "max_idle_conns": 512,
+                      "max_idle_conns_per_host": 512
+                    }
+                  },
+                  "upstreams": [{ "dial": "127.0.0.1:18080" }]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,1425 @@
+# API Workload: 200-route table + 3-endpoint weighted upstream pool + active HTTP health probes
+[server]
+listen = "127.0.0.1:18081"
+drain_timeout_ms = 5000
+
+[admin]
+enabled = false
+
+[[upstreams]]
+name = "lb_pool"
+endpoints = [
+  { url = "http://127.0.0.1:18080", weight = 50 },
+  { url = "http://127.0.0.1:18082", weight = 30 },
+  { url = "http://127.0.0.1:18083", weight = 20 },
+]
+connect_timeout_ms = 5000
+pool_max_idle_per_host = 512
+
+[upstreams.health_check]
+kind = "http"
+path = "/health"
+interval_ms = 5000
+timeout_ms = 1000
+unhealthy_threshold = 2
+healthy_threshold = 1
+
+[[routes]]
+id = "svc_000"
+path_prefix = "/svc/000"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_001"
+path_prefix = "/svc/001"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_002"
+path_prefix = "/svc/002"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_003"
+path_prefix = "/svc/003"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_004"
+path_prefix = "/svc/004"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_005"
+path_prefix = "/svc/005"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_006"
+path_prefix = "/svc/006"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_007"
+path_prefix = "/svc/007"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_008"
+path_prefix = "/svc/008"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_009"
+path_prefix = "/svc/009"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_010"
+path_prefix = "/svc/010"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_011"
+path_prefix = "/svc/011"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_012"
+path_prefix = "/svc/012"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_013"
+path_prefix = "/svc/013"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_014"
+path_prefix = "/svc/014"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_015"
+path_prefix = "/svc/015"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_016"
+path_prefix = "/svc/016"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_017"
+path_prefix = "/svc/017"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_018"
+path_prefix = "/svc/018"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_019"
+path_prefix = "/svc/019"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_020"
+path_prefix = "/svc/020"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_021"
+path_prefix = "/svc/021"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_022"
+path_prefix = "/svc/022"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_023"
+path_prefix = "/svc/023"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_024"
+path_prefix = "/svc/024"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_025"
+path_prefix = "/svc/025"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_026"
+path_prefix = "/svc/026"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_027"
+path_prefix = "/svc/027"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_028"
+path_prefix = "/svc/028"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_029"
+path_prefix = "/svc/029"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_030"
+path_prefix = "/svc/030"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_031"
+path_prefix = "/svc/031"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_032"
+path_prefix = "/svc/032"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_033"
+path_prefix = "/svc/033"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_034"
+path_prefix = "/svc/034"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_035"
+path_prefix = "/svc/035"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_036"
+path_prefix = "/svc/036"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_037"
+path_prefix = "/svc/037"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_038"
+path_prefix = "/svc/038"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_039"
+path_prefix = "/svc/039"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_040"
+path_prefix = "/svc/040"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_041"
+path_prefix = "/svc/041"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_042"
+path_prefix = "/svc/042"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_043"
+path_prefix = "/svc/043"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_044"
+path_prefix = "/svc/044"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_045"
+path_prefix = "/svc/045"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_046"
+path_prefix = "/svc/046"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_047"
+path_prefix = "/svc/047"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_048"
+path_prefix = "/svc/048"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_049"
+path_prefix = "/svc/049"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_050"
+path_prefix = "/svc/050"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_051"
+path_prefix = "/svc/051"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_052"
+path_prefix = "/svc/052"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_053"
+path_prefix = "/svc/053"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_054"
+path_prefix = "/svc/054"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_055"
+path_prefix = "/svc/055"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_056"
+path_prefix = "/svc/056"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_057"
+path_prefix = "/svc/057"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_058"
+path_prefix = "/svc/058"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_059"
+path_prefix = "/svc/059"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_060"
+path_prefix = "/svc/060"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_061"
+path_prefix = "/svc/061"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_062"
+path_prefix = "/svc/062"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_063"
+path_prefix = "/svc/063"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_064"
+path_prefix = "/svc/064"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_065"
+path_prefix = "/svc/065"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_066"
+path_prefix = "/svc/066"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_067"
+path_prefix = "/svc/067"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_068"
+path_prefix = "/svc/068"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_069"
+path_prefix = "/svc/069"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_070"
+path_prefix = "/svc/070"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_071"
+path_prefix = "/svc/071"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_072"
+path_prefix = "/svc/072"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_073"
+path_prefix = "/svc/073"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_074"
+path_prefix = "/svc/074"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_075"
+path_prefix = "/svc/075"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_076"
+path_prefix = "/svc/076"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_077"
+path_prefix = "/svc/077"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_078"
+path_prefix = "/svc/078"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_079"
+path_prefix = "/svc/079"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_080"
+path_prefix = "/svc/080"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_081"
+path_prefix = "/svc/081"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_082"
+path_prefix = "/svc/082"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_083"
+path_prefix = "/svc/083"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_084"
+path_prefix = "/svc/084"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_085"
+path_prefix = "/svc/085"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_086"
+path_prefix = "/svc/086"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_087"
+path_prefix = "/svc/087"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_088"
+path_prefix = "/svc/088"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_089"
+path_prefix = "/svc/089"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_090"
+path_prefix = "/svc/090"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_091"
+path_prefix = "/svc/091"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_092"
+path_prefix = "/svc/092"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_093"
+path_prefix = "/svc/093"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_094"
+path_prefix = "/svc/094"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_095"
+path_prefix = "/svc/095"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_096"
+path_prefix = "/svc/096"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_097"
+path_prefix = "/svc/097"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_098"
+path_prefix = "/svc/098"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_099"
+path_prefix = "/svc/099"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_100"
+path_prefix = "/svc/100"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_101"
+path_prefix = "/svc/101"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_102"
+path_prefix = "/svc/102"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_103"
+path_prefix = "/svc/103"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_104"
+path_prefix = "/svc/104"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_105"
+path_prefix = "/svc/105"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_106"
+path_prefix = "/svc/106"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_107"
+path_prefix = "/svc/107"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_108"
+path_prefix = "/svc/108"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_109"
+path_prefix = "/svc/109"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_110"
+path_prefix = "/svc/110"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_111"
+path_prefix = "/svc/111"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_112"
+path_prefix = "/svc/112"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_113"
+path_prefix = "/svc/113"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_114"
+path_prefix = "/svc/114"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_115"
+path_prefix = "/svc/115"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_116"
+path_prefix = "/svc/116"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_117"
+path_prefix = "/svc/117"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_118"
+path_prefix = "/svc/118"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_119"
+path_prefix = "/svc/119"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_120"
+path_prefix = "/svc/120"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_121"
+path_prefix = "/svc/121"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_122"
+path_prefix = "/svc/122"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_123"
+path_prefix = "/svc/123"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_124"
+path_prefix = "/svc/124"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_125"
+path_prefix = "/svc/125"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_126"
+path_prefix = "/svc/126"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_127"
+path_prefix = "/svc/127"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_128"
+path_prefix = "/svc/128"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_129"
+path_prefix = "/svc/129"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_130"
+path_prefix = "/svc/130"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_131"
+path_prefix = "/svc/131"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_132"
+path_prefix = "/svc/132"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_133"
+path_prefix = "/svc/133"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_134"
+path_prefix = "/svc/134"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_135"
+path_prefix = "/svc/135"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_136"
+path_prefix = "/svc/136"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_137"
+path_prefix = "/svc/137"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_138"
+path_prefix = "/svc/138"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_139"
+path_prefix = "/svc/139"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_140"
+path_prefix = "/svc/140"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_141"
+path_prefix = "/svc/141"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_142"
+path_prefix = "/svc/142"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_143"
+path_prefix = "/svc/143"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_144"
+path_prefix = "/svc/144"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_145"
+path_prefix = "/svc/145"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_146"
+path_prefix = "/svc/146"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_147"
+path_prefix = "/svc/147"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_148"
+path_prefix = "/svc/148"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_149"
+path_prefix = "/svc/149"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_150"
+path_prefix = "/svc/150"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_151"
+path_prefix = "/svc/151"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_152"
+path_prefix = "/svc/152"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_153"
+path_prefix = "/svc/153"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_154"
+path_prefix = "/svc/154"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_155"
+path_prefix = "/svc/155"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_156"
+path_prefix = "/svc/156"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_157"
+path_prefix = "/svc/157"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_158"
+path_prefix = "/svc/158"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_159"
+path_prefix = "/svc/159"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_160"
+path_prefix = "/svc/160"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_161"
+path_prefix = "/svc/161"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_162"
+path_prefix = "/svc/162"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_163"
+path_prefix = "/svc/163"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_164"
+path_prefix = "/svc/164"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_165"
+path_prefix = "/svc/165"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_166"
+path_prefix = "/svc/166"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_167"
+path_prefix = "/svc/167"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_168"
+path_prefix = "/svc/168"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_169"
+path_prefix = "/svc/169"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_170"
+path_prefix = "/svc/170"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_171"
+path_prefix = "/svc/171"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_172"
+path_prefix = "/svc/172"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_173"
+path_prefix = "/svc/173"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_174"
+path_prefix = "/svc/174"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_175"
+path_prefix = "/svc/175"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_176"
+path_prefix = "/svc/176"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_177"
+path_prefix = "/svc/177"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_178"
+path_prefix = "/svc/178"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_179"
+path_prefix = "/svc/179"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_180"
+path_prefix = "/svc/180"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_181"
+path_prefix = "/svc/181"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_182"
+path_prefix = "/svc/182"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_183"
+path_prefix = "/svc/183"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_184"
+path_prefix = "/svc/184"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_185"
+path_prefix = "/svc/185"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_186"
+path_prefix = "/svc/186"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_187"
+path_prefix = "/svc/187"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_188"
+path_prefix = "/svc/188"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_189"
+path_prefix = "/svc/189"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_190"
+path_prefix = "/svc/190"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_191"
+path_prefix = "/svc/191"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_192"
+path_prefix = "/svc/192"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_193"
+path_prefix = "/svc/193"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_194"
+path_prefix = "/svc/194"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_195"
+path_prefix = "/svc/195"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_196"
+path_prefix = "/svc/196"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_197"
+path_prefix = "/svc/197"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_198"
+path_prefix = "/svc/198"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false
+
+[[routes]]
+id = "svc_199"
+path_prefix = "/svc/199"
+upstream = "lb_pool"
+max_attempts = 1
+allow_websockets = false

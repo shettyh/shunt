@@ -1,0 +1,54 @@
+static_resources:
+  listeners:
+    - name: bench_reject_listener
+      address:
+        socket_address:
+          address: 127.0.0.1
+          port_value: 18081
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: bench_reject
+                generate_request_id: true
+                route_config:
+                  name: local_route
+                  virtual_hosts:
+                    - name: bench
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: bench_upstream }
+                http_filters:
+                  - name: envoy.filters.http.local_ratelimit
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                      stat_prefix: http_strict_rate_limiter
+                      token_bucket:
+                        max_tokens: 1
+                        tokens_per_fill: 1
+                        fill_interval: 3600s
+                      filter_enabled:
+                        runtime_key: local_rate_limit_enabled
+                        default_value: { numerator: 100, denominator: HUNDRED }
+                      filter_enforced:
+                        runtime_key: local_rate_limit_enforced
+                        default_value: { numerator: 100, denominator: HUNDRED }
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+    - name: bench_upstream
+      connect_timeout: 5s
+      type: STATIC
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: bench_upstream
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: 127.0.0.1
+                      port_value: 18080

@@ -1,4 +1,4 @@
-# AI Benchmark: Shunt AI Gateway (OpenAI passthrough + Anthropic translation, minimal chain)
+# AI Workload: Multi-Protocol Ingress (/v1/messages, /v1/responses) & Multi-Dialect (Gemini, Bedrock SigV4)
 [server]
 listen = "127.0.0.1:18081"
 drain_timeout_ms = 10000
@@ -13,29 +13,46 @@ connect_timeout_ms = 5000
 pool_max_idle_per_host = 2048
 
 [[routes]]
-id = "ai_chat"
+id = "ai_multiprotocol"
 path_prefix = "/v1"
+methods = ["GET", "POST"]
 upstream = "mock_ai"
+max_body_bytes = 2097152
 max_attempts = 1
 response_headers_timeout_ms = 30000
 idle_chunk_timeout_ms = 30000
 allow_websockets = false
 
 [[routes.plugins]]
+name = "request-id"
+
+[[routes.plugins]]
 name = "ai-model-router"
 [routes.plugins.config.models]
 gpt-bench = [{ provider = "openai", upstream = "mock_ai", model = "gpt-bench" }]
 claude-bench = [{ provider = "anthropic", upstream = "mock_ai", model = "claude-bench" }]
+gemini-bench = [{ provider = "gemini", upstream = "mock_ai", model = "gemini-bench" }]
+bedrock-bench = [{ provider = "bedrock", upstream = "mock_ai", model = "anthropic.claude-bench-v1:0" }]
 
 [[routes.plugins]]
 name = "ai-provider-adapter"
 [routes.plugins.config.providers.openai]
 dialect = "openai_compatible"
+responses_path = "/v1/responses"
 auth = { type = "bearer", api_key = "sk-openai-bench" }
 
 [routes.plugins.config.providers.anthropic]
 dialect = "anthropic"
 auth = { type = "header", header = "x-api-key", api_key = "sk-ant-bench" }
+
+[routes.plugins.config.providers.gemini]
+dialect = "gemini"
+auth = { type = "header", header = "x-goog-api-key", api_key = "sk-gemini-bench" }
+
+[routes.plugins.config.providers.bedrock]
+dialect = "bedrock"
+region = "us-east-1"
+auth = { type = "aws_sigv4", access_key_id = "BENCHACCESSKEY000001", secret_access_key = "shunt-bench-sigv4-secret-key-not-real-00" }
 
 [[routes.plugins]]
 name = "ai-usage-tracker"

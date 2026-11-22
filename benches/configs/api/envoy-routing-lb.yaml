@@ -1,0 +1,462 @@
+static_resources:
+  listeners:
+    - name: bench_lb_listener
+      address:
+        socket_address:
+          address: 127.0.0.1
+          port_value: 18081
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: bench_lb
+                route_config:
+                  name: local_route
+                  virtual_hosts:
+                    - name: bench
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/svc/000" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/001" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/002" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/003" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/004" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/005" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/006" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/007" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/008" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/009" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/010" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/011" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/012" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/013" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/014" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/015" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/016" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/017" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/018" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/019" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/020" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/021" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/022" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/023" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/024" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/025" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/026" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/027" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/028" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/029" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/030" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/031" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/032" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/033" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/034" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/035" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/036" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/037" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/038" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/039" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/040" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/041" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/042" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/043" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/044" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/045" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/046" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/047" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/048" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/049" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/050" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/051" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/052" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/053" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/054" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/055" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/056" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/057" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/058" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/059" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/060" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/061" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/062" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/063" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/064" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/065" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/066" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/067" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/068" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/069" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/070" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/071" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/072" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/073" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/074" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/075" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/076" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/077" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/078" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/079" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/080" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/081" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/082" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/083" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/084" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/085" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/086" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/087" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/088" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/089" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/090" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/091" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/092" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/093" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/094" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/095" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/096" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/097" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/098" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/099" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/100" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/101" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/102" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/103" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/104" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/105" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/106" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/107" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/108" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/109" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/110" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/111" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/112" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/113" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/114" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/115" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/116" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/117" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/118" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/119" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/120" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/121" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/122" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/123" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/124" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/125" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/126" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/127" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/128" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/129" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/130" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/131" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/132" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/133" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/134" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/135" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/136" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/137" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/138" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/139" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/140" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/141" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/142" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/143" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/144" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/145" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/146" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/147" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/148" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/149" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/150" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/151" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/152" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/153" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/154" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/155" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/156" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/157" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/158" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/159" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/160" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/161" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/162" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/163" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/164" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/165" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/166" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/167" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/168" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/169" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/170" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/171" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/172" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/173" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/174" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/175" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/176" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/177" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/178" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/179" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/180" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/181" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/182" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/183" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/184" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/185" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/186" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/187" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/188" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/189" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/190" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/191" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/192" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/193" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/194" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/195" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/196" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/197" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/198" }
+                          route: { cluster: lb_pool }
+                        - match: { prefix: "/svc/199" }
+                          route: { cluster: lb_pool }
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+    - name: lb_pool
+      connect_timeout: 5s
+      type: STATIC
+      lb_policy: ROUND_ROBIN
+      health_checks:
+        - timeout: 1s
+          interval: 5s
+          unhealthy_threshold: 2
+          healthy_threshold: 1
+          http_health_check:
+            path: "/health"
+      circuit_breakers:
+        thresholds:
+          - max_connections: 4096
+            max_pending_requests: 4096
+            max_requests: 4096
+      load_assignment:
+        cluster_name: lb_pool
+        endpoints:
+          - lb_endpoints:
+              - load_balancing_weight: 50
+                endpoint:
+                  address:
+                    socket_address:
+                      address: 127.0.0.1
+                      port_value: 18080
+              - load_balancing_weight: 30
+                endpoint:
+                  address:
+                    socket_address:
+                      address: 127.0.0.1
+                      port_value: 18082
+              - load_balancing_weight: 20
+                endpoint:
+                  address:
+                    socket_address:
+                      address: 127.0.0.1
+                      port_value: 18083

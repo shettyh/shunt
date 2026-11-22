@@ -29,16 +29,21 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build shunt CLI
-        run: cargo build --locked -p shunt-cli --bin shunt
+      - name: Build shunt CLI and benchmark helper
+        run: cargo build --locked -p shunt-cli --bin shunt -p shunt-bench --bin shunt-bench
       - name: Run `shunt verify` on all example and benchmark configs
         env:
           OPENAI_API_KEY: ci-dummy-openai-key
           ANTHROPIC_API_KEY: ci-dummy-anthropic-key
         run: |
-          for cfg in examples/shunt.toml examples/shunt-ai.toml benches/configs/shunt-*.toml; do
+          TMP_CERT_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TMP_CERT_DIR"' EXIT
+          ./target/debug/shunt-bench gen-certs --out-dir "$TMP_CERT_DIR"
+          for cfg in examples/shunt.toml examples/shunt-ai.toml benches/configs/*/shunt-*.toml; do
             echo "==> shunt verify -c $cfg --strict"
-            ./target/debug/shunt verify -c "$cfg" --strict
+            tmpf="$TMP_CERT_DIR/$(echo "$cfg" | tr '/' '_')"
+            sed "s|{{CERT_DIR}}|$TMP_CERT_DIR|g" "$cfg" > "$tmpf"
+            ./target/debug/shunt verify -c "$tmpf" --strict
           done
       - name: Run `shunt test` on canonical conformance specs
         run: |

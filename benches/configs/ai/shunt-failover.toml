@@ -1,0 +1,58 @@
+# AI Workload: Upstream 503 Failover & Circuit Breaker (primary fault :18084 -> secondary healthy :18080)
+[server]
+listen = "127.0.0.1:18081"
+drain_timeout_ms = 10000
+
+[admin]
+enabled = false
+
+[[upstreams]]
+name = "fault_primary"
+endpoints = ["http://127.0.0.1:18084"]
+connect_timeout_ms = 2000
+pool_max_idle_per_host = 256
+
+[[upstreams]]
+name = "healthy_secondary"
+endpoints = ["http://127.0.0.1:18080"]
+connect_timeout_ms = 5000
+pool_max_idle_per_host = 2048
+
+[[routes]]
+id = "ai_failover_bench"
+path_prefix = "/v1"
+upstream = "fault_primary"
+max_body_bytes = 2097152
+max_attempts = 2
+response_headers_timeout_ms = 30000
+idle_chunk_timeout_ms = 30000
+allow_websockets = false
+
+[[routes.plugins]]
+name = "request-id"
+
+[[routes.plugins]]
+name = "ai-model-router"
+[routes.plugins.config.models]
+failover-bench = [
+  { provider = "openai", upstream = "fault_primary", model = "gpt-bench" },
+  { provider = "openai", upstream = "healthy_secondary", model = "gpt-bench" },
+]
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+[routes.plugins.config.providers.openai]
+dialect = "openai_compatible"
+auth = { type = "bearer", api_key = "sk-openai-bench" }
+
+[[routes.plugins]]
+name = "ai-failover"
+[routes.plugins.config]
+retry_statuses = [429, 500, 502, 503, 504, 529]
+cooldown_ms = 5000
+failure_threshold = 2
+
+[[routes.plugins]]
+name = "ai-usage-tracker"
+[routes.plugins.config]
+log_usage = false

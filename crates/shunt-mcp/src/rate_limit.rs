@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -104,10 +104,17 @@ struct CounterWindow {
     window_len: Duration,
 }
 
+#[derive(Debug, Default)]
+struct WindowState {
+    map: HashMap<String, CounterWindow>,
+    /// FIFO insertion order for O(1) bounded eviction under high-cardinality key floods.
+    order: VecDeque<String>,
+}
+
 /// Reload-persistent, bounded local rate-limit / loop-breaker / concurrency table stored in `StateStore`.
 #[derive(Debug, Default)]
 pub struct McpRateLimitTable {
-    windows: Mutex<HashMap<String, CounterWindow>>,
+    windows: Mutex<WindowState>,
     inflight: Mutex<HashMap<String, u64>>,
     total_rate_limited: AtomicU64,
     total_loop_breaks: AtomicU64,
@@ -125,7 +132,7 @@ pub struct McpRateLimitStatsSnapshot {
 }
 
 impl McpRateLimitTable {
-    /// Atomically checks and increments a fixed-window counter.
+    /// Atomically checks and increments a fixed-window counter in amortized O(1) time.
     /// Returns `Ok((current, remaining))` when admitted, or `Err(retry_after_secs)` when exceeded.
     pub fn try_consume(
         &self,
@@ -135,34 +142,59 @@ impl McpRateLimitTable {
         now: Duration,
         max_buckets: usize,
     ) -> Result<(u64, u64), u64> {
-        let mut guard = self.windows.lock().expect("McpRateLimitTable poisoned");
-        guard.retain(|_, w| now < w.window_start.saturating_add(w.window_len));
+        let mut state = self.windows.lock().expect("McpRateLimitTable poisoned");
 
-        if let Some(entry) = guard.get_mut(key) {
-            if entry.count >= limit {
-                let end = entry.window_start.saturating_add(entry.window_len);
-                let retry = end.saturating_sub(now).as_secs().max(1);
-                return Err(retry);
+        // O(1) fast-path for existing keys (active or expired).
+        if let Some(entry) = state.map.get_mut(key) {
+            let end = entry.window_start.saturating_add(entry.window_len);
+            if now < end {
+                if entry.count >= limit {
+                    let retry = end.saturating_sub(now).as_secs().max(1);
+                    return Err(retry);
+                }
+                entry.count += 1;
+                return Ok((entry.count, limit.saturating_sub(entry.count)));
             }
-            entry.count += 1;
-            return Ok((entry.count, limit.saturating_sub(entry.count)));
-        }
-
-        if guard.len() >= max_buckets.max(1)
-            && let Some(oldest) = guard
-                .iter()
-                .min_by_key(|(_, w)| w.window_start.saturating_add(w.window_len))
-                .map(|(k, _)| k.clone())
-        {
-            guard.remove(&oldest);
+            if limit == 0 {
+                return Err(window.as_secs().max(1));
+            }
+            entry.count = 1;
+            entry.window_start = now;
+            entry.window_len = window;
+            return Ok((1, limit.saturating_sub(1)));
         }
 
         if limit == 0 {
             return Err(window.as_secs().max(1));
         }
 
-        guard.insert(
-            key.to_owned(),
+        let cap = max_buckets.max(1);
+        if state.map.len() >= cap {
+            // Opportunistically evict expired or oldest keys from the FIFO head in O(1) amortized time.
+            while state.map.len() >= cap {
+                let Some(oldest_key) = state.order.pop_front() else {
+                    break;
+                };
+                state.map.remove(&oldest_key);
+            }
+            // Fallback in case map still exceeds cap (e.g., if cap shrunk dynamically).
+            if state.map.len() >= cap {
+                state
+                    .map
+                    .retain(|_, w| now < w.window_start.saturating_add(w.window_len));
+                while state.map.len() >= cap {
+                    let Some(k) = state.map.keys().next().cloned() else {
+                        break;
+                    };
+                    state.map.remove(&k);
+                }
+            }
+        }
+
+        let owned = key.to_owned();
+        state.order.push_back(owned.clone());
+        state.map.insert(
+            owned,
             CounterWindow {
                 count: 1,
                 window_start: now,
@@ -206,8 +238,9 @@ impl McpRateLimitTable {
 
     pub fn snapshot(&self, now: Duration) -> McpRateLimitStatsSnapshot {
         let active_buckets = {
-            let guard = self.windows.lock().expect("McpRateLimitTable poisoned");
-            guard
+            let state = self.windows.lock().expect("McpRateLimitTable poisoned");
+            state
+                .map
                 .values()
                 .filter(|w| now < w.window_start.saturating_add(w.window_len))
                 .count()

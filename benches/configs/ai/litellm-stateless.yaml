@@ -1,5 +1,4 @@
-# Equivalent LiteLLM Proxy config for head-to-head benchmarking against Shunt
-# Runs in fastest stateless/no-DB mode against local mock upstream (127.0.0.1:18080).
+# LiteLLM Proxy config (fastest stateless / no-DB baseline) against local shunt-bench upstream
 model_list:
   - model_name: gpt-bench
     litellm_params:
