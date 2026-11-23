@@ -1,0 +1,1212 @@
+---
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+---
+
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Shunt — One fast Rust gateway for APIs, AI, and MCP</title>
+    <meta
+      name="description"
+      content="Shunt is an open-source, single-binary Rust gateway that unifies HTTP APIs, multi-provider AI routing, and MCP agent governance."
+    />
+    <link rel="icon" type="image/svg+xml" href={`${base}/favicon.svg`} />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,500;0,8..60,600;1,8..60,400;1,8..60,500&display=swap"
+    />
+    <script is:inline>
+      (() => {
+        const stored = localStorage.getItem('starlight-theme');
+        const theme = stored === 'light' || stored === 'dark' ? stored : 'light';
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
+  </head>
+  <body>
+    <!-- Minimal Header -->
+    <header class="header">
+      <div class="container header-inner">
+        <a href={`${base}/`} class="brand">
+          <svg width="26" height="26" viewBox="0 0 36 36" fill="none" aria-hidden="true">
+            <rect width="36" height="36" rx="8" fill="var(--brand-bg)" />
+            <path d="M8 12.5h8c2 0 3.5 1 4.8 2.9l2.2 3.2c1 1.4 2.1 2.2 3.8 2.2H28" stroke="var(--brand-fg)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M8 23.5h8c2 0 3.5-1 4.8-2.9l2.2-3.2c1-1.4 2.1-2.2 3.8-2.2H28" stroke="var(--brand-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          <span class="brand-name">Shunt</span>
+        </a>
+
+        <nav class="nav" aria-label="Main navigation">
+          <a href={`${base}/getting-started/installation/`}>docs</a>
+          <a href={`${base}/api-gateway/overview/`}>api</a>
+          <a href={`${base}/ai-gateway/overview/`}>ai</a>
+          <a href={`${base}/mcp-gateway/overview/`}>mcp</a>
+          <a href={`${base}/reference/benchmarks/`}>benchmarks</a>
+          <a href="https://github.com/shettyh/shunt" target="_blank" rel="noopener noreferrer">github</a>
+          <button id="theme-toggle" class="theme-btn" type="button" aria-label="Toggle color theme" title="Toggle theme">
+            <span class="sun-icon" aria-hidden="true">☀</span>
+            <span class="moon-icon" aria-hidden="true">☾</span>
+          </button>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <!-- 1. Clean Editorial Hero -->
+      <section class="hero">
+        <div class="container hero-grid">
+          <div class="hero-copy">
+            <h1>
+              One fast gateway for<br />
+              <em>APIs, AI, and MCP.</em>
+            </h1>
+            <p class="hero-sub">
+              Shunt is an open-source, single-binary Rust gateway that unifies HTTP APIs,
+              multi-provider LLM routing, and MCP agent governance—with zero required external
+              dependencies.
+            </p>
+            <div class="hero-ctas">
+              <a class="btn btn-primary" href={`${base}/getting-started/installation/`}>
+                Read the docs
+              </a>
+              <a
+                class="btn btn-secondary"
+                href="https://github.com/shettyh/shunt"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                GitHub
+              </a>
+            </div>
+            <div class="install-line mono">
+              <span class="prompt">$</span>
+              <code id="install-text">cargo install shunt-cli</code>
+              <button id="copy-install" type="button" class="copy-quiet">copy</button>
+            </div>
+          </div>
+
+          <!-- Large, Open Architectural Line-Art Illustration -->
+          <div class="hero-art" aria-hidden="true">
+            <svg viewBox="0 0 560 390" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <!-- Subtle engineering guide rules -->
+              <line x1="16" y1="68" x2="544" y2="68" class="art-guide" />
+              <line x1="16" y1="195" x2="544" y2="195" class="art-guide" />
+              <line x1="16" y1="322" x2="544" y2="322" class="art-guide" />
+
+              <!-- Left: Clients / Traffic Sources -->
+              <g>
+                <rect x="8" y="42" width="128" height="52" rx="8" class="art-box" />
+                <text x="72" y="65" text-anchor="middle" class="art-label">Apps &amp; Services</text>
+                <text x="72" y="81" text-anchor="middle" class="art-sub">HTTP/1.1 · H2 · TLS</text>
+
+                <rect x="8" y="169" width="128" height="52" rx="8" class="art-box" />
+                <text x="72" y="192" text-anchor="middle" class="art-label">AI SDKs</text>
+                <text x="72" y="208" text-anchor="middle" class="art-sub">OpenAI · Claude</text>
+
+                <rect x="8" y="296" width="128" height="52" rx="8" class="art-box" />
+                <text x="72" y="319" text-anchor="middle" class="art-label">AI Agents</text>
+                <text x="72" y="335" text-anchor="middle" class="art-sub">Streamable MCP</text>
+              </g>
+
+              <!-- Converging switch tracks -->
+              <path d="M136 68 C170 68, 170 172, 206 172" class="art-line" />
+              <line x1="136" y1="195" x2="206" y2="195" class="art-line strong" />
+              <path d="M136 322 C170 322, 170 218, 206 218" class="art-line" />
+
+              <!-- Center: Single Shunt Gateway with Logo -->
+              <rect x="206" y="110" width="148" height="170" rx="12" class="art-core" />
+              <g transform="translate(262, 128)">
+                <rect width="36" height="36" rx="8" fill="var(--brand-bg)" />
+                <path d="M8 12.5h8c2 0 3.5 1 4.8 2.9l2.2 3.2c1 1.4 2.1 2.2 3.8 2.2H28" stroke="var(--brand-fg)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+                <path d="M8 23.5h8c2 0 3.5-1 4.8-2.9l2.2-3.2c1-1.4 2.1-2.2 3.8-2.2H28" stroke="var(--brand-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+              </g>
+              <line x1="230" y1="178" x2="330" y2="178" class="art-hairline" />
+              <text x="280" y="200" text-anchor="middle" class="art-sub">Auth · Rate Limits</text>
+              <text x="280" y="220" text-anchor="middle" class="art-sub">Routing · Failover</text>
+              <text x="280" y="240" text-anchor="middle" class="art-sub">Guardrails · Cache</text>
+              <text x="280" y="260" text-anchor="middle" class="art-sub">Metrics · OTLP</text>
+
+              <!-- Diverging switch tracks -->
+              <path d="M354 172 C388 172, 388 68, 424 68" class="art-line" />
+              <line x1="354" y1="195" x2="424" y2="195" class="art-line strong" />
+              <path d="M354 218 C388 218, 388 322, 424 322" class="art-line" />
+
+              <!-- Right: Destinations -->
+              <g>
+                <rect x="424" y="42" width="128" height="52" rx="8" class="art-box" />
+                <text x="488" y="65" text-anchor="middle" class="art-label">API Backends</text>
+                <text x="488" y="81" text-anchor="middle" class="art-sub">Weighted · K8s</text>
+
+                <rect x="424" y="169" width="128" height="52" rx="8" class="art-box strong" />
+                <text x="488" y="192" text-anchor="middle" class="art-label">LLM Providers</text>
+                <text x="488" y="208" text-anchor="middle" class="art-sub">Cloud &amp; Local</text>
+
+                <rect x="424" y="296" width="128" height="52" rx="8" class="art-box" />
+                <text x="488" y="319" text-anchor="middle" class="art-label">MCP Servers</text>
+                <text x="488" y="335" text-anchor="middle" class="art-sub">Tools · Data</text>
+              </g>
+
+              <!-- Junction nodes -->
+              <circle cx="206" cy="172" r="3" class="art-dot" />
+              <circle cx="206" cy="195" r="3.5" class="art-dot strong" />
+              <circle cx="206" cy="218" r="3" class="art-dot" />
+              <circle cx="354" cy="172" r="3" class="art-dot" />
+              <circle cx="354" cy="195" r="3.5" class="art-dot strong" />
+              <circle cx="354" cy="218" r="3" class="art-dot" />
+            </svg>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. Quiet Editorial Property Strip (User Outcomes, No Internal Jargon) -->
+      <section class="strip">
+        <div class="container">
+          <div class="prop-grid">
+            <div class="prop">
+              <div class="prop-value mono">~12 MB RAM</div>
+              <div class="prop-label">Single static binary with ~35 ms cold start and no required database.</div>
+            </div>
+            <div class="prop">
+              <div class="prop-value mono">Zero overhead</div>
+              <div class="prop-label">Routes skip unused plugins completely and stream traffic unbuffered.</div>
+            </div>
+            <div class="prop">
+              <div class="prop-value mono">Live reloads</div>
+              <div class="prop-label">Update routes, TLS certs, and keys with zero dropped connections.</div>
+            </div>
+            <div class="prop">
+              <div class="prop-value mono">31 plugins</div>
+              <div class="prop-label">HTTP security, multi-provider AI, and MCP governance out of the box.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. Three Gateways, One Binary -->
+      <section class="section">
+        <div class="container">
+          <div class="section-intro">
+            <h2>One binary. Three complete gateways.</h2>
+            <p>
+              Start with a lightweight reverse proxy or combine HTTP, AI, and MCP traffic behind a
+              single gateway—everything configures through one clean file and ships with built-in
+              static verification and a local Inspector UI.
+            </p>
+          </div>
+
+          <div class="pillars-grid">
+            <div class="pillar">
+              <h3>HTTP API Gateway</h3>
+              <p>
+                Host, path, method, and header routing with weighted pools, active health probes,
+                JWT/JWKS/OIDC, mTLS client auth, CIDR filtering, streaming compression, and
+                Kubernetes Gateway API v1.
+              </p>
+              <a href={`${base}/api-gateway/overview/`} class="text-link">Explore API Gateway →</a>
+            </div>
+
+            <div class="pillar">
+              <h3>Multi-Provider AI Gateway</h3>
+              <p>
+                Unified OpenAI, Anthropic, Responses, embeddings, and multimodal endpoints across
+                17 provider presets and Cloud IAM (Bedrock, Vertex AI, Azure), with smart routing,
+                budgets, guardrails, and streaming caching.
+              </p>
+              <a href={`${base}/ai-gateway/overview/`} class="text-link">Explore AI Gateway →</a>
+            </div>
+
+            <div class="pillar">
+              <h3>MCP &amp; Agentic Gateway</h3>
+              <p>
+                Expose a single virtual <code>/mcp</code> endpoint over multiple MCP servers with
+                OAuth discovery, per-agent tool ACLs, session binding, SQL/argument policies,
+                prompt-injection scanning, and loop breaking.
+              </p>
+              <a href={`${base}/mcp-gateway/overview/`} class="text-link">Explore MCP Gateway →</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 4. Clean Configuration Example -->
+      <section class="section section-tinted">
+        <div class="container">
+          <div class="section-intro">
+            <h2>Simple, declarative configuration.</h2>
+            <p>
+              Define upstreams, routes, and plugins in <code>shunt.toml</code> (or YAML / Kubernetes
+              manifests). Changes reload live without dropping in-flight streams, and
+              <code>shunt verify</code> catches misconfigurations before deploy.
+            </p>
+          </div>
+
+          <div class="tabs-bar" role="tablist" aria-label="Configuration example">
+            <button class="tab-btn active" data-cfg="api" role="tab" aria-selected="true">API Gateway</button>
+            <button class="tab-btn" data-cfg="ai" role="tab" aria-selected="false">AI Gateway</button>
+            <button class="tab-btn" data-cfg="mcp" role="tab" aria-selected="false">MCP Gateway</button>
+          </div>
+
+          <div class="code-window">
+            <div class="code-header mono">
+              <span id="cfg-file">shunt-api.toml</span>
+              <button id="copy-cfg" type="button" class="copy-quiet">copy</button>
+            </div>
+            <pre class="code-pre mono"><code id="cfg-code"></code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- 5. Shunt-Only Benchmarks (Clean Typographic Table) -->
+      <section class="section">
+        <div class="container">
+          <div class="section-intro">
+            <h2>Predictable, sub-millisecond performance.</h2>
+            <p>
+              Single release binary measured with <code>./benches/scripts/bench.sh</code> on local
+              loopback (Apple M5 Pro, <code>c=64</code> HTTP / <code>c=1,000</code> SSE, zero errors
+              across every workload).
+            </p>
+          </div>
+
+          <div class="tabs-bar" role="tablist" aria-label="Benchmark suite">
+            <button class="bench-btn active" data-bench="api" role="tab" aria-selected="true">API Core</button>
+            <button class="bench-btn" data-bench="ai" role="tab" aria-selected="false">AI Gateway</button>
+            <button class="bench-btn" data-bench="mcp" role="tab" aria-selected="false">MCP</button>
+            <button class="bench-btn" data-bench="soak" role="tab" aria-selected="false">Reload &amp; Soak</button>
+          </div>
+
+          <div class="table-wrap">
+            <table class="bench-table">
+              <thead>
+                <tr>
+                  <th>Workload</th>
+                  <th class="num">Throughput</th>
+                  <th class="num">p50</th>
+                  <th class="num">p99</th>
+                  <th class="num">RSS</th>
+                </tr>
+              </thead>
+              <tbody id="bench-tbody"></tbody>
+            </table>
+          </div>
+
+          <p class="bench-foot">
+            <a href={`${base}/reference/benchmarks/`} class="text-link">View full benchmark tables &amp; reproduction steps →</a>
+          </p>
+        </div>
+      </section>
+
+      <!-- 6. Quiet Bottom CTA -->
+      <section class="section section-tinted">
+        <div class="container closing">
+          <div>
+            <h2>Start in under two minutes.</h2>
+            <p>
+              Install the single binary, pick a starter recipe, or point your AI coding assistant at
+              <a href={`${base}/llms.txt`} class="inline-link mono">/llms.txt</a>.
+            </p>
+          </div>
+          <div class="hero-ctas">
+            <a class="btn btn-primary" href={`${base}/getting-started/installation/`}>Get started</a>
+            <a class="btn btn-secondary" href={`${base}/guides/recipes/`}>Plugin recipes</a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="container footer-inner">
+        <span>Shunt · Apache-2.0</span>
+        <div class="footer-links">
+          <a href={`${base}/getting-started/installation/`}>Docs</a>
+          <a href={`${base}/api-gateway/overview/`}>API</a>
+          <a href={`${base}/ai-gateway/overview/`}>AI</a>
+          <a href={`${base}/mcp-gateway/overview/`}>MCP</a>
+          <a href={`${base}/reference/cli/`}>CLI</a>
+          <a href={`${base}/reference/benchmarks/`}>Benchmarks</a>
+          <a href={`${base}/llms.txt`}>llms.txt</a>
+          <a href="https://github.com/shettyh/shunt" target="_blank" rel="noopener noreferrer">GitHub</a>
+        </div>
+      </div>
+    </footer>
+
+    <script is:inline>
+      // Theme toggle synced with Starlight
+      document.getElementById('theme-toggle')?.addEventListener('click', () => {
+        const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+        document.documentElement.dataset.theme = next;
+        localStorage.setItem('starlight-theme', next);
+      });
+
+      // Copy install command
+      const copyInstall = document.getElementById('copy-install');
+      copyInstall?.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText('cargo install shunt-cli');
+          copyInstall.textContent = 'copied';
+          setTimeout(() => (copyInstall.textContent = 'copy'), 1500);
+        } catch {}
+      });
+
+      function escapeHtml(str) {
+        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      }
+
+      // Single-pass TOML tokenizer (never runs regexes over generated HTML tags)
+      function highlightTomlValue(raw) {
+        const tokenRe = /"([^"\\]|\\.)*"|\b(?:true|false|\d+(?:\.\d+)?)\b|\b[a-zA-Z0-9_-]+(?=\s*=)/g;
+        let out = '';
+        let last = 0;
+        let match;
+        while ((match = tokenRe.exec(raw)) !== null) {
+          out += escapeHtml(raw.slice(last, match.index));
+          const tok = match[0];
+          if (tok.startsWith('"')) {
+            out += `<span class="t-str">${escapeHtml(tok)}</span>`;
+          } else if (tok === 'true' || tok === 'false' || /^\d/.test(tok)) {
+            out += `<span class="t-num">${escapeHtml(tok)}</span>`;
+          } else {
+            out += `<span class="t-key">${escapeHtml(tok)}</span>`;
+          }
+          last = tokenRe.lastIndex;
+        }
+        out += escapeHtml(raw.slice(last));
+        return out;
+      }
+
+      function highlightToml(src) {
+        return src
+          .split('\n')
+          .map((line) => {
+            if (/^\s*#/.test(line)) {
+              return `<span class="t-cmt">${escapeHtml(line)}</span>`;
+            }
+            if (/^\s*\[/.test(line)) {
+              return `<span class="t-sec">${escapeHtml(line)}</span>`;
+            }
+            const kv = line.match(/^(\s*)([a-zA-Z0-9_.-]+)(\s*=\s*)(.*)$/);
+            if (kv) {
+              return (
+                escapeHtml(kv[1]) +
+                `<span class="t-key">${escapeHtml(kv[2])}</span>` +
+                escapeHtml(kv[3]) +
+                highlightTomlValue(kv[4])
+              );
+            }
+            return highlightTomlValue(line);
+          })
+          .join('\n');
+      }
+
+      const CONFIGS = {
+        api: {
+          file: 'shunt-api.toml',
+          code: `[server]
+listen = "127.0.0.1:8080"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:9090"
+
+[[upstreams]]
+name = "api_backend"
+endpoints = [
+  { url = "http://127.0.0.1:18080", weight = 90 },
+  { url = "http://127.0.0.1:18081", weight = 10 },
+]
+
+[[routes]]
+id = "api_v2"
+path_prefix = "/v2"
+upstream = "api_backend"
+
+[[routes.plugins]]
+name = "jwt-auth"
+[routes.plugins.config]
+jwks_uri = "https://auth.example.com/.well-known/jwks.json"
+required_scopes = ["read"]
+forward_claims = { "sub" = "x-user-id" }
+
+[[routes.plugins]]
+name = "compression"
+[routes.plugins.config]
+encodings = ["zstd", "br", "gzip"]`,
+        },
+        ai: {
+          file: 'shunt-ai.toml',
+          code: `[[upstreams]]
+name = "openai"
+endpoints = ["https://api.openai.com"]
+
+[[upstreams]]
+name = "anthropic"
+endpoints = ["https://api.anthropic.com"]
+
+[[routes]]
+id = "ai_gateway"
+path_prefix = "/v1"
+methods = ["GET", "POST"]
+upstream = "openai"
+max_attempts = 2
+
+[[routes.plugins]]
+name = "ai-model-router"
+[routes.plugins.config]
+auto_max_attempts = true
+serve_models_endpoint = true
+[routes.plugins.config.models]
+smart = [
+  { provider = "openai", upstream = "openai", model = "gpt-4o" },
+  { provider = "anthropic", upstream = "anthropic", model = "claude-sonnet-4-20250514" },
+]
+
+[[routes.plugins]]
+name = "ai-provider-adapter"
+[routes.plugins.config.providers.openai]
+preset = "openai"
+api_key = "env:OPENAI_API_KEY"
+drop_params = true
+[routes.plugins.config.providers.anthropic]
+preset = "anthropic"
+api_key = "env:ANTHROPIC_API_KEY"
+drop_params = true
+
+[[routes.plugins]]
+name = "ai-failover"
+[routes.plugins.config]
+cooldown_ms = 15000`,
+        },
+        mcp: {
+          file: 'shunt-mcp.toml',
+          code: `[[routes]]
+id = "mcp_gateway"
+path_prefix = "/"
+methods = ["GET", "POST", "DELETE"]
+upstream = "github_mcp"
+
+[[routes.plugins]]
+name = "mcp-auth"
+[routes.plugins.config]
+bind_session_to_principal = true
+[[routes.plugins.config.keys]]
+id = "eng-alice"
+api_key = "env:MCP_ALICE_KEY"
+allowed_tools = ["github__*", "postgres__query"]
+denied_tools = ["*delete*", "*drop*"]
+
+[[routes.plugins]]
+name = "mcp-guardrails"
+[routes.plugins.config]
+require_approval_tools = ["github__create_issue"]
+response_detectors = ["prompt_injection", "private_key"]
+[[routes.plugins.config.argument_rules]]
+tool = "postgres__query"
+allow_patterns = { sql = "(?i)^\\\\s*SELECT\\\\b" }
+
+[[routes.plugins]]
+name = "mcp-rate-limit"
+[routes.plugins.config.loop_breaker]
+max_repeats = 2
+window_secs = 60`,
+        },
+      };
+
+      let activeCfg = 'api';
+      function renderCfg(key) {
+        activeCfg = key;
+        const c = CONFIGS[key];
+        document.getElementById('cfg-file').textContent = c.file;
+        document.getElementById('cfg-code').innerHTML = highlightToml(c.code);
+      }
+
+      document.querySelectorAll('.tab-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.tab-btn').forEach((b) => {
+            b.classList.remove('active');
+            b.setAttribute('aria-selected', 'false');
+          });
+          btn.classList.add('active');
+          btn.setAttribute('aria-selected', 'true');
+          renderCfg(btn.getAttribute('data-cfg'));
+        });
+      });
+
+      const copyCfg = document.getElementById('copy-cfg');
+      copyCfg?.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(CONFIGS[activeCfg].code);
+          copyCfg.textContent = 'copied';
+          setTimeout(() => (copyCfg.textContent = 'copy'), 1500);
+        } catch {}
+      });
+      renderCfg('api');
+
+      // Shunt-only Benchmarks
+      const BENCH = {
+        api: [
+          ['HTTP/1.1 Passthrough (0 plugins)', '84,771 req/s', '748 µs', '1.02 ms', '22.5 MB'],
+          ['HTTPS + HTTP/2 Multiplexed (TLS 1.3)', '90,928 req/s', '695 µs', '962 µs', '22.6 MB'],
+          ['mTLS + SPIFFE/CN Auth (HTTP/2)', '89,556 req/s', '710 µs', '984 µs', '23.5 MB'],
+          ['3-Plugin Chain (req-id + bearer + rate-limit)', '83,596 req/s', '758 µs', '1.04 ms', '24.0 MB'],
+          ['JWT HS256 + IP Filter + Streaming zstd', '68,664 req/s', '924 µs', '1.27 ms', '38.5 MB'],
+          ['200-Route Table + Weighted LB + Probes', '78,900 req/s', '804 µs', '1.06 ms', '23.6 MB'],
+          ['Auth / Rate-Limit Rejection Fast-Path', '178,979 req/s', '354 µs', '595 µs', '24.1 MB'],
+        ],
+        ai: [
+          ['OpenAI Chat Passthrough (3-plugin)', '70,143 req/s', '906 µs', '1.21 ms', '26.6 MB'],
+          ['4 KB Multi-Turn Translate (8-plugin governed)', '56,296 req/s', '1.12 ms', '1.57 ms', '31.8 MB'],
+          ['Exact-Match AI Cache Hit (0 upstream I/O)', '141,280 req/s', '443 µs', '768 µs', '27.5 MB'],
+          ['Inline Prompt-Injection Block (400)', '139,606 req/s', '447 µs', '778 µs', '45.8 MB'],
+          ['Multi-Protocol /v1/messages → OpenAI', '63,183 req/s', '1.00 ms', '1.35 ms', '27.3 MB'],
+          ['AWS Bedrock Converse + SigV4 Signing', '60,385 req/s', '1.05 ms', '1.41 ms', '31.6 MB'],
+          ['1,000 Concurrent SSE Streams (Anthropic→OpenAI)', '31,145 ch/s', '72.1 ms TTFC', '131.6 ms TTFC', '132.8 MB'],
+        ],
+        mcp: [
+          ['Governed tools/call (5-plugin chain)', '77,069 req/s', '819 µs', '1.17 ms', '57.2 MB'],
+          ['Virtual 2-Server tools/list + ACL Filtering', '63,531 req/s', '978 µs', '2.13 ms', '25.8 MB'],
+          ['Destructive SQL Argument Block (403)', '162,837 req/s', '385 µs', '671 µs', '55.7 MB'],
+          ['Inbound Indirect Prompt-Injection Block', '75,901 req/s', '830 µs', '1.21 ms', '56.4 MB'],
+          ['Agent Loop Breaker Rejection (429)', '160,028 req/s', '391 µs', '672 µs', '52.5 MB'],
+        ],
+        soak: [
+          ['Live POST /reload every 500 ms (9/9 OK, 0 errors)', '84,760 req/s', '749 µs', '1.02 ms', '24.0 MB'],
+          ['Open-Loop Fixed Rate 25k RPS (CO-free)', '24,987 req/s', '1.46 ms', '3.37 ms', '24.2 MB'],
+          ['672k Governed AI Requests RSS Stability', '672,000 reqs', '—', '+1.0 MB Δ', '29.6 MB'],
+          ['Cold Start to Ready (API / AI / MCP)', '32–42 ms', '—', '—', '10.3–12.9 MB'],
+        ],
+      };
+
+      function renderBench(key) {
+        const rows = BENCH[key];
+        document.getElementById('bench-tbody').innerHTML = rows
+          .map(
+            ([name, rps, p50, p99, rss]) => `
+            <tr>
+              <td>${name}</td>
+              <td class="num mono strong">${rps}</td>
+              <td class="num mono">${p50}</td>
+              <td class="num mono">${p99}</td>
+              <td class="num mono muted">${rss}</td>
+            </tr>
+          `
+          )
+          .join('');
+      }
+
+      document.querySelectorAll('.bench-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.bench-btn').forEach((b) => {
+            b.classList.remove('active');
+            b.setAttribute('aria-selected', 'false');
+          });
+          btn.classList.add('active');
+          btn.setAttribute('aria-selected', 'true');
+          renderBench(btn.getAttribute('data-bench'));
+        });
+      });
+      renderBench('api');
+    </script>
+
+    <style is:global>
+      :root {
+        --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        --font-serif: 'Source Serif 4', Georgia, Cambria, serif;
+        --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+        --bg: #ffffff;
+        --bg-tint: #f9fafb;
+        --bg-code: #f6f8fa;
+        --bg-code-head: #eff2f5;
+        --border: #e5e7eb;
+        --border-strong: #d1d5db;
+        --text: #111827;
+        --text-2: #4b5563;
+        --text-3: #6b7280;
+        --accent: #1d4ed8;
+        --brand-bg: #111827;
+        --brand-fg: #ffffff;
+        --brand-muted: #9ca3af;
+        --btn-bg: #111827;
+        --btn-fg: #ffffff;
+
+        /* GitHub Light syntax tokens */
+        --t-sec: #0550ae;
+        --t-key: #116329;
+        --t-str: #0a3069;
+        --t-num: #0550ae;
+        --t-cmt: #6e7781;
+      }
+
+      :root[data-theme='dark'] {
+        --bg: #0d1117;
+        --bg-tint: #11161f;
+        --bg-code: #161b22;
+        --bg-code-head: #1c2128;
+        --border: #262c36;
+        --border-strong: #373e47;
+        --text: #f0f6fc;
+        --text-2: #adbac7;
+        --text-3: #768390;
+        --accent: #60a5fa;
+        --brand-bg: #f0f6fc;
+        --brand-fg: #0d1117;
+        --brand-muted: #6e7681;
+        --btn-bg: #f0f6fc;
+        --btn-fg: #0d1117;
+
+        /* GitHub Dark Dimmed syntax tokens */
+        --t-sec: #6cb6ff;
+        --t-key: #8ddb8c;
+        --t-str: #96d0ff;
+        --t-num: #6cb6ff;
+        --t-cmt: #768390;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font-sans);
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      code,
+      pre,
+      .mono {
+        font-family: var(--font-mono);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .container {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 0 24px;
+      }
+
+      /* Header */
+      .header {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        background: color-mix(in srgb, var(--bg) 92%, transparent);
+        backdrop-filter: blur(8px);
+        border-bottom: 1px solid var(--border);
+      }
+
+      .header-inner {
+        height: 64px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .brand-name {
+        font-size: 1.08rem;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+      }
+
+      .nav {
+        display: flex;
+        align-items: center;
+        gap: 24px;
+        font-size: 0.9rem;
+        color: var(--text-2);
+      }
+
+      .nav a:hover {
+        color: var(--text);
+      }
+
+      .theme-btn {
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--text-2);
+        width: 30px;
+        height: 30px;
+        border-radius: 6px;
+        cursor: pointer;
+        display: grid;
+        place-items: center;
+        font-size: 0.85rem;
+      }
+
+      .theme-btn:hover {
+        border-color: var(--border-strong);
+        color: var(--text);
+      }
+
+      :root[data-theme='dark'] .moon-icon { display: none; }
+      :root[data-theme='light'] .sun-icon { display: none; }
+
+      /* Hero */
+      .hero {
+        padding: 76px 0 68px;
+      }
+
+      .hero-grid {
+        display: grid;
+        grid-template-columns: 0.95fr 1.05fr;
+        gap: 48px;
+        align-items: center;
+      }
+
+      .hero h1 {
+        font-family: var(--font-serif);
+        font-weight: 500;
+        font-size: clamp(2.45rem, 4.2vw, 3.5rem);
+        line-height: 1.12;
+        letter-spacing: -0.025em;
+        margin: 0 0 20px;
+      }
+
+      .hero h1 em {
+        font-style: italic;
+        font-weight: 400;
+        color: var(--text-2);
+      }
+
+      .hero-sub {
+        font-size: 1.04rem;
+        line-height: 1.72;
+        color: var(--text-2);
+        margin: 0 0 28px;
+        max-width: 490px;
+      }
+
+      .hero-sub code,
+      .section-intro code,
+      .pillar code {
+        font-size: 0.86em;
+        background: var(--bg-code);
+        padding: 0.14em 0.38em;
+        border-radius: 4px;
+        color: var(--text);
+      }
+
+      .hero-ctas {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 10px 20px;
+        border-radius: 7px;
+        font-size: 0.92rem;
+        font-weight: 500;
+        transition: opacity 140ms ease, border-color 140ms ease;
+      }
+
+      .btn-primary {
+        background: var(--btn-bg);
+        color: var(--btn-fg);
+      }
+
+      .btn-primary:hover {
+        opacity: 0.88;
+      }
+
+      .btn-secondary {
+        border: 1px solid var(--border-strong);
+        color: var(--text);
+        background: transparent;
+      }
+
+      .btn-secondary:hover {
+        border-color: var(--text);
+      }
+
+      .install-line {
+        margin-top: 24px;
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 12px;
+        border-radius: 7px;
+        border: 1px solid var(--border);
+        background: var(--bg-code);
+        font-size: 0.83rem;
+        color: var(--text);
+      }
+
+      .prompt {
+        color: var(--text-3);
+        user-select: none;
+      }
+
+      .copy-quiet {
+        border: none;
+        background: transparent;
+        color: var(--text-3);
+        font-family: var(--font-mono);
+        font-size: 0.74rem;
+        cursor: pointer;
+        padding: 2px 6px;
+        border-radius: 4px;
+      }
+
+      .copy-quiet:hover {
+        color: var(--text);
+        background: var(--border);
+      }
+
+      /* Large, Open Hero Illustration */
+      .hero-art {
+        width: 100%;
+      }
+
+      .hero-art svg {
+        width: 100%;
+        height: auto;
+        display: block;
+      }
+
+      .art-guide { stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 5; opacity: 0.65; }
+      .art-box { fill: var(--bg); stroke: var(--border-strong); stroke-width: 1.15; }
+      .art-box.strong { stroke: var(--text); stroke-width: 1.3; }
+      .art-core { fill: var(--bg-tint); stroke: var(--text); stroke-width: 1.4; }
+      .art-line { stroke: var(--border-strong); stroke-width: 1.6; }
+      .art-line.strong { stroke: var(--text); stroke-width: 1.85; }
+      .art-hairline { stroke: var(--border); stroke-width: 1; }
+      .art-dot { fill: var(--bg); stroke: var(--border-strong); stroke-width: 1.4; }
+      .art-dot.strong { fill: var(--text); stroke: var(--text); }
+      .art-serif { fill: var(--text); font-family: var(--font-serif); font-size: 20px; font-weight: 500; }
+      .art-label { fill: var(--text); font-family: var(--font-sans); font-size: 12px; font-weight: 600; }
+      .art-sub { fill: var(--text-3); font-family: var(--font-mono); font-size: 10px; }
+
+      /* Property Strip */
+      .strip {
+        border-top: 1px solid var(--border);
+        border-bottom: 1px solid var(--border);
+        background: var(--bg-tint);
+      }
+
+      .prop-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+      }
+
+      .prop {
+        padding: 26px 22px;
+        border-right: 1px solid var(--border);
+      }
+
+      .prop:first-child {
+        padding-left: 0;
+      }
+
+      .prop:last-child {
+        border-right: none;
+        padding-right: 0;
+      }
+
+      .prop-value {
+        font-size: 1.12rem;
+        font-weight: 600;
+        color: var(--text);
+        margin-bottom: 6px;
+      }
+
+      .prop-label {
+        font-size: 0.86rem;
+        line-height: 1.55;
+        color: var(--text-2);
+      }
+
+      /* Sections */
+      .section {
+        padding: 80px 0;
+      }
+
+      .section-tinted {
+        background: var(--bg-tint);
+        border-top: 1px solid var(--border);
+        border-bottom: 1px solid var(--border);
+      }
+
+      .section-intro {
+        max-width: 640px;
+        margin-bottom: 40px;
+      }
+
+      .section-intro h2,
+      .closing h2 {
+        font-family: var(--font-serif);
+        font-weight: 500;
+        font-size: clamp(1.75rem, 2.8vw, 2.25rem);
+        line-height: 1.2;
+        letter-spacing: -0.02em;
+        margin: 0 0 12px;
+      }
+
+      .section-intro p,
+      .closing p {
+        font-size: 0.98rem;
+        line-height: 1.72;
+        color: var(--text-2);
+        margin: 0;
+      }
+
+      /* Three Pillars */
+      .pillars-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 36px;
+      }
+
+      .pillar {
+        border-top: 1px solid var(--border);
+        padding-top: 22px;
+      }
+
+      .pillar h3 {
+        font-size: 1.05rem;
+        font-weight: 600;
+        margin: 0 0 10px;
+        letter-spacing: -0.015em;
+      }
+
+      .pillar p {
+        font-size: 0.92rem;
+        line-height: 1.7;
+        color: var(--text-2);
+        margin: 0 0 16px;
+      }
+
+      .text-link {
+        font-size: 0.88rem;
+        font-weight: 500;
+        color: var(--accent);
+      }
+
+      .text-link:hover {
+        text-decoration: underline;
+        text-underline-offset: 3px;
+      }
+
+      .inline-link {
+        color: var(--accent);
+        text-decoration: underline;
+        text-underline-offset: 3px;
+      }
+
+      /* Simple Underline Tabs */
+      .tabs-bar {
+        display: flex;
+        gap: 24px;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 20px;
+      }
+
+      .tab-btn,
+      .bench-btn {
+        border: none;
+        background: transparent;
+        padding: 0 0 11px;
+        margin-bottom: -1px;
+        border-bottom: 2px solid transparent;
+        font-family: var(--font-sans);
+        font-size: 0.9rem;
+        font-weight: 500;
+        color: var(--text-3);
+        cursor: pointer;
+      }
+
+      .tab-btn:hover,
+      .bench-btn:hover {
+        color: var(--text);
+      }
+
+      .tab-btn.active,
+      .bench-btn.active {
+        color: var(--text);
+        border-bottom-color: var(--text);
+      }
+
+      /* Code Window */
+      .code-window {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--bg-code);
+      }
+
+      .code-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 9px 16px;
+        background: var(--bg-code-head);
+        border-bottom: 1px solid var(--border);
+        font-size: 0.78rem;
+        color: var(--text-2);
+      }
+
+      .code-pre {
+        margin: 0;
+        padding: 18px 20px;
+        font-size: 0.83rem;
+        line-height: 1.68;
+        overflow-x: auto;
+        color: var(--text);
+      }
+
+      .t-sec { color: var(--t-sec); font-weight: 500; }
+      .t-key { color: var(--t-key); }
+      .t-str { color: var(--t-str); }
+      .t-num { color: var(--t-num); }
+      .t-cmt { color: var(--t-cmt); }
+
+      /* Clean Swiss Benchmark Table */
+      .table-wrap {
+        overflow-x: auto;
+      }
+
+      .bench-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.9rem;
+      }
+
+      .bench-table th {
+        text-align: left;
+        font-weight: 600;
+        font-size: 0.78rem;
+        color: var(--text-3);
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .bench-table td {
+        padding: 12px 12px;
+        border-bottom: 1px solid var(--border);
+        color: var(--text-2);
+      }
+
+      .bench-table td:first-child,
+      .bench-table th:first-child {
+        padding-left: 0;
+        color: var(--text);
+      }
+
+      .bench-table td:last-child,
+      .bench-table th:last-child {
+        padding-right: 0;
+      }
+
+      .bench-table .num {
+        text-align: right;
+        white-space: nowrap;
+      }
+
+      .bench-table .strong {
+        color: var(--text);
+        font-weight: 500;
+      }
+
+      .bench-table .muted {
+        color: var(--text-3);
+      }
+
+      .bench-foot {
+        margin: 22px 0 0;
+      }
+
+      /* Closing CTA */
+      .closing {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 28px;
+        flex-wrap: wrap;
+      }
+
+      /* Footer */
+      .footer {
+        border-top: 1px solid var(--border);
+        padding: 28px 0;
+      }
+
+      .footer-inner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+        font-size: 0.84rem;
+        color: var(--text-3);
+      }
+
+      .footer-links {
+        display: flex;
+        gap: 18px;
+        flex-wrap: wrap;
+      }
+
+      .footer-links a:hover {
+        color: var(--text);
+      }
+
+      @media (max-width: 960px) {
+        .hero-grid,
+        .pillars-grid {
+          grid-template-columns: 1fr;
+        }
+        .prop-grid {
+          grid-template-columns: repeat(2, 1fr);
+        }
+        .prop {
+          padding: 20px 16px;
+          border-bottom: 1px solid var(--border);
+        }
+        .prop:first-child {
+          padding-left: 16px;
+        }
+      }
+
+      @media (max-width: 600px) {
+        .nav a:not(:first-child):not(:nth-child(6)) {
+          display: none;
+        }
+        .prop-grid {
+          grid-template-columns: 1fr;
+        }
+        .prop {
+          border-right: none;
+          padding: 18px 0;
+        }
+        .prop:first-child {
+          padding-left: 0;
+        }
+      }
+    </style>
+  </body>
+</html>
