@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1 (2026-11-23)
+
+## What's Changed
+* chore(release): fix multi-arch Docker build, workflow_dispatch publish, and crates.io publish cycle by @shettyh in https://github.com/shettyh/shunt/pull/33
+
+
+**Full Changelog**: https://github.com/shettyh/shunt/compare/v0.1.0...v0.1.1
+
 ## 0.1.0 (2026-11-23)
 
 ## What's Changed
