@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.1.0 (2026-11-23)
+
+## What's Changed
+* feat(verify): implement RFC 0006 layered verification, proptest, shunt verify/test, TLA+, Kani & fuzzing by @shettyh in https://github.com/shettyh/shunt/pull/8
+* feat(ai): implement RFC 0007 generalized AI providers, cloud dialects, /v1/models & /v1/embeddings by @shettyh in https://github.com/shettyh/shunt/pull/9
+* feat(ai): implement RFC 0008 multi-protocol AI ingress (/v1/messages & /v1/responses) by @shettyh in https://github.com/shettyh/shunt/pull/10
+* feat(ai): implement RFC 0009 virtual keys, TPM limits, cost budgets & distributed StateStore by @shettyh in https://github.com/shettyh/shunt/pull/11
+* feat(routing): implement RFC 0010 smart routing, weighted pools & active health checks by @shettyh in https://github.com/shettyh/shunt/pull/12
+* feat(observability): implement RFC 0011 OTLP/HTTP tracing & exact-match ai-cache by @shettyh in https://github.com/shettyh/shunt/pull/13
+* feat(admin): implement RFC 0012 read-only Admin Inspector UI (--ui) by @shettyh in https://github.com/shettyh/shunt/pull/14
+* perf(bench): update nightly benchmark report by @github-actions[bot] in https://github.com/shettyh/shunt/pull/15
+* perf(bench): add Shunt vs. LiteLLM AI gateway benchmarks & Phase A4 vision update by @shettyh in https://github.com/shettyh/shunt/pull/16
+* feat(ai): implement RFC 0013 deep protocol parity, provider presets & multi-key pools by @shettyh in https://github.com/shettyh/shunt/pull/17
+* feat(ai): implement RFC 0014 dynamic cloud IAM auth & outbound HttpClient primitive by @shettyh in https://github.com/shettyh/shunt/pull/18
+* feat(ai): implement RFC 0015 pluggable AI guardrails, redacted audit sinks & alert webhooks by @shettyh in https://github.com/shettyh/shunt/pull/19
+* feat(ai): implement RFC 0016 multimodal endpoints, generation lookup & streaming/singleflight/semantic AI cache by @shettyh in https://github.com/shettyh/shunt/pull/20
+* feat(ai): implement RFC 0017 per-request routing, concurrency quotas & advanced failover by @shettyh in https://github.com/shettyh/shunt/pull/21
+* feat(gateway): implement RFC 0018 JWT/OIDC auth, HTTP security, compression & Kubernetes Gateway API by @shettyh in https://github.com/shettyh/shunt/pull/22
+* perf(bench): expand gateway & AI benchmarks for RFC 0015–0018 and fix AiGenerationStore leak by @shettyh in https://github.com/shettyh/shunt/pull/24
+* test(verify): bounded-store invariants, core TLA+/proptest updates, RSS soak guardrail & full nightly fuzzing by @shettyh in https://github.com/shettyh/shunt/pull/25
+* feat(mcp): implement RFC 0019 MCP & agentic governance plugin pack by @shettyh in https://github.com/shettyh/shunt/pull/26
+* docs: streamline README and extract plugin/admin/examples reference by @shettyh in https://github.com/shettyh/shunt/pull/27
+* perf(bench): implement RFC 0020 unified API, AI & MCP benchmark suite by @shettyh in https://github.com/shettyh/shunt/pull/28
+* docs(readme): make Benchmarks at a Glance scannable by @shettyh in https://github.com/shettyh/shunt/pull/30
+* perf(bench): update nightly benchmark report by @github-actions[bot] in https://github.com/shettyh/shunt/pull/31
+* chore(release): add shunt-mcp to release-please, Dockerfile, and crates-publish by @shettyh in https://github.com/shettyh/shunt/pull/32
+
+
+**Full Changelog**: https://github.com/shettyh/shunt/compare/v0.0.1...v0.1.0
+
 ## 0.0.1 (2026-11-21)
 
 ## What's Changed
