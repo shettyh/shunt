@@ -12,7 +12,7 @@ use tokio::time::{Instant, Sleep};
 
 use crate::error::CoreError;
 
-/// Unified HTTP body type used across `shunt-core`.
+/// Unified HTTP body type used across `shunt-engine`.
 ///
 /// Routes without body hooks or timeouts use `Passthrough(Incoming)` directly with
 /// zero buffering, zero channel hops, and zero extra tasks.

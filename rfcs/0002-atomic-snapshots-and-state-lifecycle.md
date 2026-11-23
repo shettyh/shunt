@@ -1,7 +1,7 @@
 # RFC 0002: Atomic Snapshots, Pool Reuse & State Lifecycle
 
 - **Status:** Implemented
-- **Crates:** `shunt-core`, `shunt-plugin-sdk`
+- **Crates:** `shunt-engine`, `shunt-plugin-sdk`
 
 ## Summary
 

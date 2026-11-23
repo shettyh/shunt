@@ -1,6 +1,6 @@
 //! Model Context Protocol (MCP) & Agentic Governance plugin pack (`shunt-mcp`).
 //!
-//! Implemented **100% through `shunt-plugin-sdk`** with zero dependencies on `shunt-core`,
+//! Implemented **100% through `shunt-plugin-sdk`** with zero dependencies on `shunt-engine`,
 //! providing Streamable HTTP MCP routing, multi-server multiplexing, per-agent tool/resource/prompt
 //! ACLs, session hijacking protection, argument/output guardrails (PII, secrets, indirect prompt
 //! injection), stuck-agent loop breaking, and Prometheus + OTLP observability.

@@ -8,7 +8,7 @@ use shunt_config::{
     ConfigProvider, InlineConfigProvider, InspectorTrace, SnapshotCompiler, TraceRingBuffer,
     redact_secrets, route_subsumes,
 };
-use shunt_core::{PathMatch, RouteMatch, RuntimeRegistry, UpstreamConfig, UpstreamPoolKey};
+use shunt_engine::{PathMatch, RouteMatch, RuntimeRegistry, UpstreamConfig, UpstreamPoolKey};
 use shunt_plugin_sdk::{
     BuildContext, HookMask, HttpPlugin, PluginBuildError, PluginConfig, PluginFactory,
     PluginRegistry,

@@ -19,7 +19,7 @@ use shunt_config::{
     InspectorCapturePlugin, LoadedConfig, MetricsRenderer, ReloadController, SnapshotCompiler,
     TraceRingBuffer, UpstreamEndpointIr,
 };
-use shunt_core::{GatewayServer, RuntimeRegistry};
+use shunt_engine::{GatewayServer, RuntimeRegistry};
 use shunt_mcp::{McpMetrics, inspect_mcp_runtime, register_mcp_plugins};
 use shunt_plugin_sdk::{ManualClock, PluginRegistry};
 use shunt_plugins::{PrometheusMetrics, register_builtin_plugins};

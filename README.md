@@ -9,16 +9,16 @@
 
 **Shunt** is an ultra-lean, pluggable Rust gateway for **HTTP APIs**, **multi-provider AI**, and **MCP (Model Context Protocol)** traffic—built on `tokio`, `hyper` v1, `rustls`, and `arc-swap`.
 
-A tiny, zero-allocation-fast-path data plane (`shunt-core`) pairs with a strict plugin SDK (`shunt-plugin-sdk`) so every feature above transport—from JWT auth and compression to AI routing/guardrails and MCP governance—ships as a composable plugin in a single binary with zero required external dependencies.
+A tiny, zero-allocation-fast-path data plane (`shunt-engine`) pairs with a strict plugin SDK (`shunt-plugin-sdk`) so every feature above transport—from JWT auth and compression to AI routing/guardrails and MCP governance—ships as a composable plugin in a single binary with zero required external dependencies.
 
 ---
 
 ## Why Shunt?
 
-- **Tiny, high-performance core (`shunt-core`)**: HTTP/1.1 & HTTP/2, SNI TLS & mTLS with hot-reloadable certs, SSE & WebSockets, split timeouts (`connect`, `response_headers`, `idle_chunk`), active/passive upstream health probes, optional Redis/Valkey state, and zero-dependency OTLP/HTTP tracing.
+- **Tiny, high-performance core (`shunt-engine`)**: HTTP/1.1 & HTTP/2, SNI TLS & mTLS with hot-reloadable certs, SSE & WebSockets, split timeouts (`connect`, `response_headers`, `idle_chunk`), active/passive upstream health probes, optional Redis/Valkey state, and zero-dependency OTLP/HTTP tracing.
 - **Pay only for what you use**: Compiled routes carry a precomputed `HookMask` bitmask and hybrid sync (`HookResult::Ready`) / async (`HookResult::Pending`) dispatch—routes without body or I/O plugins stay unbuffered and allocation-free.
 - **Zero-downtime atomic reloads & Kubernetes Gateway API**: Hot-reload `shunt.toml`/YAML (file watch, `POST /reload`, `SIGHUP`) or sync Kubernetes Gateway API v1 resources (`--k8s-manifest` / `--k8s-gateway`) via lock-free `ArcSwap` snapshots while reusing warm pools and plugin state.
-- **Strict plugin boundary**: First-party packs (`shunt-plugins`, `shunt-ai`, `shunt-mcp`) depend only on `shunt-plugin-sdk`—never on `shunt-core` or `hyper` internals. Zero AI or MCP concepts leak into the core.
+- **Strict plugin boundary**: First-party packs (`shunt-plugins`, `shunt-ai`, `shunt-mcp`) depend only on `shunt-plugin-sdk`—never on `shunt-engine` or `hyper` internals. Zero AI or MCP concepts leak into the core.
 - **Developer-first workflow**: Static config/policy checks (`shunt check`, `shunt verify`), declarative TOML contract tests (`shunt test`), and `shunt dev --ui` for live per-hook µs waterfalls and an opt-in read-only Admin Inspector UI.
 
 ---
@@ -62,7 +62,10 @@ See [`benches/README.md`](benches/README.md) for full tables, methodology, and r
 Requires Rust **1.91+** (edition 2024), or grab prebuilt binaries / multi-arch Docker images (`ghcr.io/shettyh/shunt`) from [GitHub Releases](https://github.com/shettyh/shunt/releases).
 
 ```bash
-# Install from source
+# Install from crates.io (installs the `shunt` binary)
+cargo install shunt-cli
+
+# Or install from source
 cargo install --path crates/shunt-cli
 
 # Or run with Docker
@@ -145,7 +148,7 @@ impl HttpPlugin for PoweredByPlugin {
 | Crate | Role |
 | --- | --- |
 | [`shunt-plugin-sdk`](crates/shunt-plugin-sdk) | Public `HttpPlugin`, `PluginFactory`, `HookMask`, `HookResult`, `Flow`, `StateStore`, `HttpClient` |
-| [`shunt-core`](crates/shunt-core) | `tokio`/`hyper` v1/`rustls` data plane, `ArcSwap` snapshots, hook runner, pools, and retry loop |
+| [`shunt-engine`](crates/shunt-engine) | `tokio`/`hyper` v1/`rustls` data plane, `ArcSwap` snapshots, hook runner, pools, and retry loop |
 | [`shunt-config`](crates/shunt-config) | Canonical IR, TOML/YAML & K8s Gateway API providers, `SnapshotCompiler`, Admin API & Inspector UI |
 | [`shunt-plugins`](crates/shunt-plugins) | First-party HTTP gateway plugins |
 | [`shunt-ai`](crates/shunt-ai) | Multi-provider AI gateway plugin pack |

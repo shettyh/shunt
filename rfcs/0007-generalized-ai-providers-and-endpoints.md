@@ -1,7 +1,7 @@
 # RFC 0007: Generalized AI Providers & Expanded OpenAI Endpoints
 
 - **Status:** Implemented
-- **Crates:** `shunt-ai`, `shunt-plugin-sdk`, `shunt-core`, `shunt-test`, `fuzz`
+- **Crates:** `shunt-ai`, `shunt-plugin-sdk`, `shunt-engine`, `shunt-test`, `fuzz`
 
 ## Summary
 
@@ -10,7 +10,7 @@ RFC 0007 evolves `shunt-ai` from its initial two-provider (`OpenAi` | `Anthropic
 2. First-class cloud & frontier protocol dialects: **Google Gemini** (AI Studio & Vertex AI), **Azure OpenAI**, and **AWS Bedrock** (Converse & ConverseStream with pure-Rust SigV4 signing and binary AWS EventStream decoding).
 3. Expanded OpenAI-compatible API surface: **`GET /v1/models`** (synthesized from configured aliases/rules) and **`POST /v1/embeddings`**.
 
-All AI concepts remain strictly isolated inside `shunt-ai`; the only transport-level addition to `shunt-plugin-sdk` / `shunt-core` is exposing the resolved upstream endpoint URI on `UpstreamRequest` so request-signing plugins (such as AWS SigV4) can sign against the exact target authority.
+All AI concepts remain strictly isolated inside `shunt-ai`; the only transport-level addition to `shunt-plugin-sdk` / `shunt-engine` is exposing the resolved upstream endpoint URI on `UpstreamRequest` so request-signing plugins (such as AWS SigV4) can sign against the exact target authority.
 
 ## Motivation
 
@@ -26,7 +26,7 @@ Addressing both in RFC 0007 delivers Phase A1 of [docs/vision.md](../docs/vision
 ### Goals
 - **Named provider registry:** Decouple *provider instance name* (e.g., `"ollama"`, `"groq"`, `"openai-prod"`, `"gemini-us"`, `"bedrock-east"`) from *wire protocol dialect* (`openai_compatible`, `anthropic`, `azure_openai`, `gemini`, `bedrock`).
 - **Single canonical config schema:** Use one unified `providers.<name>` map in `ai-provider-adapter` (no legacy top-level `openai`/`anthropic` shims), migrating repo examples, tests, and conformance specs cleanly.
-- **Zero AI leakage into `shunt-core`:** Keep `shunt-core` and `shunt-plugin-sdk` strictly AI-agnostic.
+- **Zero AI leakage into `shunt-engine`:** Keep `shunt-engine` and `shunt-plugin-sdk` strictly AI-agnostic.
 - **Zero heavy cloud SDK dependencies:** Implement AWS SigV4 signing and binary AWS EventStream framing in small, pure-Rust modules so the `shunt` release binary stays ~20 MB and compiles fast.
 - **Expanded endpoints:** Support `GET /v1/models` (and `GET /v1/models/{id}`) and `POST /v1/embeddings` seamlessly on either a unified `/v1` route or dedicated per-endpoint routes.
 - **Order-independent usage accounting:** Extend `ai-usage-tracker` to recognize OpenAI, Anthropic, Gemini, Bedrock, and Embeddings usage fields regardless of plugin ordering.
@@ -42,11 +42,11 @@ Addressing both in RFC 0007 delivers Phase A1 of [docs/vision.md](../docs/vision
 
 ## Design
 
-### 1. General-Purpose SDK Primitive (`shunt-plugin-sdk` + `shunt-core`)
+### 1. General-Purpose SDK Primitive (`shunt-plugin-sdk` + `shunt-engine`)
 
 AWS SigV4 signing requires computing the canonical `host` header (and any endpoint base path) from the exact upstream endpoint selected for the current attempt—including when testing against a local mock (`http://127.0.0.1:<port>`) or failing over across multi-endpoint pools.
 
-Today, `shunt-core` resolves `base_uri` in Stage 4 right before invoking `on_upstream_request`, but `UpstreamRequest` does not carry it. RFC 0007 adds one AI-agnostic field to `UpstreamRequest`:
+Today, `shunt-engine` resolves `base_uri` in Stage 4 right before invoking `on_upstream_request`, but `UpstreamRequest` does not carry it. RFC 0007 adds one AI-agnostic field to `UpstreamRequest`:
 
 ```rust
 pub struct UpstreamRequest {
@@ -56,7 +56,7 @@ pub struct UpstreamRequest {
     pub body: Option<Bytes>,
     /// Resolved base URI of the selected upstream endpoint for this attempt
     /// (e.g., `https://bedrock-runtime.us-east-1.amazonaws.com` or `http://127.0.0.1:18080`).
-    /// Populated by `shunt-core` prior to `on_upstream_request` so signing/auth plugins
+    /// Populated by `shunt-engine` prior to `on_upstream_request` so signing/auth plugins
     /// can inspect the exact target scheme, authority, and base path.
     pub endpoint_uri: Option<Uri>,
 }
@@ -335,7 +335,7 @@ This design supports **both** deployment styles:
 
 ### 1. Using Official Cloud SDKs (`aws-sdk-bedrockruntime`, `google-cloud-*`)
 - **Why considered:** Offloads SigV4 signing, EventStream framing, and cloud auth chains.
-- **Why rejected:** Pulls in 100+ transitive crates, adds tens of megabytes to the binary, slows builds dramatically, and bypasses `shunt-core`'s warm connection pool, passive health tracking, split TTFB/idle-chunk timeouts, and `shunt test` mock transport. Keeping all upstream HTTP I/O flowing through `shunt-core` preserves Shunt's sub-ms overhead, 20 MB binary footprint, and full testability.
+- **Why rejected:** Pulls in 100+ transitive crates, adds tens of megabytes to the binary, slows builds dramatically, and bypasses `shunt-engine`'s warm connection pool, passive health tracking, split TTFB/idle-chunk timeouts, and `shunt test` mock transport. Keeping all upstream HTTP I/O flowing through `shunt-engine` preserves Shunt's sub-ms overhead, 20 MB binary footprint, and full testability.
 
 ### 2. Hardcoding a Giant Enum for Every Vendor (`OpenAi | Anthropic | Groq | Ollama | DeepSeek | ...`)
 - **Why considered:** Simple match statements and compile-time exhaustive checks.
@@ -356,7 +356,7 @@ This design supports **both** deployment styles:
 To keep PRs reviewable, fast, and continuously verified under RFC 0006, RFC 0007 is split into **two implementation slices**:
 
 ### Slice 1 — Generalized Provider Registry, `openai_compatible`, `/v1/models` & `/v1/embeddings`
-1. **`shunt-plugin-sdk` & `shunt-core`:** Add `UpstreamRequest.endpoint_uri: Option<Uri>` populated from `base_uri` in `pipeline.rs`.
+1. **`shunt-plugin-sdk` & `shunt-engine`:** Add `UpstreamRequest.endpoint_uri: Option<Uri>` populated from `base_uri` in `pipeline.rs`.
 2. **`shunt-ai` core refactor:**
    - Replace closed `AiProvider` enum with `ProviderDialect` + named `String` provider IDs on `AiTarget`, `FailoverEvent`, and `AiUsage`.
    - Replace top-level `openai`/`anthropic` config blocks with the unified `providers` map + `ProviderAuthConfig` (`none`, `bearer`, `header`) in `ai-provider-adapter`.

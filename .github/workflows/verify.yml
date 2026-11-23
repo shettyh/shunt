@@ -107,7 +107,7 @@ jobs:
       - name: Run Kani proofs
         run: |
           cargo kani -p shunt-plugin-sdk
-          cargo kani -p shunt-core
+          cargo kani -p shunt-engine
           cargo kani -p shunt-plugins
 
   fuzz-nightly:

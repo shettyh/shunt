@@ -1,7 +1,7 @@
 # RFC 0006: Layered Verification, Property Testing & Spec-Driven TOML Testing
 
 - **Status:** Implemented
-- **Crates:** `shunt-plugin-sdk`, `shunt-core`, `shunt-config`, `shunt-plugins`, `shunt-ai`, `shunt-test`, `shunt-cli`, `specs/`, `fuzz/`
+- **Crates:** `shunt-plugin-sdk`, `shunt-engine`, `shunt-config`, `shunt-plugins`, `shunt-ai`, `shunt-test`, `shunt-cli`, `specs/`, `fuzz/`
 
 ## Summary
 
@@ -24,7 +24,7 @@ Shunt's v0.0.1 test suite relies on hand-written unit, integration, and soak tes
 ## Goals & Non-Goals
 
 ### Goals
-- Keep `shunt-core`'s hot path zero-allocation and unaffected in benchmark throughput/p99 (verification hooks/clocks must compile to zero or negligible overhead in production).
+- Keep `shunt-engine`'s hot path zero-allocation and unaffected in benchmark throughput/p99 (verification hooks/clocks must compile to zero or negligible overhead in production).
 - Catch real implementation bugs directly in Rust code via `proptest`, stateful reference models, `cargo-fuzz`, and Kani.
 - Prove concurrency safety and liveness invariants for Shunt's core state machines using focused TLA+ specs checked in CI.
 - Ship **spec-driven TOML verification** (`shunt verify` and `shunt test`) as first-class CLI commands useful to both Shunt contributors (conformance suite) and end users (testing their own `shunt.toml` in CI).
@@ -66,14 +66,14 @@ Shunt adopts a **4-layer Verification Pyramid**, matching each class of bug to t
 
 Before writing formal models or stateful property tests, four foundational seams must be tightened so the implementation itself is clean and deterministically testable:
 
-1. **Injectable `Clock` Abstraction (`shunt-plugin-sdk` + `shunt-core`)**:
+1. **Injectable `Clock` Abstraction (`shunt-plugin-sdk` + `shunt-engine`)**:
    - Introduce a lightweight `Clock: Send + Sync + 'static` trait (with `SystemClock` using `Instant::now()` as default and `ManualClock` for deterministic tests/simulations).
    - Expose `BuildContext::clock(&self) -> Arc<dyn Clock>` (defaulting to `SystemClock`) so `RateLimitPlugin`, `AiFailoverPlugin`, and `UpstreamPool` never have to sleep in unit/property tests or `shunt test`.
-2. **Single-Word Atomic Health State (`crates/shunt-core/src/upstream.rs`)**:
+2. **Single-Word Atomic Health State (`crates/shunt-engine/src/upstream.rs`)**:
    - Replace the pair of `Relaxed` atomics (`consecutive_failures` + `unhealthy_until_ms`) in `EndpointState` with a single `AtomicU64` (packing `failures: u16` + `unhealthy_until_ms: u48`) updated via CAS (`fetch_update`), or a compact `Mutex<HealthState>` on the slow error/recovery path with an `Acquire`/`Release` fast-path read. This eliminates split-state races permanently.
 3. **Bounded Cardinality in `RateLimitPlugin` (`crates/shunt-plugins/src/rate_limit.rs`)**:
    - Add `max_entries` (default e.g. `100_000`) and idle eviction TTL to `BucketTable` (plus optional sharded buckets to avoid global `Mutex` contention) so adversarial `X-Forwarded-For` / API-key cardinality cannot exhaust memory.
-4. **WHATWG-Strict `SseParser` (`crates/shunt-ai/src/sse.rs`) & Transactional `BuildSession` (`shunt-core` / `shunt-config`)**:
+4. **WHATWG-Strict `SseParser` (`crates/shunt-ai/src/sse.rs`) & Transactional `BuildSession` (`shunt-engine` / `shunt-config`)**:
    - Fix `SseParser` to discard frames with no `data:` lines (even if `event:` was set), handle bare `\r` line endings, and strip UTF-8 BOM at stream start.
    - Ensure failed `SnapshotCompiler::compile()` calls roll back or avoid polluting `StateStore` / `RuntimeRegistry` with newly created keys/pools (e.g., staging newly inserted keys/pools inside `BuildSession` and committing them only on success).
 
@@ -89,9 +89,9 @@ Add `proptest` (dev-dependency across crates) and optional `fuzz/` targets (`car
 | `SseParser` (`shunt-ai`) | **Chunk-split invariance:** for any generated SSE payload and any random partition into slices (including 1-byte and multi-byte UTF-8 splits), `feed_chunked(slices) == feed_whole(bytes)`. Never panics on arbitrary bytes. |
 | `AnthropicSseTranslator` (`shunt-ai`) | Any valid sequence of Anthropic SSE events (`message_start`, `content_block_*`, `message_delta`, `message_stop`) split arbitrarily produces valid OpenAI `data: {json}\n\n` frames terminated by `data: [DONE]\n\n`, preserving concatenated text and tool-call argument deltas identically. |
 | `openai_to_anthropic_request` (`shunt-ai`) | Output is always valid JSON with `max_tokens > 0`, strictly alternating `user`/`assistant` message roles (no two adjacent messages share a role), all `system`/`developer` prompts preserved, all `tool_call_id`s mapped to `tool_result`, never panics on arbitrary `serde_json::Value`. |
-| `PathMatch`, `RouteMatch`, `host_matches`, `strip_uri_prefix` (`shunt-core`) | `Prefix("/a")` never matches `"/ab"`; `host_matches` is case-insensitive and never matches bare suffix for `*.suffix`; `strip_uri_prefix` always produces a path starting with `/` and preserves query strings verbatim. |
+| `PathMatch`, `RouteMatch`, `host_matches`, `strip_uri_prefix` (`shunt-engine`) | `Prefix("/a")` never matches `"/ab"`; `host_matches` is case-insensitive and never matches bare suffix for `*.suffix`; `strip_uri_prefix` always produces a path starting with `/` and preserves query strings verbatim. |
 | `redact_secrets` (`shunt-config`) | For any arbitrarily nested JSON object containing sensitive key substrings in any casing (`Api_Key`, `x-token`, `password`, etc.), no original secret string ever survives anywhere in the serialized output. |
-| `strip_hop_by_hop_headers` & framing (`shunt-core`) | `Connection`-nominated headers and RFC 9110 hop-by-hop headers are always removed; buffered outgoing requests never contain both `Content-Length` and `Transfer-Encoding`. |
+| `strip_hop_by_hop_headers` & framing (`shunt-engine`) | `Connection`-nominated headers and RFC 9110 hop-by-hop headers are always removed; buffered outgoing requests never contain both `Content-Length` and `Transfer-Encoding`. |
 
 #### 2.2 Stateful Model-Based Tests (`proptest` / reference state machines)
 Generate random sequences of operations and compare the real Rust implementation against a tiny pure reference model after every step:
@@ -110,7 +110,7 @@ Dedicated `cargo-fuzz` targets (run nightly or on-demand in CI) for:
 
 ### Layer 3: Spec-Driven TOML Verification (`shunt verify` & `shunt test`)
 
-Promote declarative verification to a first-class feature in `shunt-config` + `shunt-cli` (zero impact on `shunt-core`'s runtime hot path).
+Promote declarative verification to a first-class feature in `shunt-config` + `shunt-cli` (zero impact on `shunt-engine`'s runtime hot path).
 
 #### 3.1 Static Policy & Invariant Verifier (`shunt verify`)
 
@@ -281,7 +281,7 @@ Three compact, self-contained TLA+ specs checked by **TLC** in CI:
 
 #### 4.2 Rust-Native Bounded Verification with Kani (`#[cfg(kani)]`)
 
-Add a small set of `#[kani::proof]` harnesses directly in `shunt-core` and `shunt-plugins` (run in CI via `cargo kani`):
+Add a small set of `#[kani::proof]` harnesses directly in `shunt-engine` and `shunt-plugins` (run in CI via `cargo kani`):
 - `HookMask` bitwise algebra (`contains`, `is_empty`, union/intersection identities).
 - `PathMatch::matches` & `host_matches` & `strip_uri_prefix` (panic-freedom & prefix-boundary safety for bounded strings).
 - `UpstreamPool::select_endpoint` index selection logic (panic-freedom, always `< len`, healthy-untried preference).
@@ -333,7 +333,7 @@ Add a dedicated `.github/workflows/verify.yml` workflow alongside existing `ci.y
   - Author `specs/conformance/*.spec.toml` covering RFCs 0001–0005.
 - **Phase 3 — Formal Models (TLA+, Loom, Kani) & Fuzzing**
   - Author `specs/tla/{AtomicReload,RequestPipeline,PassiveHealth}.tla` + `.cfg` files and wire TLC into `.github/workflows/verify.yml`.
-  - Add `#[cfg(kani)]` harnesses and `loom` atomic tests for `shunt-core` / `shunt-plugins`.
+  - Add `#[cfg(kani)]` harnesses and `loom` atomic tests for `shunt-engine` / `shunt-plugins`.
   - Add `fuzz/` targets (`cargo-fuzz`) and optional TLC trace validation from Rust soak/integration tests.
 
 ## Future Work

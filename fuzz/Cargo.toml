@@ -16,7 +16,7 @@ toml = "0.8"
 shunt-ai = { path = "../crates/shunt-ai" }
 shunt-mcp = { path = "../crates/shunt-mcp" }
 shunt-config = { path = "../crates/shunt-config" }
-shunt-core = { path = "../crates/shunt-core" }
+shunt-engine = { path = "../crates/shunt-engine" }
 shunt-plugin-sdk = { path = "../crates/shunt-plugin-sdk" }
 shunt-plugins = { path = "../crates/shunt-plugins" }
 

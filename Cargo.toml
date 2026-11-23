@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "crates/shunt-plugin-sdk",
-    "crates/shunt-core",
+    "crates/shunt-engine",
     "crates/shunt-plugins",
     "crates/shunt-ai",
     "crates/shunt-mcp",
@@ -21,7 +21,7 @@ repository = "https://github.com/shettyh/shunt"
 
 [workspace.dependencies]
 shunt-plugin-sdk = { version = "0.1.1", path = "crates/shunt-plugin-sdk" } # x-release-please-version
-shunt-core = { version = "0.1.1", path = "crates/shunt-core" } # x-release-please-version
+shunt-engine = { version = "0.1.1", path = "crates/shunt-engine" } # x-release-please-version
 shunt-plugins = { version = "0.1.1", path = "crates/shunt-plugins" } # x-release-please-version
 shunt-ai = { version = "0.1.1", path = "crates/shunt-ai" } # x-release-please-version
 shunt-mcp = { version = "0.1.1", path = "crates/shunt-mcp" } # x-release-please-version

@@ -1141,7 +1141,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "shunt-config",
- "shunt-core",
+ "shunt-engine",
  "shunt-plugin-sdk",
  "shunt-plugins",
  "tokio",
@@ -1175,7 +1175,7 @@ dependencies = [
  "serde_json",
  "shunt-ai",
  "shunt-config",
- "shunt-core",
+ "shunt-engine",
  "shunt-mcp",
  "shunt-plugin-sdk",
  "shunt-plugins",
@@ -1206,7 +1206,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
- "shunt-core",
+ "shunt-engine",
  "shunt-plugin-sdk",
  "shunt-plugins",
  "thiserror",
@@ -1217,7 +1217,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "shunt-core"
+name = "shunt-engine"
 version = "0.1.1"
 dependencies = [
  "arc-swap",
@@ -1259,7 +1259,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "shunt-config",
- "shunt-core",
+ "shunt-engine",
  "shunt-plugin-sdk",
  "shunt-plugins",
  "tokio",
@@ -1294,7 +1294,7 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
- "shunt-core",
+ "shunt-engine",
  "shunt-plugin-sdk",
  "tokio",
  "tracing",
@@ -1315,7 +1315,7 @@ dependencies = [
  "serde_json",
  "shunt-ai",
  "shunt-config",
- "shunt-core",
+ "shunt-engine",
  "shunt-mcp",
  "shunt-plugin-sdk",
  "shunt-plugins",

@@ -13,7 +13,7 @@ use shunt_config::{
     AdminServer, ConfigProvider, FileConfigProvider, InlineConfigProvider, ReloadController,
     SnapshotCompiler, start_file_watcher,
 };
-use shunt_core::{GatewayServer, RuntimeRegistry, ShuntBody};
+use shunt_engine::{GatewayServer, RuntimeRegistry, ShuntBody};
 use shunt_plugin_sdk::PluginRegistry;
 use shunt_plugins::{DevWaterfallPlugin, PrometheusMetrics, register_builtin_plugins};
 use tokio::net::{TcpListener, TcpStream};

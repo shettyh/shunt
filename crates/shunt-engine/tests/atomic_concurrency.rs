@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use shunt_core::EndpointState;
+use shunt_engine::EndpointState;
 
 /// Concurrent stress test verifying that `EndpointState`'s single-word `AtomicU64` CAS
 /// never exposes split `(consecutive_failures, unhealthy_until_ms)` state across threads.

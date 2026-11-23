@@ -69,7 +69,7 @@ Three reload triggers feed the exact same `ReloadController::reload()` path:
 
 ### 4. Dogfooded Built-in Plugins (`shunt-plugins`)
 
-Every built-in plugin depends strictly on `shunt-plugin-sdk` (never `shunt-core`):
+Every built-in plugin depends strictly on `shunt-plugin-sdk` (never `shunt-engine`):
 - `request-id` — propagates or generates `x-request-id` and attaches `RequestId` to `ctx.extensions`.
 - `bearer-auth` — constant-time token comparison with `env:VAR` secret indirection and `AuthSubject` extension.
 - `rate-limit` — token-bucket limiter keyed by `client_ip`, `header` (`key_header`), or `global`, backed by `StateStore` so buckets survive reloads.
@@ -95,7 +95,7 @@ Every built-in plugin depends strictly on `shunt-plugin-sdk` (never `shunt-core`
 - **Why considered:** One fewer port to configure.
 - **Why rejected:** High operational risk of accidentally exposing `/snapshot` or `/reload` to the public internet via misconfigured reverse proxies or ingress rules. A dedicated loopback listener enforces defense-in-depth by default.
 
-### 2. Building `shunt dev` Timing Output Directly Inside `shunt-core`
+### 2. Building `shunt dev` Timing Output Directly Inside `shunt-engine`
 - **Why considered:** Direct access to pipeline internals.
 - **Why rejected:** Violates "everything above transport is a plugin." Recording opt-in `HookTiming` entries in `RequestCtx` (gated by a single `ctx.trace_enabled` boolean) lets `DevWaterfallPlugin` render waterfalls purely through `on_request_headers` + `on_complete`.
 

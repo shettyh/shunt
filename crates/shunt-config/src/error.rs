@@ -41,7 +41,7 @@ pub enum ConfigError {
     Tls(String),
 
     #[error("core snapshot compilation error: {0}")]
-    Core(#[from] shunt_core::CoreError),
+    Core(#[from] shunt_engine::CoreError),
 
     #[error("file watcher error: {0}")]
     Watcher(String),

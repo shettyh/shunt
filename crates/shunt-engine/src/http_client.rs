@@ -49,7 +49,7 @@ impl Default for CoreHttpClientConfig {
 /// Shared, pooled outbound HTTP/HTTPS client built on Shunt's `hyper` + `rustls` stack.
 ///
 /// Exposed to plugins solely through the [`shunt_plugin_sdk::HttpClient`] trait so plugins
-/// remain completely independent of `shunt-core`, `hyper`, and `rustls`.
+/// remain completely independent of `shunt-engine`, `hyper`, and `rustls`.
 pub struct CoreHttpClient {
     config: CoreHttpClientConfig,
     client: Client<ShuntConnector, Full<Bytes>>,

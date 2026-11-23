@@ -11,7 +11,7 @@ RFC 0008 completes Phase A1 of [docs/vision.md](../docs/vision.md) by turning `s
 2. **Anthropic Messages** (`POST /v1/messages`) — lets Claude Code, Anthropic SDKs, and Anthropic-native agents point directly at Shunt and route seamlessly to Anthropic (zero-loss native passthrough), OpenAI, Ollama, Groq, Azure OpenAI, Google Gemini / Vertex AI, or AWS Bedrock with live bidirectional JSON & SSE translation and cross-cloud failover.
 3. **OpenAI Responses** (`POST /v1/responses`) — lets modern OpenAI SDKs, Codex CLI, and OpenAI Agents SDK route to native Responses-capable endpoints (zero-loss passthrough when `responses_path` is configured) OR transparently translate across Anthropic, Gemini, Bedrock, Ollama, Groq, and Azure Chat Completions with full streaming SSE lifecycle translation.
 
-All multi-protocol ingress logic lives **100% inside `shunt-ai`** with zero changes to `shunt-core` or `shunt-plugin-sdk`.
+All multi-protocol ingress logic lives **100% inside `shunt-ai`** with zero changes to `shunt-engine` or `shunt-plugin-sdk`.
 
 ## Motivation
 
@@ -68,7 +68,7 @@ Without multi-protocol ingress, teams must deploy separate proxies per SDK or lo
     OpenAI-Comp    Azure  Anthropic Gemini   Bedrock
 ```
 
-Because `shunt-core` passes a fresh O(1) refcount clone of the original buffered request body into `on_upstream_request` on **every retry attempt**, failover seamlessly mixes native fast paths and translated fallback paths within a single request:
+Because `shunt-engine` passes a fresh O(1) refcount clone of the original buffered request body into `on_upstream_request` on **every retry attempt**, failover seamlessly mixes native fast paths and translated fallback paths within a single request:
 - Attempt 1 on `POST /v1/messages` hits Anthropic natively -> `529 Overloaded` -> `ai-failover` retries.
 - Attempt 2 translates the original Anthropic request -> Canonical IR -> AWS Bedrock ConverseStream (with pure-Rust SigV4) and live-streams `Bedrock EventStream -> Canonical OpenAI SSE -> Anthropic Messages SSE` back to the client.
 

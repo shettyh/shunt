@@ -14,7 +14,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use shunt_config::{
     AdminServer, ConfigProvider, FileConfigProvider, ReloadController, SnapshotCompiler,
 };
-use shunt_core::{GatewayServer, RuntimeRegistry};
+use shunt_engine::{GatewayServer, RuntimeRegistry};
 use shunt_plugin_sdk::PluginRegistry;
 use shunt_plugins::{PrometheusMetrics, register_builtin_plugins};
 use tokio::net::TcpListener;

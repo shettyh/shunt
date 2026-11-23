@@ -1,11 +1,11 @@
 # RFC 0017: Per-Request Routing, Concurrency Quotas & Advanced Failover
 
 - **Status:** Implemented
-- **Crates:** `shunt-plugin-sdk`, `shunt-core`, `shunt-config`, `shunt-ai`, `specs/`, `examples/`, `fuzz/`
+- **Crates:** `shunt-plugin-sdk`, `shunt-engine`, `shunt-config`, `shunt-ai`, `specs/`, `examples/`, `fuzz/`
 
 ## 1. Summary
 
-This RFC completes Phase A4 of Shunt's AI gateway parity roadmap while contributing four general-purpose, strictly AI-free primitives to `shunt-plugin-sdk` and `shunt-core` (which also accelerate Path B API gateway workloads). It introduces:
+This RFC completes Phase A4 of Shunt's AI gateway parity roadmap while contributing four general-purpose, strictly AI-free primitives to `shunt-plugin-sdk` and `shunt-engine` (which also accelerate Path B API gateway workloads). It introduces:
 
 1. **AI-free Core/SDK primitives:** per-attempt response-headers timeout overrides (`UpstreamSelection::response_headers_timeout_override`), pre-flush conditional response-body inspection (`Flow::InspectResponseBody` + `on_response_body_inspected`), deterministic wall-clock timestamps on `Clock::unix_timestamp_secs`, and route-level fire-and-forget HTTP traffic mirroring (`RouteIr::mirrors`).
 2. **OpenRouter-style per-request routing & compliance:** opt-in `models[]` fallback lists and `provider: { order, only, ignore, sort, allow_fallbacks, data_collection, zdr, regions, tags }` overrides, target metadata (`context_window`, `max_output_tokens`, `zdr`, `regions`, `tags`, `upstream_rpm/tpm`, `ttft_timeout_ms`), context-window capability guards, and AI-aware sampled traffic shadowing.
@@ -24,7 +24,7 @@ Production teams running shared multi-tenant LLM gateways hit four operational e
 ## 3. Goals & Non-Goals
 
 ### Goals
-- **Zero AI in `shunt-core` and `shunt-plugin-sdk`:** Every transport primitive (timeout override, pre-flush response-body inspection, wall-clock `Clock`, route mirroring) is strictly generic HTTP infrastructure.
+- **Zero AI in `shunt-engine` and `shunt-plugin-sdk`:** Every transport primitive (timeout override, pre-flush response-body inspection, wall-clock `Clock`, route mirroring) is strictly generic HTTP infrastructure.
 - **Pay only for what you use:** Zero heap allocation and zero extra buffering on `200 OK` or routes that do not enable mirroring, body inspection, concurrency quotas, or pre-flight holds.
 - **Client overrides can never escalate privileges:** Per-request `models[]` and `provider.*` filters strictly intersect with `AiKeyPolicy::allowed_models` and `allowed_providers`.
 - **Leak-free RAII resource guards:** Concurrency leases and pre-flight budget holds release/refund deterministically on normal completion, short-circuit, stream abort, client disconnect, or plugin panic.
@@ -39,14 +39,14 @@ Production teams running shared multi-tenant LLM gateways hit four operational e
 ### 4.1 AI-Free Core & SDK Primitives
 
 1. **`UpstreamSelection::response_headers_timeout_override: Option<Duration>`**
-   - When set in `on_upstream_select`, `shunt-core::pipeline::execute_request` passes this deadline instead of `route.timeouts.response_headers_timeout` to `pool.send_request(...)`.
-   - When `CoreError::ResponseHeadersTimeout` occurs and `attempt < max_attempts && body_is_replayable`, `shunt-core` records `ctx.last_upstream_status = Some(504)` and `ctx.last_upstream_error`, then continues to the next attempt.
+   - When set in `on_upstream_select`, `shunt-engine::pipeline::execute_request` passes this deadline instead of `route.timeouts.response_headers_timeout` to `pool.send_request(...)`.
+   - When `CoreError::ResponseHeadersTimeout` occurs and `attempt < max_attempts && body_is_replayable`, `shunt-engine` records `ctx.last_upstream_status = Some(504)` and `ctx.last_upstream_error`, then continues to the next attempt.
 2. **`Flow::InspectResponseBody { max_bytes: usize }` & `HookMask::ON_RESPONSE_BODY_INSPECTED`**
    - Valid only from `on_response_headers` when `body_is_replayable` (or pre-flush inspection is desired).
-   - When a plugin returns `Flow::InspectResponseBody { max_bytes }`, `shunt-core` reads the upstream response body bounded by `max_bytes` using `collect_body_limited`.
-   - If the body fits within `max_bytes`, `shunt-core` invokes `on_response_body_inspected(&mut ctx, &mut res_head, &body)` on plugins with `HookMask::ON_RESPONSE_BODY_INSPECTED`.
+   - When a plugin returns `Flow::InspectResponseBody { max_bytes }`, `shunt-engine` reads the upstream response body bounded by `max_bytes` using `collect_body_limited`.
+   - If the body fits within `max_bytes`, `shunt-engine` invokes `on_response_body_inspected(&mut ctx, &mut res_head, &body)` on plugins with `HookMask::ON_RESPONSE_BODY_INSPECTED`.
    - Returning `Flow::RetryUpstream` (when `attempt < max_attempts && body_is_replayable`) discards the buffered error response and advances the retry loop. Returning `Flow::Respond(resp)` overrides the response. Returning `Flow::Continue` flushes the already-buffered `res_head` + `body` downstream verbatim (with `on_complete` still firing).
-   - If the response exceeds `max_bytes`, `shunt-core` skips retry inspection cleanly and returns a safe error or falls through without unbounded memory growth.
+   - If the response exceeds `max_bytes`, `shunt-engine` skips retry inspection cleanly and returns a safe error or falls through without unbounded memory growth.
 3. **`Clock::unix_timestamp_secs(&self) -> u64`**
    - Defaulted method on `Clock` backed by `SystemTime::UNIX_EPOCH` on `SystemClock` and an explicitly settable epoch offset (`set_unix_timestamp_secs`) + elapsed duration on `ManualClock`.
 4. **Route-Level HTTP Traffic Mirroring (`TrafficMirrorSpec` / `RouteMirrorIr`)**
@@ -94,7 +94,7 @@ Production teams running shared multi-tenant LLM gateways hit four operational e
 
 ## 5. Alternatives Considered & Rejected
 
-1. **Always buffering 4xx upstream responses in `shunt-core`:** Rejected—forces unnecessary buffering on routes that never inspect error bodies; opt-in `Flow::InspectResponseBody { max_bytes }` preserves zero-copy passthrough everywhere else.
+1. **Always buffering 4xx upstream responses in `shunt-engine`:** Rejected—forces unnecessary buffering on routes that never inspect error bodies; opt-in `Flow::InspectResponseBody { max_bytes }` preserves zero-copy passthrough everywhere else.
 2. **Adding `chrono` or `time` crates just to parse RFC 3339 `expires_at`:** Rejected—a 40-line pure-Rust RFC 3339 UTC timestamp parser (Howard Hinnant's civil-from-days formula) keeps the dependency graph minimal and compile times fast.
 3. **Fetching remote pricing JSON over HTTP at startup:** Rejected—breaks single-binary zero-dependency startup and air-gapped VPC deployments; local file loading integrates cleanly with `shunt`'s existing atomic file-watch hot reload.
 

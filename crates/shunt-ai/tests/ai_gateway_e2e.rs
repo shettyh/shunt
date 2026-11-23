@@ -18,7 +18,7 @@ use shunt_ai::{
     AiUsageTrackerFactory, SseParser, register_ai_plugins,
 };
 use shunt_config::{ConfigProvider, InlineConfigProvider, SnapshotCompiler};
-use shunt_core::{GatewayServer, RuntimeRegistry};
+use shunt_engine::{GatewayServer, RuntimeRegistry};
 use shunt_plugin_sdk::PluginRegistry;
 use shunt_plugins::{PrometheusMetrics, register_builtin_plugins};
 use tokio::net::TcpListener;

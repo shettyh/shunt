@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use shunt_core::{PathMatch, RouteMatch, host_matches};
+use shunt_engine::{PathMatch, RouteMatch, host_matches};
 use shunt_plugin_sdk::HookMask;
 
 use crate::compiler::CompiledBundle;
@@ -863,7 +863,7 @@ mod tests {
     use std::sync::Arc;
 
     use http::Method;
-    use shunt_core::RuntimeRegistry;
+    use shunt_engine::RuntimeRegistry;
     use shunt_plugin_sdk::PluginRegistry;
     use shunt_plugins::{PrometheusMetrics, register_builtin_plugins};
 

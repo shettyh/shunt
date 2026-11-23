@@ -7,11 +7,11 @@
 
 ## 1. Core Philosophy
 
-1. **Tiny, readable core:** A developer can read `shunt-core` in an afternoon and understand the full path from TCP accept to response flush.
+1. **Tiny, readable core:** A developer can read `shunt-engine` in an afternoon and understand the full path from TCP accept to response flush.
 2. **Everything above transport is a plugin:** First-party features (auth, rate limiting, CORS, retries, metrics, AI routing) use the *exact same* `shunt-plugin-sdk` as third-party plugins. No privileged internal shortcuts.
 3. **Pay only for what you use:** Per-route `HookMask` bitmasks and a hybrid sync/async dispatch model mean routes without body or I/O plugins run unbuffered and allocation-free on the hot path.
 4. **Dev-first ergonomics:** Instant hot reloads, atomic zero-downtime snapshot swaps, and a `shunt dev` mode with live per-hook microsecond trace waterfalls.
-5. **AI-agnostic core, AI-proven primitives:** Zero AI concepts (`Model`, `Prompt`, `Token`) inside `shunt-core`. Building `shunt-ai` strictly as plugins proves the core's streaming, dynamic routing, failover, split-timeout, and accounting primitives.
+5. **AI-agnostic core, AI-proven primitives:** Zero AI concepts (`Model`, `Prompt`, `Token`) inside `shunt-engine`. Building `shunt-ai` strictly as plugins proves the core's streaming, dynamic routing, failover, split-timeout, and accounting primitives.
 
 ---
 
@@ -42,7 +42,7 @@ The system is organized around **four deep seams**:
 
 ---
 
-## 3. Core Transport & Runtime (`shunt-core`)
+## 3. Core Transport & Runtime (`shunt-engine`)
 
 - **Runtime:** Standard multi-threaded **`tokio`** runtime (broad Rust ecosystem compatibility, clean `Send + Sync` plugins, cross-platform macOS/Linux).
 - **HTTP & TLS stack:** Built directly on **`hyper` v1 + `rustls`**.
@@ -139,7 +139,7 @@ Config reloads produce a brand-new immutable `GatewaySnapshot` swapped atomicall
 ## 6. Configuration & Admin API (`shunt-config`)
 
 - **Canonical IR:** `shunt.toml` (and optional YAML) parses into a typed canonical IR, which compiles into `GatewaySnapshot`. Invalid reloads fail atomically with actionable diagnostics while leaving the last-known-good snapshot serving traffic.
-- **v1 Authoritative Source:** `shunt.toml` is the sole source of truth in v1 (file watcher + explicit reload). All config inputs sit behind a `ConfigProvider` trait so remote API / K8s CRD providers can be added in v2 without touching `shunt-core`.
+- **v1 Authoritative Source:** `shunt.toml` is the sole source of truth in v1 (file watcher + explicit reload). All config inputs sit behind a `ConfigProvider` trait so remote API / K8s CRD providers can be added in v2 without touching `shunt-engine`.
 - **Read-Only Admin Listener (v1):**
   - Always bound to a **separate listener** (`127.0.0.1:9090` by default — never shared with public proxy listeners).
   - Endpoints:
@@ -174,7 +174,7 @@ shunt/
 │   └── design.md            # This specification
 ├── crates/
 │   ├── shunt-plugin-sdk/    # Public traits, HookMask, HookResult, Flow, RequestCtx, StateStore
-│   ├── shunt-core/          # Tokio/Hyper/Rustls server, upstream pools, RuntimeRegistry, hook runner
+│   ├── shunt-engine/          # Tokio/Hyper/Rustls server, upstream pools, RuntimeRegistry, hook runner
 │   ├── shunt-config/        # Canonical IR, shunt.toml loader/watcher, SnapshotCompiler, Admin API
 │   ├── shunt-plugins/       # First-party general plugins (request-id, logging, bearer-auth, rate-limit, CORS, metrics)
 │   ├── shunt-ai/            # AI router plugin pack (model router, OpenAI/Anthropic adapters, failover, SSE accounting)
@@ -203,7 +203,7 @@ Reproducible benchmark harness comparing `shunt` against **Caddy** and **Envoy**
 
 ## 10. Phased Implementation Plan
 
-1. **Phase 1 — Core Engine & SDK (`shunt-plugin-sdk`, `shunt-core`):**
+1. **Phase 1 — Core Engine & SDK (`shunt-plugin-sdk`, `shunt-engine`):**
    - `HookMask`, `HookResult` (sync/async), `Flow`, `RequestCtx`, `PluginFactory`, `RuntimeRegistry`.
    - `tokio` + `hyper` v1 + `rustls` H1/H2 listener & upstream pool, WebSocket upgrade, split timeouts, graceful drain, `ArcSwap` snapshot runner, per-attempt upstream loop.
 2. **Phase 2 — Config, Admin & Built-in Plugins (`shunt-config`, `shunt-plugins`, `shunt-cli`):**

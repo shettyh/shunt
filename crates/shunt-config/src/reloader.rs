@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use shunt_core::ServerReloader;
+use shunt_engine::ServerReloader;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -46,8 +46,8 @@ impl ReloadController {
         self.inspect.load_full()
     }
 
-    /// Returns the currently active compiled [`shunt_core::GatewaySnapshot`].
-    pub fn current_snapshot(&self) -> Arc<shunt_core::GatewaySnapshot> {
+    /// Returns the currently active compiled [`shunt_engine::GatewaySnapshot`].
+    pub fn current_snapshot(&self) -> Arc<shunt_engine::GatewaySnapshot> {
         self.reloader.current_snapshot()
     }
 

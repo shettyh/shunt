@@ -26,7 +26,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use serde_json::{Value, json};
 use shunt_ai::{AiMetrics, inspect_ai_runtime, register_ai_plugins};
 use shunt_config::{ConfigProvider, InlineConfigProvider, SnapshotCompiler};
-use shunt_core::{GatewayServer, RuntimeRegistry};
+use shunt_engine::{GatewayServer, RuntimeRegistry};
 use shunt_plugin_sdk::{ManualClock, PluginRegistry};
 use shunt_plugins::{PrometheusMetrics, register_builtin_plugins};
 use tokio::net::TcpListener;
@@ -113,7 +113,7 @@ async fn boot_gateway(
     clock: Option<Arc<ManualClock>>,
 ) -> (
     std::net::SocketAddr,
-    shunt_core::ServerHandle,
+    shunt_engine::ServerHandle,
     Arc<RuntimeRegistry>,
     Arc<AiMetrics>,
 ) {

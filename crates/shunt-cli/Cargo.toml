@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 shunt-plugin-sdk.workspace = true
-shunt-core.workspace = true
+shunt-engine.workspace = true
 shunt-config.workspace = true
 shunt-plugins.workspace = true
 shunt-ai.workspace = true

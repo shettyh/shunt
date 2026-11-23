@@ -9,7 +9,7 @@ description = "Declarative TOML contract test engine and fault-injecting mock up
 
 [dependencies]
 shunt-plugin-sdk.workspace = true
-shunt-core.workspace = true
+shunt-engine.workspace = true
 shunt-plugins.workspace = true
 shunt-ai.workspace = true
 shunt-mcp.workspace = true

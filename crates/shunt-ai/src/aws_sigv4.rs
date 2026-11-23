@@ -311,7 +311,7 @@ pub fn sign_upstream_request(
     })?;
     let host = host_header_from_endpoint(endpoint_uri)?;
 
-    // Combine endpoint base path (if any) with req.uri path, matching `shunt-core::build_target_uri`.
+    // Combine endpoint base path (if any) with req.uri path, matching `shunt-engine::build_target_uri`.
     let base_path = endpoint_uri.path().trim_end_matches('/');
     let req_path = req.uri.path();
     let full_path = if base_path.is_empty() || base_path == "/" {

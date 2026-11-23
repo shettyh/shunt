@@ -5,7 +5,7 @@
 
 ## Summary
 
-`shunt-ai` implements an OpenAI-compatible multi-provider AI gateway (supporting OpenAI and Anthropic backends, non-streaming JSON and live SSE streaming, automatic `429`/`5xx` failover, stateful cooldowns, and token/TTFT accounting) **strictly as a plugin pack on top of `shunt-plugin-sdk`**, with zero AI concepts or dependencies inside `shunt-core`.
+`shunt-ai` implements an OpenAI-compatible multi-provider AI gateway (supporting OpenAI and Anthropic backends, non-streaming JSON and live SSE streaming, automatic `429`/`5xx` failover, stateful cooldowns, and token/TTFT accounting) **strictly as a plugin pack on top of `shunt-plugin-sdk`**, with zero AI concepts or dependencies inside `shunt-engine`.
 
 ## Motivation
 
@@ -16,12 +16,12 @@ AI gateways exercise the hardest primitives in an HTTP proxy simultaneously:
 - Live chunk-by-chunk SSE protocol translation across arbitrary TCP packet boundaries.
 - Long-lived streams requiring split TTFB vs. idle-chunk timeouts and accurate Time-To-First-Token (TTFT) + token usage accounting.
 
-Building `shunt-ai` strictly through `shunt-plugin-sdk` serves a dual purpose: delivering a genuinely useful AI router *and* proving that `shunt-core`'s general-purpose primitives are complete without special-casing AI.
+Building `shunt-ai` strictly through `shunt-plugin-sdk` serves a dual purpose: delivering a genuinely useful AI router *and* proving that `shunt-engine`'s general-purpose primitives are complete without special-casing AI.
 
 ## Goals & Non-Goals
 
 ### Goals
-- Zero dependency on `shunt-core` or `hyper` in `crates/shunt-ai/Cargo.toml`'s `[dependencies]`.
+- Zero dependency on `shunt-engine` or `hyper` in `crates/shunt-ai/Cargo.toml`'s `[dependencies]`.
 - Unified OpenAI-compatible frontend: `POST /v1/chat/completions` (both JSON and `text/event-stream`).
 - Clean composable 4-plugin split (`ai-model-router`, `ai-provider-adapter`, `ai-failover`, `ai-usage-tracker`) communicating via typed `RequestCtx::extensions`.
 - Support OpenAI and Anthropic (text, system/developer prompts, images, tool calls / `tool_use` / `tool_result`, stop sequences, error schema mapping).
@@ -59,7 +59,7 @@ Client: POST /v1/chat/completions (OpenAI JSON)
   ├─ [ai-failover]
   │    • on_response_headers: on 429/5xx/529, record FailoverEvent (+ optional cooldown),
   │      return Flow::RetryUpstream if ctx.attempt < max_attempts
-  │      -> shunt-core replays canonical OpenAI body on next attempt!
+  │      -> shunt-engine replays canonical OpenAI body on next attempt!
   │
   ├─ [ai-provider-adapter]
   │    • on_response_body_chunk:
@@ -99,9 +99,9 @@ Client: POST /v1/chat/completions (OpenAI JSON)
 - **Why considered:** Fewer config blocks in `shunt.toml`; no need to share state through `ctx.extensions`.
 - **Why rejected:** Prevents mixing and matching (e.g., using `ai-usage-tracker` without `ai-failover`, or plugging in a custom third-party router or token-rate-limiter between `ai-model-router` and `ai-provider-adapter`). Splitting into 4 focused plugins proves `ctx.extensions` composability and gives clear per-plugin timings in `shunt dev`.
 
-### 2. Adding a Dedicated `RESPONSE_BODY_BUFFERED` Hook to `shunt-core`
+### 2. Adding a Dedicated `RESPONSE_BODY_BUFFERED` Hook to `shunt-engine`
 - **Why considered:** Would simplify non-streaming Anthropic JSON translation.
-- **Why rejected:** Non-streaming vs. streaming is only known dynamically per request (via JSON `"stream"` and response `Content-Type`), not statically at route-compilation time. Handling bounded non-streaming buffering inside `ai-provider-adapter::on_response_body_chunk` (returning empty `Bytes` until `end_of_stream = true`) keeps `shunt-core` smaller and lets a single route serve both JSON and SSE seamlessly.
+- **Why rejected:** Non-streaming vs. streaming is only known dynamically per request (via JSON `"stream"` and response `Content-Type`), not statically at route-compilation time. Handling bounded non-streaming buffering inside `ai-provider-adapter::on_response_body_chunk` (returning empty `Bytes` until `end_of_stream = true`) keeps `shunt-engine` smaller and lets a single route serve both JSON and SSE seamlessly.
 
 ### 3. Passing Client API Keys Directly to Upstreams
 - **Why considered:** Zero secret config in `shunt.toml`.

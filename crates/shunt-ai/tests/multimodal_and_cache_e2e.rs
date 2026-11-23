@@ -28,7 +28,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use serde_json::{Value, json};
 use shunt_ai::{AiMetrics, inspect_ai_runtime, register_ai_plugins};
 use shunt_config::{ConfigProvider, InlineConfigProvider, SnapshotCompiler};
-use shunt_core::{GatewayServer, RuntimeRegistry};
+use shunt_engine::{GatewayServer, RuntimeRegistry};
 use shunt_plugin_sdk::PluginRegistry;
 use shunt_plugins::{PrometheusMetrics, register_builtin_plugins};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -126,7 +126,7 @@ async fn start_gateway(
     std::net::SocketAddr,
     Arc<AiMetrics>,
     Arc<RuntimeRegistry>,
-    shunt_core::ServerHandle,
+    shunt_engine::ServerHandle,
 ) {
     let loaded = InlineConfigProvider::from_toml("rfc0016-test", toml_cfg)
         .load()

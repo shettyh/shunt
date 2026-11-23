@@ -16,7 +16,7 @@ use rcgen::{
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
-use shunt_core::{
+use shunt_engine::{
     CertStore, ClientAuthConfig, ClientAuthMode, DynamicCertResolver, GatewayServer, RouteMatch,
     RouteSpec, RuntimeRegistry, SnapshotBuilder, TlsListenerConfig, UpstreamConfig,
     ensure_crypto_provider, load_certified_key_pem, parse_client_cert_info,

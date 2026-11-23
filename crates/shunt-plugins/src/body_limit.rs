@@ -10,7 +10,7 @@ use shunt_plugin_sdk::{
 #[serde(deny_unknown_fields)]
 struct BodyLimitConfig {
     /// Maximum permitted request body size in bytes (enforced on both `Content-Length`
-    /// and unbuffered streaming chunked/HTTP2 bodies via `shunt-core`).
+    /// and unbuffered streaming chunked/HTTP2 bodies via `shunt-engine`).
     max_bytes: usize,
     /// Optional HTTP status code returned on rejection (default: `413`).
     #[serde(default = "default_status_code")]
@@ -53,7 +53,7 @@ impl PluginFactory for BodyLimitFactory {
 }
 
 /// Request body size limiter that rejects oversized `Content-Length` requests synchronously
-/// in `on_request_headers` AND informs `shunt-core` via [`HttpPlugin::max_request_body_bytes`]
+/// in `on_request_headers` AND informs `shunt-engine` via [`HttpPlugin::max_request_body_bytes`]
 /// to enforce the exact same cap on unbuffered chunked/HTTP2 streaming bodies without buffering.
 pub struct BodyLimitPlugin {
     max_bytes: usize,

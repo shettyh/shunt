@@ -32,7 +32,7 @@ pub struct UpstreamRequest {
     pub body: Option<Bytes>,
     /// Resolved base URI of the selected upstream endpoint for this attempt
     /// (e.g., `https://bedrock-runtime.us-east-1.amazonaws.com` or `http://127.0.0.1:18080`).
-    /// Populated by `shunt-core` prior to `on_upstream_request` so signing/auth plugins
+    /// Populated by `shunt-engine` prior to `on_upstream_request` so signing/auth plugins
     /// can inspect the exact target scheme, authority, and base path.
     pub endpoint_uri: Option<Uri>,
 }

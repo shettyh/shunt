@@ -27,7 +27,7 @@
         {
           "type": "toml",
           "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name.value==\"shunt-core\")].version"
+          "jsonpath": "$.package[?(@.name.value==\"shunt-engine\")].version"
         },
         {
           "type": "toml",

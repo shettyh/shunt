@@ -37,7 +37,7 @@ fn default_context_overflow_max_inspect_bytes() -> usize {
 
 /// Marker storing the target that was dispatched on the previous attempt so `ai-failover`
 /// can record timeout / transport failures into `FailoverCircuitState` and `AiFailoverHistory`
-/// when `shunt-core` automatically retries after a `504` / `502` transport failure.
+/// when `shunt-engine` automatically retries after a `504` / `502` transport failure.
 #[derive(Debug, Clone)]
 struct LastAttemptTarget {
     attempt: usize,
@@ -352,7 +352,7 @@ impl HttpPlugin for AiFailoverPlugin {
         ctx: &'a mut RequestCtx,
         selection: &'a mut UpstreamSelection,
     ) -> HookResult<'a, Flow> {
-        // If a previous attempt failed due to a transport/TTFT timeout (`shunt-core` retried
+        // If a previous attempt failed due to a transport/TTFT timeout (`shunt-engine` retried
         // before `on_response_headers`), record it in failover history & cooldown state.
         if ctx.attempt > 1
             && ctx.last_upstream_error.is_some()

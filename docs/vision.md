@@ -9,7 +9,7 @@
 
 ## 1. North Star
 
-**Shunt** aims to be the **fastest, cleanest single-binary Rust gateway for both AI workloads and modern HTTP APIs**—combining a tiny, Envoy-beating data plane (`shunt-core`) with a zero-overhead plugin SDK (`shunt-plugin-sdk`).
+**Shunt** aims to be the **fastest, cleanest single-binary Rust gateway for both AI workloads and modern HTTP APIs**—combining a tiny, Envoy-beating data plane (`shunt-engine`) with a zero-overhead plugin SDK (`shunt-plugin-sdk`).
 
 Most teams today face an awkward split:
 - For **AI traffic**, they run slow, memory-hungry Python proxies (LiteLLM), pay SaaS markups and send sensitive traffic outside their VPC (OpenRouter), or adopt heavyweight enterprise stacks (Kong/Envoy AI Gateway).
@@ -17,7 +17,7 @@ Most teams today face an awkward split:
 
 Shunt bridges both with one architectural bet:
 
-> **Keep `shunt-core` small, verifiable, and strictly AI-agnostic—and prove its power by building a world-class self-hosted AI Gateway (`Path A`) and a developer-first HTTP API Gateway (`Path B`) entirely as composable plugins on top.**
+> **Keep `shunt-engine` small, verifiable, and strictly AI-agnostic—and prove its power by building a world-class self-hosted AI Gateway (`Path A`) and a developer-first HTTP API Gateway (`Path B`) entirely as composable plugins on top.**
 
 Every core capability required to win Path A (distributed state, virtual keys/JWT, weighted & latency-aware routing, active health checks, OpenTelemetry tracing, high-concurrency streaming) directly accelerates Path B.
 
@@ -27,7 +27,7 @@ Every core capability required to win Path A (distributed state, virtual keys/JW
 
 Shunt has a verified, high-performance foundation ([docs/design.md](design.md), [rfcs/README.md](../rfcs/README.md)):
 
-- **Data plane (`shunt-core`):** HTTP/1.1 & HTTP/2 (downstream + upstream), SNI TLS with hot-reloadable certs, WebSocket upgrades, streaming bodies/SSE, split timeouts (`connect`, `response_headers`/TTFB, `idle_chunk`), weighted upstream pools with active HTTP/TCP health probes + passive endpoint health tracking, optional Redis/Valkey `DistributedStore`, zero-dependency bounded async OTLP/HTTP JSON trace export, and lock-free `ArcSwap` atomic reloads with warm pool reuse.
+- **Data plane (`shunt-engine`):** HTTP/1.1 & HTTP/2 (downstream + upstream), SNI TLS with hot-reloadable certs, WebSocket upgrades, streaming bodies/SSE, split timeouts (`connect`, `response_headers`/TTFB, `idle_chunk`), weighted upstream pools with active HTTP/TCP health probes + passive endpoint health tracking, optional Redis/Valkey `DistributedStore`, zero-dependency bounded async OTLP/HTTP JSON trace export, and lock-free `ArcSwap` atomic reloads with warm pool reuse.
 - **Proven performance ([RFC 0020](../rfcs/0020-unified-comprehensive-benchmarks.md)):** **84.8k req/s** raw HTTP/1.1, **90.9k req/s** TLS 1.3 + HTTP/2 (`962 µs` p99, `22.6 MB` RSS), **83.6k req/s** (`1.04 ms` p99, `24.0 MB` RSS) with a 3-plugin chain, **68.7k req/s** with HS256 JWT + streaming `zstd`, and **78.9k req/s** across a 200-route weighted LB table (outperforming Envoy 1.40.2 and Caddy v2.11.9 on HTTP/1.1, plugin chains, JWT+`zstd`, 200-route LB, and open-loop 25k RPS tail latency); **56.3k req/s** (`1.57 ms` p99, `31.8 MB` RSS) on realistic 4 KB multi-turn Anthropic ↔ OpenAI translation through the full 8-plugin governed AI chain (**94×** throughput and **65×** less RAM than 4-worker LiteLLM 1.110.2), **77.1k req/s** governed MCP `tools/call` (**160.0k req/s** loop-breaker fast-path), and **84.8k req/s** with `0` errors during live `POST /reload` every 500 ms.
 - **Pure-plugin multi-provider AI gateway (`shunt-ai`):**
   - **Multi-protocol ingress:** `POST /v1/chat/completions`, `POST /v1/messages` (+ local `/v1/messages/count_tokens`), `POST /v1/responses`, `POST /v1/embeddings`, and synthesized `GET /v1/models` / `GET /v1/models/{id}`.
@@ -52,7 +52,7 @@ Shunt has a verified, high-performance foundation ([docs/design.md](design.md), 
 
 1. **Not a hosted model marketplace / billing SaaS:** Shunt is a self-hosted BYOK (Bring Your Own Key) gateway, not a resale marketplace like OpenRouter.
 2. **Not an Envoy service-mesh clone:** We will not chase L4 TCP/UDP proxying, xDS, SPIFFE sidecar meshes, or legacy enterprise ESB features.
-3. **Never leak AI concepts into `shunt-core`:** `Model`, `Prompt`, `Token`, and provider schemas stay strictly inside `shunt-ai` (and future AI plugins). If `shunt-ai` needs a new capability, we design a general-purpose transport/SDK primitive for it.
+3. **Never leak AI concepts into `shunt-engine`:** `Model`, `Prompt`, `Token`, and provider schemas stay strictly inside `shunt-ai` (and future AI plugins). If `shunt-ai` needs a new capability, we design a general-purpose transport/SDK primitive for it.
 
 ---
 
@@ -91,7 +91,7 @@ Move beyond static failover into intelligent traffic optimization and deep visib
 
 ### Phase A4 — Production AI Parity *(Next Priority — Closing Remaining LiteLLM / OpenRouter Gaps)*
 
-Close the remaining non-UI feature gaps needed for seamless drop-in replacement of LiteLLM and OpenRouter in demanding production environments—while keeping `shunt-core` strictly AI-agnostic and zero-bloat:
+Close the remaining non-UI feature gaps needed for seamless drop-in replacement of LiteLLM and OpenRouter in demanding production environments—while keeping `shunt-engine` strictly AI-agnostic and zero-bloat:
 
 - **Deep Protocol & Translation Polish:**
   - Cross-provider **reasoning / extended thinking** translation (`reasoning_effort` ↔ Anthropic `thinking` ↔ Gemini `thinkingConfig` ↔ Bedrock) with response `thinking`/`reasoning_content` mapping and `reasoning_tokens` accounting.
@@ -139,7 +139,7 @@ Many core API gateway features land directly as part of Path A:
 
 ### Phase B2 — Dynamic Control Planes & Cloud-Native Deployment
 
-Leverage the `ConfigProvider` trait designed in [docs/design.md](design.md#L142) without changing `shunt-core`:
+Leverage the `ConfigProvider` trait designed in [docs/design.md](design.md#L142) without changing `shunt-engine`:
 
 - **Kubernetes Gateway API provider:** Watch `Gateway`, `HTTPRoute`, and `Secret` (TLS) resources and compile them directly into Shunt's immutable `GatewaySnapshot`.
 - **Control-plane / API config provider:** Optional remote pull (HTTP/GitOps/etcd) or authenticated push endpoint for fleet-wide config distribution, plus official Helm chart and Terraform/Docker Compose recipes.
@@ -150,7 +150,7 @@ Today, custom plugins implement `HttpPlugin` in Rust and compile into the binary
 
 - **Tier 2 — Wasm Component Model (WIT) plugins:** Expose `shunt-plugin-sdk`'s hyper-free types over WIT (`wasmtime`) so teams can write hot-reloadable plugins in Rust, Go, TypeScript, or Python with sandboxed fault isolation.
 - **External callout plugins (`ext_authz` / webhook):** Clean async HTTP/gRPC callout plugins for integrating existing auth, policy (OPA), or guardrail services.
-- **Embeddable Rust ecosystem (`crates.io`):** Publish `shunt-plugin-sdk`, `shunt-core`, `shunt-plugins`, and `shunt-ai` as clean library crates so Rust teams can embed Shunt as a batteries-included alternative to raw `hyper` or `pingora`.
+- **Embeddable Rust ecosystem (`crates.io`):** Publish `shunt-plugin-sdk`, `shunt-engine`, `shunt-plugins`, and `shunt-ai` as clean library crates so Rust teams can embed Shunt as a batteries-included alternative to raw `hyper` or `pingora`.
 
 ---
 
@@ -171,7 +171,7 @@ To give developers and companies strong visibility and self-service management *
 - Teams keep historical analytics, alerting, and prompt tracing in the tools they already operate rather than managing another siloed dashboard.
 
 ### Layer 3 — Full Management UI & Runtime CRUD Control Plane (`shunt-console`)
-- A full read/write management portal and runtime CRUD API (dynamic virtual key creation/rotation/expiry, spend ledger queries, model/route edits) will **never** be embedded inside `shunt` or `shunt-core`. Instead, when teams need centralized UI- or API-driven management, it lives as a **separate optional companion service** (`shunt-console`, backed by SQLite/Postgres) that drives one or more stateless `shunt` data-plane instances strictly through the `ConfigProvider` and telemetry/admin seams.
+- A full read/write management portal and runtime CRUD API (dynamic virtual key creation/rotation/expiry, spend ledger queries, model/route edits) will **never** be embedded inside `shunt` or `shunt-engine`. Instead, when teams need centralized UI- or API-driven management, it lives as a **separate optional companion service** (`shunt-console`, backed by SQLite/Postgres) that drives one or more stateless `shunt` data-plane instances strictly through the `ConfigProvider` and telemetry/admin seams.
 - `shunt-console` covers **both** AI Gateway and HTTP API Gateway management in one control plane:
   - **AI Gateway Management:** Programmatic & UI virtual API key CRUD (with expiration & rotation), team/org/end-user spend budgets & historical ledger APIs, model alias & fallback routing editor, provider credential management, interactive model playground, and historical token/cost dashboards.
   - **API Gateway Management:** Visual CRUD for routes, upstream pools, weighted canary/blue-green traffic splits, active health status, SNI TLS certificates, and global/per-route plugin chains (JWT/OIDC, rate limits, CORS, header rewrites, Wasm plugins) with pre-publish config validation (`shunt check` / `shunt verify` semantics).
@@ -184,7 +184,7 @@ To give developers and companies strong visibility and self-service management *
 
 As Shunt grows across Path A, Path B, and optional UI/control-plane layers, five non-negotiable invariants protect its simplicity and speed:
 
-1. **Strict crate isolation (zero AI in `shunt-core`):** `shunt-core` never contains AI concepts (`Model`, `Prompt`, `Token`, provider schemas) and never depends on `shunt-ai`, `shunt-plugins`, a database, or a UI framework. Every feature above HTTP/TLS/WS/SSE transport lives strictly on top of `shunt-plugin-sdk`.
+1. **Strict crate isolation (zero AI in `shunt-engine`):** `shunt-engine` never contains AI concepts (`Model`, `Prompt`, `Token`, provider schemas) and never depends on `shunt-ai`, `shunt-plugins`, a database, or a UI framework. Every feature above HTTP/TLS/WS/SSE transport lives strictly on top of `shunt-plugin-sdk`.
 2. **Pay only for what you use:** Every new hook or capability must be gated by `HookMask` and preserve the zero-allocation sync fast path for routes that do not opt in.
 3. **Single-binary zero-dependency default:** External dependencies (Redis, OTLP collectors, K8s API, `shunt-console`) are always *opt-in*. `shunt run -c shunt.toml` must always work out of the box with zero sidecars or databases.
 4. **Atomic, zero-downtime everything:** Config, TLS certs, virtual keys, pricing tables, and provider lists reload atomically via `ArcSwap` with graceful draining.
@@ -199,7 +199,7 @@ RFCs **0001–0012** are implemented and verified in the codebase (see [rfcs/REA
 | Priority | Proposed RFC | Scope | Path |
 | --- | --- | --- | --- |
 | **1** | **RFC 0013 — Deep Protocol Parity, Provider Presets & Multi-Key Pools** *(Implemented)* | Cross-provider reasoning/thinking translation, prompt-cache write (`cache_creation_input_tokens`) & tiered pricing, `drop_params` + param overrides, Anthropic/Bedrock `json_schema`, Claude-on-Vertex, Bedrock embeddings, built-in provider presets, multi-key upstream pools, and BYOK passthrough | Path A (A4) |
-| **2** | **RFC 0014 — Dynamic Cloud IAM Auth & Outbound HTTP Client Primitive** *(Implemented)* | AI-free `HttpClient` seam in `shunt-plugin-sdk` + `hyper`/`rustls` impl in `shunt-core`, powering cached, reload-persistent token refresh for AWS IAM (IMDSv2/ECS/EKS IRSA/STS), GCP ADC/Workload Identity/Service Account JWT, and Azure Entra ID (Managed Identity/`client_credentials`/Workload Identity) | Path A (A4) + Path B |
+| **2** | **RFC 0014 — Dynamic Cloud IAM Auth & Outbound HTTP Client Primitive** *(Implemented)* | AI-free `HttpClient` seam in `shunt-plugin-sdk` + `hyper`/`rustls` impl in `shunt-engine`, powering cached, reload-persistent token refresh for AWS IAM (IMDSv2/ECS/EKS IRSA/STS), GCP ADC/Workload Identity/Service Account JWT, and Azure Entra ID (Managed Identity/`client_credentials`/Workload Identity) | Path A (A4) + Path B |
 | **3** | **RFC 0015 — Pluggable AI Guardrails (`ai-guardrails`) & Audit/Webhook Sinks** *(Implemented)* | Built-in PII/secret redaction & regex/policy filters, async external guardrail callouts (pre/post/stream), opt-in redacted prompt/completion audit sinks (JSONL, OTLP GenAI span events, signed webhooks), and budget/circuit-breaker/guardrail alert webhooks (Slack, PagerDuty, HTTP) | Path A (A4) |
 | **4** | **RFC 0016 — Multimodal Endpoints & Streaming AI Cache** *(Implemented)* | `POST /v1/rerank`, `/v1/images/*`, `/v1/audio/*`, `/v1/realtime` (WS), `/v1/completions`, `/v1/batches` + `/v1/files`, `GET /v1/generation`, plus streaming SSE caching/replay, singleflight coalescing, and semantic cache seam in `ai-cache` | Path A (A4) |
 | **5** | **RFC 0017 — Per-Request Routing, Concurrency Quotas & Advanced Failover** *(Implemented)* | OpenRouter-style per-request `models[]`/`provider`/ZDR routing, context-window guards, overflow & TTFT-timeout failover, throughput/headroom routing, traffic shadowing, per-key `max_parallel_requests`/`expires_at`/per-model quotas, pre-flight budget holds, and external JSON pricing catalogs | Path A (A4) + Path B |

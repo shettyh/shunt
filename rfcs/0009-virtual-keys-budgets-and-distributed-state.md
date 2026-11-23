@@ -1,13 +1,13 @@
 # RFC 0009: Virtual Keys, Token Rate Limits, Cost Budgets & Distributed `StateStore`
 
 - **Status:** Implemented
-- **Crates:** `shunt-plugin-sdk`, `shunt-core`, `shunt-config`, `shunt-plugins`, `shunt-ai`, `shunt-cli`, `shunt-test`, `fuzz`
+- **Crates:** `shunt-plugin-sdk`, `shunt-engine`, `shunt-config`, `shunt-plugins`, `shunt-ai`, `shunt-cli`, `shunt-test`, `fuzz`
 
 ## Summary
 
 RFC 0009 delivers Phase A2 of [docs/vision.md](../docs/vision.md) (and unlocks multi-replica state for Path B HTTP gateways) across four composable pieces:
 
-1. **Optional Distributed `StateStore` (`DistributedStore` + Pure-Rust Redis / Valkey Client):** Introduces a general-purpose, AI-agnostic `DistributedStore` trait in `shunt-plugin-sdk` and a zero-external-SDK pooled RESP2 client (`RedisStateStore`, supporting `redis://` and `rediss://` TLS, `AUTH`, `SELECT`, atomic Lua `EVAL`, and warm pool reuse across reloads) in `shunt-core`. In-memory `StateStore` remains the zero-dependency default preserving the zero-allocation sync fast path (`HookResult::Ready`).
+1. **Optional Distributed `StateStore` (`DistributedStore` + Pure-Rust Redis / Valkey Client):** Introduces a general-purpose, AI-agnostic `DistributedStore` trait in `shunt-plugin-sdk` and a zero-external-SDK pooled RESP2 client (`RedisStateStore`, supporting `redis://` and `rediss://` TLS, `AUTH`, `SELECT`, atomic Lua `EVAL`, and warm pool reuse across reloads) in `shunt-engine`. In-memory `StateStore` remains the zero-dependency default preserving the zero-allocation sync fast path (`HookResult::Ready`).
 2. **Virtual API Keys & Multi-Tenant Policies (`ai-virtual-keys`):** Authenticates scoped client keys (`Authorization: Bearer`, `x-api-key`, or custom header) via constant-time SHA-256 comparison (supporting `env:` secrets and pre-hashed `sha256:` digests), strips client keys before upstream dispatch, and attaches `AiKeyPolicy` (`allowed_models`, `allowed_providers`, `provider_overrides`, per-key RPM/TPM, per-key spend budgets, and `team` tags) to `ctx.extensions`.
 3. **Token-Aware Rate Limiting (`ai-token-rate-limit`) & Local Token Estimator:** Enforces RPM and TPM limits with deterministic pre-flight token estimation across OpenAI Chat, Anthropic Messages, OpenAI Responses, and Embeddings (also powering local `POST /v1/messages/count_tokens`), plus post-response reconciliation in `on_complete` against actual `AiUsage`.
 4. **Model Pricing Catalog, Cost Attribution & Spend Budgets (`ai-budget`):** Computes exact integer nano-USD spend (`input`, `cached_input`, `output` tokens) using a bundled + overridable pricing catalog, emits `shunt_ai_cost_usd_total` Prometheus metrics, enforces per-key and per-team rolling budgets with soft-warning headers or hard `429`/`402` rejections, and coordinates seamlessly across replicas when `[state] backend = "redis"` is enabled.
@@ -24,9 +24,9 @@ Phase A1 (RFCs 0007–0008) made Shunt a universal multi-provider, multi-protoco
 ## Goals & Non-Goals
 
 ### Goals
-- **Strict architectural isolation:** `shunt-core` and `shunt-plugin-sdk` remain 100% AI-agnostic. `DistributedStore` and `RedisStateStore` expose general-purpose atomic primitives (`try_consume_quota`, `adjust_counter`, `get_counter`, `set_flag`, `has_flag`, `delete`) consumed equally by `shunt-plugins::rate-limit` (Path B) and `shunt-ai` (Path A).
+- **Strict architectural isolation:** `shunt-engine` and `shunt-plugin-sdk` remain 100% AI-agnostic. `DistributedStore` and `RedisStateStore` expose general-purpose atomic primitives (`try_consume_quota`, `adjust_counter`, `get_counter`, `set_flag`, `has_flag`, `delete`) consumed equally by `shunt-plugins::rate-limit` (Path B) and `shunt-ai` (Path A).
 - **Zero-allocation sync fast path preserved:** When `[state] backend = "memory"` (default), `BuildContext::distributed_store()` returns `None` and every plugin hook returns `HookResult::Ready` without boxing or async I/O.
-- **Zero heavy SDK dependencies:** Implement RESP2 framing, connection pooling, `rediss://` TLS (reusing existing `tokio-rustls` + `webpki-roots`), and atomic Lua scripts directly in `shunt-core` (~600 lines) with zero new crates in `Cargo.lock`.
+- **Zero heavy SDK dependencies:** Implement RESP2 framing, connection pooling, `rediss://` TLS (reusing existing `tokio-rustls` + `webpki-roots`), and atomic Lua scripts directly in `shunt-engine` (~600 lines) with zero new crates in `Cargo.lock`.
 - **Exact drift-free cost accounting:** Represent spend in integer **nano-USD** (`1 USD = 1_000_000_000 nano-USD`) so Redis `INCRBY`/Lua and local `u64` ledgers accumulate exact costs with zero floating-point drift.
 - **Automatic secret redaction:** Virtual key secrets use the canonical `api_key` field name (redacted automatically in `GET /snapshot`), and raw secrets are hashed to SHA-256 at snapshot compile time so plaintext keys are never retained in memory.
 - **Layered verification (RFC 0006):** Back the RESP2 codec, token estimator, pricing math, virtual keys, quotas, budgets, and multi-replica Redis coordination with unit tests, TOML conformance specs (`07-virtual-keys-quotas-budgets.spec.toml`), multi-replica TCP E2E tests, property tests, and a RESP2 fuzz target (`fuzz_resp_parser`).
@@ -73,7 +73,7 @@ pub trait DistributedStore: fmt::Debug + Send + Sync + 'static {
 - Gateway-level `[state]` configuration in `shunt.toml` selects `backend = "memory"` (default) or `backend = "redis"` with `url`, optional `username`/`password` (`env:` supported), `key_prefix`, `pool_size`, `connect_timeout_ms`, `command_timeout_ms`, and `failure_policy` (`fail_open` default or `fail_closed`).
 - `RuntimeRegistry` caches warm `RedisStateStore` pools keyed by `RedisStoreConfig` (identical to `UpstreamPoolKey` reuse) and only garbage-collects obsolete stores after a snapshot compiles cleanly.
 
-### 2. Pure-Rust Pooled Redis / Valkey Backend (`shunt-core::redis`)
+### 2. Pure-Rust Pooled Redis / Valkey Backend (`shunt-engine::redis`)
 
 - **Bounded RESP2 codec:** `decode_resp_frame` enforces strict upper bounds on line length (64 KiB), bulk size (16 MiB), array length (4,096), and recursion depth (16), returning `Ok(None)` on partial frames and `Err(RespError)` on malformed wire bytes.
 - **Single-round-trip atomic Lua scripts:**
@@ -160,10 +160,10 @@ Incoming Request
 
 ## Verification
 
-- **Unit tests:** RESP2 codec & mock TCP Redis tests (`crates/shunt-core/src/redis.rs`), token estimator (`crates/shunt-ai/src/tokens.rs`), pricing catalog (`crates/shunt-ai/src/pricing.rs`), virtual key SHA-256 matching (`crates/shunt-ai/src/virtual_keys.rs`), local quota reservation/reconciliation (`crates/shunt-ai/src/token_rate_limit.rs`).
+- **Unit tests:** RESP2 codec & mock TCP Redis tests (`crates/shunt-engine/src/redis.rs`), token estimator (`crates/shunt-ai/src/tokens.rs`), pricing catalog (`crates/shunt-ai/src/pricing.rs`), virtual key SHA-256 matching (`crates/shunt-ai/src/virtual_keys.rs`), local quota reservation/reconciliation (`crates/shunt-ai/src/token_rate_limit.rs`).
 - **Conformance spec (`specs/conformance/07-virtual-keys-quotas-budgets.spec.toml`):** Verifies virtual key auth (plaintext, `env:`, `sha256:`, disabled, Anthropic/OpenAI native errors, header stripping, `/snapshot` redaction), model ACLs + `/v1/models` filtering, per-key provider overrides, local `/v1/messages/count_tokens`, RPM/TPM limits + `AiUsage` reconciliation + `ManualClock` reset, cached-token cost attribution (`shunt_ai_cost_usd_total`), soft warnings, hard `402` rejection, reload ledger persistence, and team aggregate budgets.
 - **Multi-replica E2E tests (`crates/shunt-ai/tests/distributed_governance_e2e.rs`):** Runs two independent `GatewayServer` replicas backed by a shared in-process TCP mock Redis server, verifying shared HTTP `rate-limit` (Path B), shared `ai-failover` cooldowns, shared `ai-budget` cutoff across replicas, and `fail_open` vs `fail_closed` outage behavior.
-- **Property tests:** RESP2 round-trip, prefix invariance, and fuzz-byte panic-freedom in `crates/shunt-core/tests/proptest_core.rs`; token estimator monotonicity/panic-freedom and pricing nano-USD invariants in `crates/shunt-ai/tests/proptest_ai.rs`.
+- **Property tests:** RESP2 round-trip, prefix invariance, and fuzz-byte panic-freedom in `crates/shunt-engine/tests/proptest_core.rs`; token estimator monotonicity/panic-freedom and pricing nano-USD invariants in `crates/shunt-ai/tests/proptest_ai.rs`.
 - **Fuzz target:** `fuzz/fuzz_targets/fuzz_resp_parser.rs`.
 
 ---

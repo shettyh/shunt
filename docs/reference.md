@@ -6,7 +6,7 @@ Complete reference for Shunt's built-in plugin packs, Admin API, CLI flags, and 
 
 ## Built-in Plugins
 
-Every first-party plugin depends strictly on `shunt-plugin-sdk`—never on `shunt-core`.
+Every first-party plugin depends strictly on `shunt-plugin-sdk`—never on `shunt-engine`.
 
 ### General HTTP Plugins (`shunt-plugins`)
 

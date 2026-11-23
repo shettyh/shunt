@@ -637,7 +637,7 @@ pub enum SemanticLookupResult {
 }
 
 /// Extensible async seam for plugging custom semantic vector caches (e.g., Qdrant, pgvector,
-/// Redis VSS, or custom embedding stores) into `ai-cache` without bloating `shunt-core`.
+/// Redis VSS, or custom embedding stores) into `ai-cache` without bloating `shunt-engine`.
 pub trait SemanticCacheBackend: Send + Sync + 'static {
     fn lookup<'a>(
         &'a self,

@@ -1,6 +1,6 @@
 //! Showcase multi-provider AI router & gateway plugin pack (`shunt-ai`).
 //!
-//! Implemented **100% through `shunt-plugin-sdk`** with zero dependencies on `shunt-core`,
+//! Implemented **100% through `shunt-plugin-sdk`** with zero dependencies on `shunt-engine`,
 //! validating Shunt's request buffering, dynamic routing, per-attempt upstream mutation,
 //! automatic failover, live SSE / binary EventStream translation, and token accounting primitives.
 //!

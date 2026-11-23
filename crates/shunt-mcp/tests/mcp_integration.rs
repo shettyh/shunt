@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use shunt_config::{
     FileConfigProvider, GatewayConfig, LoadedConfig, SnapshotCompiler, verify_bundle,
 };
-use shunt_core::{GatewayServer, RuntimeRegistry};
+use shunt_engine::{GatewayServer, RuntimeRegistry};
 use shunt_mcp::{McpMetrics, register_mcp_plugins};
 use shunt_plugin_sdk::{ManualClock, PluginRegistry};
 use shunt_plugins::{PrometheusMetrics, register_builtin_plugins};
