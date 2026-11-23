@@ -832,6 +832,35 @@ fn print_snapshot_table(inspect: &SnapshotInspect) {
         }
     }
 
+    if !inspect.route_groups.is_empty() {
+        println!("\nRoute Groups ({}):", inspect.route_groups.len());
+        for g in &inspect.route_groups {
+            let prefix = g.path_prefix.as_deref().unwrap_or("*");
+            let hosts = if g.hosts.is_empty() {
+                "*".to_owned()
+            } else {
+                g.hosts.join(",")
+            };
+            let plugins = if g.plugins.is_empty() {
+                "(none)".to_owned()
+            } else {
+                g.plugins
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            };
+            println!(
+                "  - {:<16} [{} {}] routes={} plugins=[{}]",
+                g.id,
+                hosts,
+                prefix,
+                g.routes.len(),
+                plugins
+            );
+        }
+    }
+
     println!("\nUpstreams ({}):", inspect.upstreams.len());
     for u in &inspect.upstreams {
         let proto = if u.http2_only { "h2c" } else { "h1/h2" };
@@ -861,9 +890,13 @@ fn print_snapshot_table(inspect: &SnapshotInspect) {
         } else {
             r.plugins.join(" -> ")
         };
+        let group_tag = match &r.group {
+            Some(gid) => format!(" group={gid}"),
+            None => String::new(),
+        };
         println!(
-            "  - {:<16} [{} {} {}] -> {} (attempts={}, plugins=[{}])",
-            r.id, methods, hosts, r.path, r.upstream, r.max_attempts, plugins
+            "  - {:<16} [{} {} {}] -> {} (attempts={}{}, plugins=[{}])",
+            r.id, methods, hosts, r.path, r.upstream, r.max_attempts, group_tag, plugins
         );
         println!("    HookMask: {}", r.hook_mask);
     }

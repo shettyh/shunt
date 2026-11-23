@@ -1,6 +1,6 @@
 ---
 title: Configuration (shunt.toml)
-description: Complete schema reference for shunt.toml and YAML configuration files including server, TLS/mTLS, admin, state, telemetry, upstreams, routes, and mirrors.
+description: Complete schema reference for shunt.toml and YAML configuration files including server, TLS/mTLS, admin, state, telemetry, upstreams, route groups, routes, and mirrors.
 ---
 
 Shunt accepts **TOML** (`.toml`, canonical) or **YAML** (`.yaml` / `.yml`) configuration files, as well as [Kubernetes Gateway API v1](/shunt/api-gateway/kubernetes/) manifests.
@@ -104,7 +104,7 @@ Attach the [`otel-trace`](/shunt/plugins/http-plugins/#otel-trace) plugin global
 
 ## `[[plugins]]` (Global Plugins)
 
-Global plugins run on **every route** before route-specific `[[routes.plugins]]`:
+Global plugins run on **every route** before group-level `[[route_groups.plugins]]` and route-specific `[[routes.plugins]]`:
 
 ```toml
 [[plugins]]
@@ -164,22 +164,79 @@ initial_healthy = true          # Default: true
 
 ---
 
+## `[[route_groups]]` (Reusable Route Groups & Shared Plugin Chains)
+
+Route groups define shared match defaults (`hosts`, `path_prefix`, `methods`, `headers`), shared execution defaults (`upstream`, `strip_prefix`, `max_body_bytes`, `max_attempts`, timeouts, `allow_websockets`, `mirrors`), and a **shared plugin chain** instantiated **once per group**.
+
+Every member route (`group = "<id>"`) shares the exact same `Arc<dyn HttpPlugin>` instances under `group:<group_id>:<plugin_id>`—so `rate-limit` shares one token bucket across all routes in the group and `jwt-auth` shares one JWKS cache—while lowering to flat `CompiledRoute`s with **zero runtime overhead**.
+
+```toml
+[[route_groups]]
+id = "api_v2"
+hosts = ["*.example.com"]
+path_prefix = "/v2"
+strip_prefix = "/v2"
+methods = ["GET", "POST"]
+headers = { "x-api-version" = "2" }
+upstream = "default_api_backend"    # Optional default upstream for member routes
+max_body_bytes = 1048576
+max_attempts = 2
+response_headers_timeout_ms = 10000
+idle_chunk_timeout_ms = 30000
+allow_websockets = false
+
+[[route_groups.plugins]]
+name = "jwt-auth"
+id = "api-v2-jwt"
+[route_groups.plugins.config]
+jwks_uri = "https://auth.example.com/.well-known/jwks.json"
+issuer = "https://auth.example.com"
+audience = "shunt-api"
+
+[[route_groups.plugins]]
+name = "rate-limit"
+id = "api-v2-shared-rl"
+[route_groups.plugins.config]
+requests_per_second = 100.0
+burst = 200
+key = "client_ip"
+```
+
+### Inheritance & Safe Narrowing Rules
+
+| Field | Lowering Behavior (`route` over `group`) |
+| --- | --- |
+| **`path_prefix` / `path_exact`** | Joined cleanly onto `group.path_prefix` (e.g. `/v2` + `/users` → `/v2/users`) |
+| **`hosts`** | Inherited when omitted; if specified on route, every host must be subsumed by `group.hosts` |
+| **`methods`** | Inherited when omitted; if specified on route, every method must be allowed by `group.methods` |
+| **`headers`** | Merged (`group.headers` + `route.headers`); contradictory values for the same header are rejected |
+| **`upstream`, `strip_prefix`, `max_body_bytes`, `max_attempts`, timeouts, `allow_websockets`** | Route overrides group when explicitly set; otherwise falls back to group, then gateway default |
+| **`mirrors`** | `group.mirrors` followed by `route.mirrors` |
+| **`plugins`** | Deterministic execution order: `global` → `group` (shared `Arc`) → `route` |
+
+:::tip[Explicit First-Match Precedence]
+Routes remain in a single ordered `[[routes]]` array and opt into a group via `group = "api_v2"`. This preserves unambiguous top-to-bottom route matching order and lets `shunt verify` detect shadowed routes across lowered paths.
+:::
+
+---
+
 ## `[[routes]]` & `[[routes.mirrors]]`
 
 Routes are matched top-to-bottom (exact paths and more specific matchers should be listed first; `shunt verify` catches shadowed routes automatically).
 
 ```toml
 [[routes]]
-id = "api_v2"
+id = "api_v2_users"
+group = "api_v2"                    # Optional reference to a [[route_groups]] ID
 hosts = ["api.example.com"]         # Optional host filter (supports *.example.com)
-path_prefix = "/v2"                 # Specify `path_prefix` or `path_exact`
-# path_exact = "/v2/health"
-methods = ["GET", "POST"]           # Empty = all HTTP methods
+path_prefix = "/users"              # Joined onto group.path_prefix if grouped; or use `path_exact`
+# path_exact = "/health"
+methods = ["GET", "POST"]           # Empty = inherit group methods (or all HTTP methods)
 headers = { "x-track" = "canary" }  # Optional exact header matchers (all must match)
-upstream = "api_backend"
+upstream = "api_backend"            # Required unless inherited from `group.upstream`
 strip_prefix = "/v2"                # Optional prefix stripped before forwarding
 max_body_bytes = 2097152            # Optional max buffered body size
-max_attempts = 2                    # Default: 1
+max_attempts = 2                    # Default: 1 (or group default)
 response_headers_timeout_ms = 30000 # TTFB / TTFT timeout (default: 30000)
 idle_chunk_timeout_ms = 60000       # Max gap between stream chunks (default: 60000)
 allow_websockets = true             # Default: true

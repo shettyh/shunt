@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use proptest::prelude::*;
 use serde_json::{Map, Value};
 use shunt_config::{
-    ConfigProvider, InlineConfigProvider, InspectorTrace, SnapshotCompiler, TraceRingBuffer,
-    redact_secrets, route_subsumes,
+    ConfigProvider, GatewayConfig, InlineConfigProvider, InspectorTrace, RouteGroupIr, RouteIr,
+    SnapshotCompiler, TraceRingBuffer, UpstreamEndpointIr, UpstreamIr, host_pattern_subsumes,
+    join_route_paths, redact_secrets, route_subsumes,
 };
 use shunt_engine::{PathMatch, RouteMatch, RuntimeRegistry, UpstreamConfig, UpstreamPoolKey};
 use shunt_plugin_sdk::{
@@ -487,6 +488,170 @@ proptest! {
         if let (Some(p50), Some(p95), Some(p99)) = (summary.p50_us, summary.p95_us, summary.p99_us) {
             prop_assert!(p50 <= p95);
             prop_assert!(p95 <= p99);
+        }
+    }
+
+    /// Normalization invariants for `join_route_paths`:
+    /// 1. Result always starts with `/`.
+    /// 2. Joining slash-free segments never introduces `//`.
+    /// 3. For any group prefix `gp` and suffix `rp`, `PathMatch::Prefix(gp)` always matches `join_route_paths(gp, rp)`.
+    #[test]
+    fn join_route_paths_preserves_prefix_boundary_and_slash_invariants(
+        g_segs in prop::collection::vec("[a-z0-9_-]{1,6}", 0..4),
+        r_segs in prop::collection::vec("[a-z0-9_-]{1,6}", 0..4),
+        g_trailing in any::<bool>(),
+    ) {
+        let gp = if g_segs.is_empty() {
+            "/".to_owned()
+        } else if g_trailing {
+            format!("/{}/", g_segs.join("/"))
+        } else {
+            format!("/{}", g_segs.join("/"))
+        };
+        let rp = if r_segs.is_empty() {
+            "/".to_owned()
+        } else {
+            format!("/{}", r_segs.join("/"))
+        };
+
+        let joined = join_route_paths(&gp, &rp);
+        prop_assert!(joined.starts_with('/'));
+        prop_assert!(!joined.contains("//"), "double slash in `{joined}` from `{gp}` + `{rp}`");
+        prop_assert!(
+            PathMatch::Prefix(gp.clone()).matches(&joined),
+            "PathMatch::Prefix({gp}) must match joined path `{joined}`"
+        );
+    }
+
+    /// Soundness proof for route group narrowing:
+    /// Whenever `GatewayConfig::validate()` accepts a grouped route, every request matched by
+    /// the lowered `RouteMatch` MUST also match the group's own `RouteMatch`.
+    #[test]
+    fn valid_grouped_route_never_escapes_group_matcher_boundary(
+        g_hosts in arb_host_list(),
+        r_hosts in arb_host_list(),
+        g_prefix in prop_oneof![
+            Just(None),
+            Just(Some("/".to_owned())),
+            Just(Some("/api".to_owned())),
+            Just(Some("/api/v2".to_owned())),
+        ],
+        r_path in prop_oneof![
+            Just((None, None)),
+            Just((Some("/".to_owned()), None)),
+            Just((Some("/users".to_owned()), None)),
+            Just((None, Some("/health".to_owned()))),
+        ],
+        g_methods in prop::collection::vec(prop_oneof![Just("GET"), Just("POST"), Just("DELETE")], 0..3),
+        r_methods in prop::collection::vec(prop_oneof![Just("GET"), Just("POST"), Just("DELETE")], 0..3),
+        req_host in prop_oneof![
+            Just("example.com"),
+            Just("api.example.com"),
+            Just("v1.api.example.com"),
+            Just("other.org"),
+        ],
+        req_path in prop_oneof![
+            Just("/"),
+            Just("/api"),
+            Just("/api/users"),
+            Just("/api/v2"),
+            Just("/api/v2/users"),
+            Just("/api/v2/health"),
+            Just("/users"),
+            Just("/health"),
+        ],
+        req_method in prop_oneof![
+            Just(http::Method::GET),
+            Just(http::Method::POST),
+            Just(http::Method::DELETE),
+        ],
+    ) {
+        let cfg = GatewayConfig {
+            upstreams: vec![UpstreamIr {
+                name: "be".to_owned(),
+                endpoints: vec![UpstreamEndpointIr::Url("http://127.0.0.1:8081".to_owned())],
+                http2_only: false,
+                connect_timeout_ms: 5_000,
+                pool_idle_timeout_ms: 90_000,
+                pool_max_idle_per_host: 64,
+                unhealthy_threshold: 3,
+                unhealthy_cooldown_ms: 10_000,
+                tls: Default::default(),
+                health_check: None,
+            }],
+            route_groups: vec![RouteGroupIr {
+                id: "g".to_owned(),
+                hosts: g_hosts.clone(),
+                path_prefix: g_prefix.clone(),
+                methods: g_methods.iter().map(|s| (*s).to_owned()).collect(),
+                upstream: Some("be".to_owned()),
+                ..RouteGroupIr::default()
+            }],
+            routes: vec![RouteIr {
+                id: "r".to_owned(),
+                group: Some("g".to_owned()),
+                hosts: r_hosts.clone(),
+                path_prefix: r_path.0,
+                path_exact: r_path.1,
+                methods: r_methods.iter().map(|s| (*s).to_owned()).collect(),
+                headers: BTreeMap::new(),
+                upstream: None,
+                strip_prefix: None,
+                max_body_bytes: None,
+                max_attempts: None,
+                response_headers_timeout_ms: None,
+                idle_chunk_timeout_ms: None,
+                allow_websockets: None,
+                mirrors: Vec::new(),
+                plugins: Vec::new(),
+            }],
+            ..GatewayConfig::default()
+        };
+
+        if cfg.validate().is_ok() {
+            let resolved = cfg.resolve_route(&cfg.routes[0]).unwrap();
+            let group_matcher = RouteMatch {
+                hosts: g_hosts.iter().map(|h| h.to_ascii_lowercase()).collect(),
+                path: g_prefix.map(PathMatch::Prefix).unwrap_or(PathMatch::Any),
+                methods: g_methods
+                    .iter()
+                    .map(|m| http::Method::from_bytes(m.as_bytes()).unwrap())
+                    .collect(),
+                headers: Vec::new(),
+            };
+            let route_matcher = RouteMatch {
+                hosts: resolved.hosts.iter().map(|h| h.to_ascii_lowercase()).collect(),
+                path: if let Some(exact) = resolved.path_exact {
+                    PathMatch::Exact(exact)
+                } else if let Some(prefix) = resolved.path_prefix {
+                    PathMatch::Prefix(prefix)
+                } else {
+                    PathMatch::Any
+                },
+                methods: resolved
+                    .methods
+                    .iter()
+                    .map(|m| http::Method::from_bytes(m.as_bytes()).unwrap())
+                    .collect(),
+                headers: Vec::new(),
+            };
+
+            let req = http::Request::builder()
+                .method(req_method)
+                .uri(req_path)
+                .header(http::header::HOST, req_host)
+                .body(())
+                .unwrap();
+            if route_matcher.matches(&req) {
+                prop_assert!(
+                    group_matcher.matches(&req),
+                    "grouped route escaped group boundary: group={group_matcher:?}, route={route_matcher:?}, req={req_host}{req_path}"
+                );
+            }
+            // Verify host_pattern_subsumes reflexivity on every resolved host.
+            for h in &resolved.hosts {
+                prop_assert!(host_pattern_subsumes(h, h));
+            }
         }
     }
 }

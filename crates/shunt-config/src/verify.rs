@@ -5,11 +5,12 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use shunt_engine::{PathMatch, RouteMatch, host_matches};
+use shunt_engine::{PathMatch, RouteMatch};
 use shunt_plugin_sdk::HookMask;
 
 use crate::compiler::CompiledBundle;
 use crate::error::ConfigError;
+use crate::ir::host_pattern_subsumes;
 
 /// Severity level for a static verification diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
@@ -135,8 +136,11 @@ pub fn load_policy_file(path: &Path) -> Result<VerifyPolicy, ConfigError> {
 #[serde(default)]
 pub struct RoutePolicy {
     /// Glob pattern matching route IDs (supports `*`, e.g., `"public_*"`, `"*"`).
+    /// May be omitted when `match_group` is set.
     pub match_route: String,
-    /// Plugin names required on every matching route (global or route-scoped).
+    /// Optional glob pattern matching route group IDs (supports `*`, e.g., `"api_*"`).
+    pub match_group: Option<String>,
+    /// Plugin names required on every matching route (global, group, or route-scoped).
     #[serde(default)]
     pub require_plugins: Vec<String>,
     /// HookMask flags forbidden on every matching route (e.g., `"REQUEST_BODY_BUFFERED"`).
@@ -211,11 +215,36 @@ pub fn verify_bundle(
         }
     }
 
-    // 2. Per-route static checks (timeouts, body cap, AI plugin ordering & targets)
+    // 1c. Unused route groups
+    let used_groups: HashSet<&str> = route_irs
+        .iter()
+        .filter_map(|r| r.group.as_deref())
+        .collect();
+    for group in &bundle.config.route_groups {
+        if !used_groups.contains(group.id.as_str()) {
+            diags.push(VerifyDiagnostic {
+                rule: "route_group.unused".to_owned(),
+                severity: Severity::Warning,
+                subject: Some(group.id.clone()),
+                message: format!(
+                    "route group `{}` is declared but not referenced by any route",
+                    group.id
+                ),
+            });
+        }
+    }
+
+    // 2. Per-route static checks (timeouts, body cap, AI/MCP plugin ordering & targets)
+    // Evaluated against the effective lowered route (group + route defaults and merged plugins).
     for (route_ir, compiled) in route_irs.iter().zip(compiled_routes.iter()) {
+        let Some(resolved) = bundle.config.resolve_route(route_ir) else {
+            continue;
+        };
+        let effective_plugins = &resolved.effective_plugins;
+
         // route.timeout_order
-        if let Some(resp_timeout) = route_ir.response_headers_timeout_ms
-            && let Some(up_ir) = upstreams_by_name.get(route_ir.upstream.as_str())
+        if let Some(resp_timeout) = resolved.response_headers_timeout_ms
+            && let Some(up_ir) = upstreams_by_name.get(resolved.upstream.as_str())
             && up_ir.connect_timeout_ms >= resp_timeout
         {
             diags.push(VerifyDiagnostic {
@@ -231,7 +260,7 @@ pub fn verify_bundle(
 
         // route.body_cap_missing
         if compiled.hook_mask.contains(HookMask::REQUEST_BODY_BUFFERED)
-            && route_ir.max_body_bytes.is_none()
+            && resolved.max_body_bytes.is_none()
             && compiled
                 .plugins
                 .iter()
@@ -253,13 +282,12 @@ pub fn verify_bundle(
         }
 
         // ai.plugin_order
-        let router_pos = route_ir
-            .plugins
+        let router_pos = effective_plugins
             .iter()
             .position(|p| p.name == "ai-model-router");
         if let Some(r_idx) = router_pos {
-            let cache_pos = route_ir.plugins.iter().position(|p| p.name == "ai-cache");
-            for (idx, att) in route_ir.plugins.iter().enumerate() {
+            let cache_pos = effective_plugins.iter().position(|p| p.name == "ai-cache");
+            for (idx, att) in effective_plugins.iter().enumerate() {
                 if idx < r_idx
                     && matches!(
                         att.name.as_str(),
@@ -307,20 +335,17 @@ pub fn verify_bundle(
                 }
             }
 
-            let guardrails_pos = route_ir
-                .plugins
+            let guardrails_pos = effective_plugins
                 .iter()
                 .position(|p| p.name == "ai-guardrails");
-            let adapter_pos = route_ir
-                .plugins
+            let adapter_pos = effective_plugins
                 .iter()
                 .position(|p| p.name == "ai-provider-adapter");
-            let audit_pos = route_ir.plugins.iter().position(|p| p.name == "ai-audit");
-            let usage_pos = route_ir
-                .plugins
+            let audit_pos = effective_plugins.iter().position(|p| p.name == "ai-audit");
+            let usage_pos = effective_plugins
                 .iter()
                 .position(|p| p.name == "ai-usage-tracker");
-            let alerts_pos = route_ir.plugins.iter().position(|p| p.name == "ai-alerts");
+            let alerts_pos = effective_plugins.iter().position(|p| p.name == "ai-alerts");
 
             if let (Some(g_idx), Some(c_idx)) = (guardrails_pos, cache_pos)
                 && g_idx > c_idx
@@ -363,7 +388,7 @@ pub fn verify_bundle(
             }
             if let Some(al_idx) = alerts_pos {
                 for producer in ["ai-budget", "ai-failover", "ai-guardrails"] {
-                    if let Some(p_idx) = route_ir.plugins.iter().position(|p| p.name == producer)
+                    if let Some(p_idx) = effective_plugins.iter().position(|p| p.name == producer)
                         && al_idx < p_idx
                     {
                         diags.push(VerifyDiagnostic {
@@ -382,15 +407,14 @@ pub fn verify_bundle(
         }
 
         // ai.unknown_upstream, ai.unknown_provider & ai.attempts_insufficient
-        let adapter_providers: Option<HashSet<&str>> = route_ir
-            .plugins
+        let adapter_providers: Option<HashSet<&str>> = effective_plugins
             .iter()
             .find(|p| p.name == "ai-provider-adapter")
             .and_then(|p| p.config.get("providers"))
             .and_then(Value::as_object)
             .map(|map| map.keys().map(String::as_str).collect());
 
-        for att in &route_ir.plugins {
+        for att in effective_plugins {
             if att.name != "ai-model-router" {
                 continue;
             }
@@ -427,7 +451,7 @@ pub fn verify_bundle(
                             ),
                         });
                     }
-                    if target.has_realtime_cap && !route_ir.allow_websockets {
+                    if target.has_realtime_cap && !resolved.allow_websockets {
                         diags.push(VerifyDiagnostic {
                             rule: "ai.realtime_websockets".to_owned(),
                             severity: Severity::Warning,
@@ -439,7 +463,7 @@ pub fn verify_bundle(
                         });
                     }
                 }
-                if !auto_max && targets.len() > route_ir.max_attempts {
+                if !auto_max && targets.len() > resolved.max_attempts {
                     diags.push(VerifyDiagnostic {
                         rule: "ai.attempts_insufficient".to_owned(),
                         severity: Severity::Error,
@@ -448,7 +472,7 @@ pub fn verify_bundle(
                             "ai-model-router `{label}` on route `{}` defines {} fallback targets with auto_max_attempts=false, but route max_attempts={}",
                             route_ir.id,
                             targets.len(),
-                            route_ir.max_attempts
+                            resolved.max_attempts
                         ),
                     });
                 }
@@ -456,9 +480,11 @@ pub fn verify_bundle(
         }
 
         // mcp.plugin_order, mcp.unknown_upstream & mcp.auth_recommended
-        let mcp_router_pos = route_ir.plugins.iter().position(|p| p.name == "mcp-router");
+        let mcp_router_pos = effective_plugins
+            .iter()
+            .position(|p| p.name == "mcp-router");
         if let Some(mr_idx) = mcp_router_pos {
-            for (idx, att) in route_ir.plugins.iter().enumerate() {
+            for (idx, att) in effective_plugins.iter().enumerate() {
                 if idx < mr_idx && matches!(att.name.as_str(), "mcp-guardrails" | "mcp-rate-limit")
                 {
                     diags.push(VerifyDiagnostic {
@@ -484,7 +510,7 @@ pub fn verify_bundle(
                 }
             }
 
-            if let Some(router_att) = route_ir.plugins.get(mr_idx)
+            if let Some(router_att) = effective_plugins.get(mr_idx)
                 && let Some(servers) = router_att.config.get("servers").and_then(Value::as_object)
             {
                 for (srv_name, srv_cfg) in servers {
@@ -504,7 +530,7 @@ pub fn verify_bundle(
                 }
             }
 
-            let has_auth = route_ir.plugins.iter().any(|p| {
+            let has_auth = effective_plugins.iter().any(|p| {
                 matches!(
                     p.name.as_str(),
                     "mcp-auth" | "jwt-auth" | "mtls-auth" | "bearer-auth"
@@ -566,6 +592,11 @@ pub fn verify_bundle(
         let has_trace_plugin = bundle.config.plugins.iter().any(|p| p.name == "otel-trace")
             || bundle
                 .config
+                .route_groups
+                .iter()
+                .any(|g| g.plugins.iter().any(|p| p.name == "otel-trace"))
+            || bundle
+                .config
                 .routes
                 .iter()
                 .any(|r| r.plugins.iter().any(|p| p.name == "otel-trace"));
@@ -574,17 +605,35 @@ pub fn verify_bundle(
                 rule: "telemetry.no_trace_plugin".to_owned(),
                 severity: Severity::Warning,
                 subject: Some("telemetry".to_owned()),
-                message: "`[telemetry]` is enabled, but no `otel-trace` plugin is attached globally or on any route".to_owned(),
+                message: "`[telemetry]` is enabled, but no `otel-trace` plugin is attached globally, on a route group, or on any route".to_owned(),
             });
         }
     }
 
     // 4. Policy rules (policy.require_plugin, policy.assert_hook_mask)
     for rp in &effective_policy.route_policies {
-        for compiled in compiled_routes {
-            if !glob_match(&rp.match_route, &compiled.id) {
+        for (route_ir, compiled) in route_irs.iter().zip(compiled_routes.iter()) {
+            let route_matches = if rp.match_route.is_empty() {
+                rp.match_group.is_some()
+            } else {
+                glob_match(&rp.match_route, &compiled.id)
+            };
+            let group_matches = match &rp.match_group {
+                Some(gpat) => route_ir
+                    .group
+                    .as_deref()
+                    .is_some_and(|gid| glob_match(gpat, gid)),
+                None => true,
+            };
+            if !route_matches || !group_matches {
                 continue;
             }
+            let selector_label = match (rp.match_route.is_empty(), &rp.match_group) {
+                (false, Some(g)) => format!("route={}, group={g}", rp.match_route),
+                (false, None) => rp.match_route.clone(),
+                (true, Some(g)) => format!("group={g}"),
+                (true, None) => "*".to_owned(),
+            };
             let active_plugins: HashSet<&str> = compiled.plugins.iter().map(|p| p.name()).collect();
             for req_plugin in &rp.require_plugins {
                 if !active_plugins.contains(req_plugin.as_str()) {
@@ -593,8 +642,8 @@ pub fn verify_bundle(
                         severity: Severity::Error,
                         subject: Some(compiled.id.clone()),
                         message: format!(
-                            "route `{}` (matched `{}`) is missing required plugin `{req_plugin}`",
-                            compiled.id, rp.match_route
+                            "route `{}` (matched `{selector_label}`) is missing required plugin `{req_plugin}`",
+                            compiled.id
                         ),
                     });
                 }
@@ -609,8 +658,8 @@ pub fn verify_bundle(
                                 severity: Severity::Error,
                                 subject: Some(compiled.id.clone()),
                                 message: format!(
-                                    "route `{}` (matched `{}`) enables forbidden hook `{forbid}` (compiled HookMask: {})",
-                                    compiled.id, rp.match_route, compiled.hook_mask
+                                    "route `{}` (matched `{selector_label}`) enables forbidden hook `{forbid}` (compiled HookMask: {})",
+                                    compiled.id, compiled.hook_mask
                                 ),
                             });
                         }
@@ -635,8 +684,8 @@ pub fn verify_bundle(
                                 severity: Severity::Error,
                                 subject: Some(compiled.id.clone()),
                                 message: format!(
-                                    "route `{}` (matched `{}`) is missing required hook `{req_hook}` (compiled HookMask: {})",
-                                    compiled.id, rp.match_route, compiled.hook_mask
+                                    "route `{}` (matched `{selector_label}`) is missing required hook `{req_hook}` (compiled HookMask: {})",
+                                    compiled.id, compiled.hook_mask
                                 ),
                             });
                         }
@@ -695,26 +744,6 @@ fn hosts_subsume(earlier: &[String], later: &[String]) -> bool {
     later
         .iter()
         .all(|l| earlier.iter().any(|e| host_pattern_subsumes(e, l)))
-}
-
-fn host_pattern_subsumes(earlier: &str, later: &str) -> bool {
-    let e = earlier.to_ascii_lowercase();
-    let l = later.to_ascii_lowercase();
-    if e == l {
-        return true;
-    }
-    if let Some(e_suffix) = e.strip_prefix("*.") {
-        if let Some(l_suffix) = l.strip_prefix("*.") {
-            l_suffix == e_suffix
-                || (l_suffix.len() > e_suffix.len()
-                    && l_suffix.ends_with(e_suffix)
-                    && l_suffix.as_bytes()[l_suffix.len() - e_suffix.len() - 1] == b'.')
-        } else {
-            host_matches(&e, &l)
-        }
-    } else {
-        false
-    }
 }
 
 fn path_subsumes(earlier: &PathMatch, later: &PathMatch) -> bool {
@@ -961,6 +990,7 @@ name = "request-id"
         let policy = VerifyPolicy {
             route_policies: vec![RoutePolicy {
                 match_route: "public_*".to_owned(),
+                match_group: None,
                 require_plugins: vec!["request-id".to_owned(), "bearer-auth".to_owned()],
                 forbid_hooks: vec!["ON_REQUEST_HEADERS".to_owned()],
                 require_hooks: vec![],

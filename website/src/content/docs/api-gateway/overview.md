@@ -48,6 +48,49 @@ response_headers_timeout_ms = 10000
 idle_chunk_timeout_ms = 30000
 ```
 
+## Route Groups & Shared Plugin Chains
+
+When serving multiple services under a shared API prefix or security perimeter, define a reusable `[[route_groups]]` block and attach routes with `group = "<id>"`:
+
+```toml
+[[route_groups]]
+id = "api_v2"
+hosts = ["api.example.com"]
+path_prefix = "/v2"
+strip_prefix = "/v2"
+response_headers_timeout_ms = 10000
+
+[[route_groups.plugins]]
+name = "jwt-auth"
+id = "api-v2-jwt"
+[route_groups.plugins.config]
+jwks_uri = "https://auth.example.com/.well-known/jwks.json"
+issuer = "https://auth.example.com"
+audience = "shunt-api"
+
+[[route_groups.plugins]]
+name = "rate-limit"
+id = "api-v2-rl"
+[route_groups.plugins.config]
+requests_per_second = 100.0
+burst = 200
+key = "client_ip"
+
+[[routes]]
+id = "users_v2"
+group = "api_v2"
+path_prefix = "/users"      # lowered to "/v2/users"
+upstream = "users_pool"
+
+[[routes]]
+id = "orders_v2"
+group = "api_v2"
+path_prefix = "/orders"     # lowered to "/v2/orders"
+upstream = "orders_pool"
+```
+
+Group plugins are compiled **once** under `group:<group_id>:<plugin_id>` and shared across all member routes—so `users_v2` and `orders_v2` share a single `rate-limit` bucket and a single `jwt-auth` JWKS cache with zero data-plane overhead. See [`[[route_groups]]`](/shunt/concepts/configuration/#route_groups-reusable-route-groups--shared-plugin-chains) for full lowering and narrowing rules.
+
 ## Active & Passive Health Checking
 
 Shunt layers two complementary health mechanisms on every upstream pool:

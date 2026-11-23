@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use http::Method;
 use http::header::{HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
-use shunt_engine::RedisStoreConfig;
+use shunt_engine::{RedisStoreConfig, host_matches};
 use shunt_plugin_sdk::FailurePolicy;
 
 use crate::error::ConfigError;
@@ -25,6 +25,8 @@ pub struct GatewayConfig {
     pub plugins: Vec<PluginAttachment>,
     #[serde(default)]
     pub upstreams: Vec<UpstreamIr>,
+    #[serde(default)]
+    pub route_groups: Vec<RouteGroupIr>,
     #[serde(default)]
     pub routes: Vec<RouteIr>,
     #[serde(default)]
@@ -428,9 +430,45 @@ fn default_mirror_max_in_flight() -> usize {
     128
 }
 
+/// Default maximum upstream attempts for a route when neither route nor group overrides it.
+pub const DEFAULT_ROUTE_MAX_ATTEMPTS: usize = 1;
+/// Default response headers (TTFB) timeout in milliseconds when neither route nor group overrides it.
+pub const DEFAULT_ROUTE_RESPONSE_HEADERS_TIMEOUT_MS: u64 = 30_000;
+/// Default idle chunk timeout in milliseconds when neither route nor group overrides it.
+pub const DEFAULT_ROUTE_IDLE_CHUNK_TIMEOUT_MS: u64 = 60_000;
+/// Default WebSocket upgrade policy when neither route nor group overrides it.
+pub const DEFAULT_ROUTE_ALLOW_WEBSOCKETS: bool = true;
+
+/// Reusable compile-time route group defining shared match defaults, execution defaults,
+/// and a shared plugin chain instantiated once per group (`group:<id>:<plugin>`).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RouteGroupIr {
+    pub id: String,
+    pub hosts: Vec<String>,
+    pub path_prefix: Option<String>,
+    pub methods: Vec<String>,
+    /// Optional exact HTTP header matchers inherited by all routes in this group.
+    pub headers: BTreeMap<String, String>,
+    /// Optional default upstream for routes in this group.
+    pub upstream: Option<String>,
+    /// Optional default `strip_prefix` inherited when a member route omits `strip_prefix`.
+    pub strip_prefix: Option<String>,
+    pub max_body_bytes: Option<usize>,
+    pub max_attempts: Option<usize>,
+    pub response_headers_timeout_ms: Option<u64>,
+    pub idle_chunk_timeout_ms: Option<u64>,
+    pub allow_websockets: Option<bool>,
+    pub mirrors: Vec<RouteMirrorIr>,
+    pub plugins: Vec<PluginAttachment>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RouteIr {
     pub id: String,
+    /// Optional reference to a declared `[[route_groups]]` ID.
+    #[serde(default)]
+    pub group: Option<String>,
     #[serde(default)]
     pub hosts: Vec<String>,
     pub path_prefix: Option<String>,
@@ -440,37 +478,189 @@ pub struct RouteIr {
     /// Optional exact HTTP header matchers (all must match).
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
-    pub upstream: String,
+    /// Target upstream name (may be omitted when inherited from `group.upstream`).
+    #[serde(default)]
+    pub upstream: Option<String>,
     pub strip_prefix: Option<String>,
     pub max_body_bytes: Option<usize>,
-    #[serde(default = "default_max_attempts")]
-    pub max_attempts: usize,
-    #[serde(default = "default_response_headers_timeout_ms")]
+    #[serde(default)]
+    pub max_attempts: Option<usize>,
+    #[serde(default)]
     pub response_headers_timeout_ms: Option<u64>,
-    #[serde(default = "default_idle_chunk_timeout_ms")]
+    #[serde(default)]
     pub idle_chunk_timeout_ms: Option<u64>,
-    #[serde(default = "default_allow_websockets")]
-    pub allow_websockets: bool,
+    #[serde(default)]
+    pub allow_websockets: Option<bool>,
     #[serde(default)]
     pub mirrors: Vec<RouteMirrorIr>,
     #[serde(default)]
     pub plugins: Vec<PluginAttachment>,
 }
 
-fn default_max_attempts() -> usize {
-    1
+/// Effective route configuration after lowering optional [`RouteGroupIr`] inheritance
+/// and canonical gateway defaults.
+#[derive(Debug, Clone)]
+pub struct ResolvedRoute<'a> {
+    pub id: &'a str,
+    pub group: Option<&'a str>,
+    pub hosts: Vec<String>,
+    pub path_prefix: Option<String>,
+    pub path_exact: Option<String>,
+    pub methods: Vec<String>,
+    pub headers: BTreeMap<String, String>,
+    pub upstream: String,
+    pub strip_prefix: Option<String>,
+    pub max_body_bytes: Option<usize>,
+    pub max_attempts: usize,
+    pub response_headers_timeout_ms: Option<u64>,
+    pub idle_chunk_timeout_ms: Option<u64>,
+    pub allow_websockets: bool,
+    pub mirrors: Vec<RouteMirrorIr>,
+    pub effective_plugins: Vec<&'a PluginAttachment>,
 }
-fn default_response_headers_timeout_ms() -> Option<u64> {
-    Some(30_000)
+
+/// Joins a route group's `path_prefix` with a member route's `path_prefix` or `path_exact`,
+/// ensuring a single leading `/` and clean slash boundaries without double slashes.
+pub fn join_route_paths(group_prefix: &str, route_path: &str) -> String {
+    let gp = group_prefix.trim_matches('/');
+    let rp_start = route_path.trim_start_matches('/');
+    match (gp.is_empty(), rp_start.is_empty()) {
+        (true, true) => "/".to_owned(),
+        (false, true) => format!("/{gp}"),
+        (true, false) => format!("/{rp_start}"),
+        (false, false) => format!("/{gp}/{rp_start}"),
+    }
 }
-fn default_idle_chunk_timeout_ms() -> Option<u64> {
-    Some(60_000)
-}
-fn default_allow_websockets() -> bool {
-    true
+
+/// Returns `true` if host pattern `earlier` subsumes `later` (case-insensitive, supporting
+/// `*.suffix` wildcards).
+pub fn host_pattern_subsumes(earlier: &str, later: &str) -> bool {
+    let e = earlier.to_ascii_lowercase();
+    let l = later.to_ascii_lowercase();
+    if e == l {
+        return true;
+    }
+    if let Some(e_suffix) = e.strip_prefix("*.") {
+        if let Some(l_suffix) = l.strip_prefix("*.") {
+            l_suffix == e_suffix
+                || (l_suffix.len() > e_suffix.len()
+                    && l_suffix.ends_with(e_suffix)
+                    && l_suffix.as_bytes()[l_suffix.len() - e_suffix.len() - 1] == b'.')
+        } else {
+            host_matches(&e, &l)
+        }
+    } else {
+        false
+    }
 }
 
 impl GatewayConfig {
+    /// Looks up a declared [`RouteGroupIr`] by ID.
+    pub fn route_group(&self, id: &str) -> Option<&RouteGroupIr> {
+        self.route_groups.iter().find(|g| g.id == id)
+    }
+
+    /// Resolves a [`RouteIr`] against its optional [`RouteGroupIr`] and canonical gateway
+    /// defaults into a single effective [`ResolvedRoute`].
+    ///
+    /// Returns `None` only if the route references an unknown group or lacks an effective upstream
+    /// (both are rejected upfront by [`GatewayConfig::validate`]).
+    pub fn resolve_route<'a>(&'a self, route: &'a RouteIr) -> Option<ResolvedRoute<'a>> {
+        let group = match route.group.as_deref() {
+            Some(gid) => Some(self.route_group(gid)?),
+            None => None,
+        };
+
+        let upstream = route
+            .upstream
+            .as_ref()
+            .or_else(|| group.and_then(|g| g.upstream.as_ref()))?
+            .clone();
+
+        let (path_prefix, path_exact) = match group.and_then(|g| g.path_prefix.as_deref()) {
+            Some(gp) => {
+                if let Some(re) = &route.path_exact {
+                    (None, Some(join_route_paths(gp, re)))
+                } else if let Some(rp) = &route.path_prefix {
+                    (Some(join_route_paths(gp, rp)), None)
+                } else {
+                    (Some(join_route_paths(gp, "/")), None)
+                }
+            }
+            None => (route.path_prefix.clone(), route.path_exact.clone()),
+        };
+
+        let hosts = if !route.hosts.is_empty() {
+            route.hosts.clone()
+        } else {
+            group.map(|g| g.hosts.clone()).unwrap_or_default()
+        };
+
+        let methods = if !route.methods.is_empty() {
+            route.methods.clone()
+        } else {
+            group.map(|g| g.methods.clone()).unwrap_or_default()
+        };
+
+        let mut headers = group.map(|g| g.headers.clone()).unwrap_or_default();
+        for (k, v) in &route.headers {
+            headers.insert(k.clone(), v.clone());
+        }
+
+        let strip_prefix = route
+            .strip_prefix
+            .clone()
+            .or_else(|| group.and_then(|g| g.strip_prefix.clone()));
+        let max_body_bytes = route
+            .max_body_bytes
+            .or_else(|| group.and_then(|g| g.max_body_bytes));
+        let max_attempts = route
+            .max_attempts
+            .or_else(|| group.and_then(|g| g.max_attempts))
+            .unwrap_or(DEFAULT_ROUTE_MAX_ATTEMPTS);
+        let response_headers_timeout_ms = route
+            .response_headers_timeout_ms
+            .or_else(|| group.and_then(|g| g.response_headers_timeout_ms))
+            .or(Some(DEFAULT_ROUTE_RESPONSE_HEADERS_TIMEOUT_MS));
+        let idle_chunk_timeout_ms = route
+            .idle_chunk_timeout_ms
+            .or_else(|| group.and_then(|g| g.idle_chunk_timeout_ms))
+            .or(Some(DEFAULT_ROUTE_IDLE_CHUNK_TIMEOUT_MS));
+        let allow_websockets = route
+            .allow_websockets
+            .or_else(|| group.and_then(|g| g.allow_websockets))
+            .unwrap_or(DEFAULT_ROUTE_ALLOW_WEBSOCKETS);
+
+        let mut mirrors = group.map(|g| g.mirrors.clone()).unwrap_or_default();
+        mirrors.extend(route.mirrors.iter().cloned());
+
+        let mut effective_plugins =
+            Vec::with_capacity(group.map_or(0, |g| g.plugins.len()) + route.plugins.len());
+        if let Some(g) = group {
+            effective_plugins.extend(g.plugins.iter());
+        }
+        effective_plugins.extend(route.plugins.iter());
+
+        Some(ResolvedRoute {
+            id: &route.id,
+            group: group.map(|g| g.id.as_str()),
+            hosts,
+            path_prefix,
+            path_exact,
+            methods,
+            headers,
+            upstream,
+            strip_prefix,
+            max_body_bytes,
+            max_attempts,
+            response_headers_timeout_ms,
+            idle_chunk_timeout_ms,
+            allow_websockets,
+            mirrors,
+            effective_plugins,
+        })
+    }
+
     /// Resolves relative TLS file paths against `base_dir`.
     pub fn resolve_relative_paths(&mut self, base_dir: &Path) {
         if let Some(tls) = &mut self.server.tls {
@@ -809,6 +999,71 @@ impl GatewayConfig {
             }
         }
 
+        let mut groups_by_id: HashMap<&str, &RouteGroupIr> =
+            HashMap::with_capacity(self.route_groups.len());
+        for group in &self.route_groups {
+            if group.id.trim().is_empty() {
+                errors.push("route_groups: group id cannot be empty".into());
+            } else if groups_by_id.insert(group.id.as_str(), group).is_some() {
+                errors.push(format!(
+                    "route_groups: duplicate route group id `{}`",
+                    group.id
+                ));
+            }
+            if let Some(prefix) = &group.path_prefix
+                && !prefix.starts_with('/')
+            {
+                errors.push(format!(
+                    "route_groups.{}: `path_prefix` (`{prefix}`) must start with `/`",
+                    group.id
+                ));
+            }
+            if let Some(strip) = &group.strip_prefix
+                && !strip.starts_with('/')
+            {
+                errors.push(format!(
+                    "route_groups.{}: `strip_prefix` (`{strip}`) must start with `/`",
+                    group.id
+                ));
+            }
+            if let Some(up) = &group.upstream
+                && !upstream_names.contains(up)
+            {
+                errors.push(format!(
+                    "route_groups.{}: references unknown upstream `{up}`",
+                    group.id
+                ));
+            }
+            if group.max_attempts == Some(0) {
+                errors.push(format!(
+                    "route_groups.{}: `max_attempts` must be >= 1",
+                    group.id
+                ));
+            }
+            for m in &group.methods {
+                if Method::from_bytes(m.as_bytes()).is_err() {
+                    errors.push(format!(
+                        "route_groups.{}: invalid HTTP method `{m}`",
+                        group.id
+                    ));
+                }
+            }
+            for k in group.headers.keys() {
+                if HeaderName::from_bytes(k.as_bytes()).is_err() {
+                    errors.push(format!(
+                        "route_groups.{}: invalid header matcher name `{k}`",
+                        group.id
+                    ));
+                }
+            }
+            validate_mirrors(
+                &format!("route_groups.{}", group.id),
+                &group.mirrors,
+                &upstream_names,
+                &mut errors,
+            );
+        }
+
         let mut route_ids = HashSet::new();
         for route in &self.routes {
             if route.id.trim().is_empty() {
@@ -816,19 +1071,66 @@ impl GatewayConfig {
             } else if !route_ids.insert(route.id.clone()) {
                 errors.push(format!("routes: duplicate route id `{}`", route.id));
             }
+            let group_ref = match route.group.as_deref() {
+                Some(gid) => match groups_by_id.get(gid) {
+                    Some(g) => Some(*g),
+                    None => {
+                        errors.push(format!(
+                            "routes.{}: references unknown route group `{gid}`",
+                            route.id
+                        ));
+                        None
+                    }
+                },
+                None => None,
+            };
             if route.path_prefix.is_some() && route.path_exact.is_some() {
                 errors.push(format!(
                     "routes.{}: cannot specify both `path_prefix` and `path_exact`",
                     route.id
                 ));
             }
-            if !upstream_names.contains(&route.upstream) {
-                errors.push(format!(
-                    "routes.{}: references unknown upstream `{}`",
-                    route.id, route.upstream
-                ));
+            if group_ref.and_then(|g| g.path_prefix.as_ref()).is_some() {
+                if let Some(p) = &route.path_prefix
+                    && !p.starts_with('/')
+                {
+                    errors.push(format!(
+                        "routes.{}: `path_prefix` (`{p}`) must start with `/`",
+                        route.id
+                    ));
+                }
+                if let Some(p) = &route.path_exact
+                    && !p.starts_with('/')
+                {
+                    errors.push(format!(
+                        "routes.{}: `path_exact` (`{p}`) must start with `/`",
+                        route.id
+                    ));
+                }
             }
-            if route.max_attempts == 0 {
+            let effective_upstream = route
+                .upstream
+                .as_deref()
+                .or_else(|| group_ref.and_then(|g| g.upstream.as_deref()));
+            match effective_upstream {
+                None => {
+                    if route.group.is_none() || group_ref.is_some() {
+                        errors.push(format!(
+                            "routes.{}: must specify `upstream` (directly or via route group)",
+                            route.id
+                        ));
+                    }
+                }
+                Some(up) => {
+                    if !upstream_names.contains(up) {
+                        errors.push(format!(
+                            "routes.{}: references unknown upstream `{up}`",
+                            route.id
+                        ));
+                    }
+                }
+            }
+            if route.max_attempts == Some(0) {
                 errors.push(format!("routes.{}: `max_attempts` must be >= 1", route.id));
             }
             for m in &route.methods {
@@ -844,55 +1146,98 @@ impl GatewayConfig {
                     ));
                 }
             }
-            for (idx, mirror) in route.mirrors.iter().enumerate() {
-                if !upstream_names.contains(&mirror.upstream) {
-                    errors.push(format!(
-                        "routes.{}.mirrors[{idx}]: references unknown upstream `{}`",
-                        route.id, mirror.upstream
-                    ));
-                }
-                if !mirror.sample_rate.is_finite()
-                    || mirror.sample_rate < 0.0
-                    || mirror.sample_rate > 1.0
-                {
-                    errors.push(format!(
-                        "routes.{}.mirrors[{idx}].sample_rate: must be in [0.0, 1.0]",
-                        route.id
-                    ));
-                }
-                if mirror.timeout_ms == 0 {
-                    errors.push(format!(
-                        "routes.{}.mirrors[{idx}].timeout_ms: must be >= 1",
-                        route.id
-                    ));
-                }
-                if mirror.max_in_flight == 0 {
-                    errors.push(format!(
-                        "routes.{}.mirrors[{idx}].max_in_flight: must be >= 1",
-                        route.id
-                    ));
-                }
-                for (k, v) in &mirror.headers {
-                    if HeaderName::from_bytes(k.as_bytes()).is_err() {
-                        errors.push(format!(
-                            "routes.{}.mirrors[{idx}].headers: invalid header name `{k}`",
-                            route.id
-                        ));
+            if let Some(g) = group_ref {
+                if !g.hosts.is_empty() && !route.hosts.is_empty() {
+                    for rh in &route.hosts {
+                        if !g.hosts.iter().any(|gh| host_pattern_subsumes(gh, rh)) {
+                            errors.push(format!(
+                                "routes.{}: host `{rh}` is not allowed by route group `{}` hosts ({:?})",
+                                route.id, g.id, g.hosts
+                            ));
+                        }
                     }
-                    if HeaderValue::from_str(v).is_err() {
-                        errors.push(format!(
-                            "routes.{}.mirrors[{idx}].headers.{k}: invalid header value",
-                            route.id
-                        ));
+                }
+                if !g.methods.is_empty() && !route.methods.is_empty() {
+                    let group_methods: Vec<Method> = g
+                        .methods
+                        .iter()
+                        .filter_map(|m| Method::from_bytes(m.as_bytes()).ok())
+                        .collect();
+                    for rm in &route.methods {
+                        if let Ok(parsed) = Method::from_bytes(rm.as_bytes())
+                            && !group_methods.contains(&parsed)
+                        {
+                            errors.push(format!(
+                                "routes.{}: method `{rm}` is not allowed by route group `{}` methods ({:?})",
+                                route.id, g.id, g.methods
+                            ));
+                        }
+                    }
+                }
+                for (rk, rv) in &route.headers {
+                    for (gk, gv) in &g.headers {
+                        if gk.eq_ignore_ascii_case(rk) && gv != rv {
+                            errors.push(format!(
+                                "routes.{}: header matcher `{rk}={rv}` contradicts route group `{}` header matcher `{gk}={gv}`",
+                                route.id, g.id
+                            ));
+                        }
                     }
                 }
             }
+            validate_mirrors(
+                &format!("routes.{}", route.id),
+                &route.mirrors,
+                &upstream_names,
+                &mut errors,
+            );
         }
 
         if errors.is_empty() {
             Ok(())
         } else {
             Err(ConfigError::Validation(errors))
+        }
+    }
+}
+
+fn validate_mirrors(
+    owner: &str,
+    mirrors: &[RouteMirrorIr],
+    upstream_names: &HashSet<String>,
+    errors: &mut Vec<String>,
+) {
+    for (idx, mirror) in mirrors.iter().enumerate() {
+        if !upstream_names.contains(&mirror.upstream) {
+            errors.push(format!(
+                "{owner}.mirrors[{idx}]: references unknown upstream `{}`",
+                mirror.upstream
+            ));
+        }
+        if !mirror.sample_rate.is_finite() || mirror.sample_rate < 0.0 || mirror.sample_rate > 1.0 {
+            errors.push(format!(
+                "{owner}.mirrors[{idx}].sample_rate: must be in [0.0, 1.0]"
+            ));
+        }
+        if mirror.timeout_ms == 0 {
+            errors.push(format!("{owner}.mirrors[{idx}].timeout_ms: must be >= 1"));
+        }
+        if mirror.max_in_flight == 0 {
+            errors.push(format!(
+                "{owner}.mirrors[{idx}].max_in_flight: must be >= 1"
+            ));
+        }
+        for (k, v) in &mirror.headers {
+            if HeaderName::from_bytes(k.as_bytes()).is_err() {
+                errors.push(format!(
+                    "{owner}.mirrors[{idx}].headers: invalid header name `{k}`"
+                ));
+            }
+            if HeaderValue::from_str(v).is_err() {
+                errors.push(format!(
+                    "{owner}.mirrors[{idx}].headers.{k}: invalid header value"
+                ));
+            }
         }
     }
 }

@@ -91,6 +91,7 @@ The Admin API always binds to a separate listener (`127.0.0.1:9090` by default),
 | --- | --- |
 | [`examples/shunt.toml`](../examples/shunt.toml) | Minimal HTTP reverse proxy with `request-id`, `rate-limit`, and `metrics` |
 | [`examples/shunt-api-gateway.toml`](../examples/shunt-api-gateway.toml) | Modern HTTP API gateway (`jwt-auth`, `ip-filter`, `body-limit`, `compression`, `redirect`) |
+| [`examples/shunt-route-groups.toml`](../examples/shunt-route-groups.toml) | Reusable `[[route_groups]]` with inherited match/timeout defaults, shared `jwt-auth`/`rate-limit` instances, and `match_group` policies |
 | [`examples/k8s-gateway-api.yaml`](../examples/k8s-gateway-api.yaml) | Kubernetes Gateway API v1 (`GatewayClass`, `Gateway`, `HTTPRoute`) |
 | [`examples/shunt-inspector-ui.toml`](../examples/shunt-inspector-ui.toml) | Opt-in Admin Inspector Web UI and live trace waterfall (`--ui`) |
 | [`examples/shunt-ai.toml`](../examples/shunt-ai.toml) | Core AI gateway with model aliases, failover, SSE translation, and token accounting |

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -17,8 +18,8 @@ use shunt_plugin_sdk::{
 use crate::error::ConfigError;
 use crate::ir::{
     ActiveHealthCheckIr, ActiveProbeKindIr, ClientAuthModeIr, GatewayConfig, PluginAttachment,
-    RouteIr, ServerTlsConfig, StateBackendKind, StateConfig, TelemetryBackendKind, TelemetryConfig,
-    UpstreamIr, redact_secrets,
+    ResolvedRoute, ServerTlsConfig, StateBackendKind, StateConfig, TelemetryBackendKind,
+    TelemetryConfig, UpstreamIr, redact_secrets,
 };
 use crate::provider::LoadedConfig;
 
@@ -32,8 +33,23 @@ pub struct SnapshotInspect {
     pub state_backend: String,
     pub telemetry_backend: String,
     pub global_plugins: Vec<PluginInspect>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub route_groups: Vec<RouteGroupInspect>,
     pub upstreams: Vec<UpstreamInspect>,
     pub routes: Vec<RouteInspect>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RouteGroupInspect {
+    pub id: String,
+    pub hosts: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_prefix: Option<String>,
+    pub methods: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
+    pub plugins: Vec<PluginInspect>,
+    pub routes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,6 +80,8 @@ pub struct RoutePluginInspect {
 #[derive(Debug, Clone, Serialize)]
 pub struct RouteInspect {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub hosts: Vec<String>,
     pub path: String,
     pub methods: Vec<String>,
@@ -198,11 +216,86 @@ impl SnapshotCompiler {
             builder = builder.upstream(up_cfg);
         }
 
-        let mut route_plugin_details: Vec<Vec<RoutePluginInspect>> =
+        // Compile each route group's plugin chain ONCE so all member routes share the exact
+        // same Arc<dyn HttpPlugin> instances and reload-persistent `group:<id>:<plugin>` state.
+        struct CompiledGroup {
+            plugins: Vec<Arc<dyn HttpPlugin>>,
+            details: Vec<RoutePluginInspect>,
+            inspect_idx: usize,
+        }
+        let mut route_groups_inspect: Vec<RouteGroupInspect> =
+            Vec::with_capacity(loaded.config.route_groups.len());
+        let mut compiled_groups: HashMap<&str, CompiledGroup> =
+            HashMap::with_capacity(loaded.config.route_groups.len());
+        for group_ir in &loaded.config.route_groups {
+            let mut group_plugins = Vec::with_capacity(group_ir.plugins.len());
+            let mut group_details = Vec::with_capacity(group_ir.plugins.len());
+            let mut group_inspect_plugins = Vec::with_capacity(group_ir.plugins.len());
+            for (idx, att) in group_ir.plugins.iter().enumerate() {
+                let scope_id = format!(
+                    "group:{}:{}",
+                    group_ir.id,
+                    att.id
+                        .as_deref()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("{}:{idx}", att.name))
+                );
+                let plugin = self.build_plugin(att, &scope_id, &build_session)?;
+                group_details.push(RoutePluginInspect {
+                    name: plugin.name().to_owned(),
+                    scope_id: scope_id.clone(),
+                    hook_mask: plugin.hook_mask(),
+                });
+                group_inspect_plugins.push(PluginInspect {
+                    name: plugin.name().to_owned(),
+                    scope_id,
+                    hook_mask: plugin.hook_mask(),
+                    config: redact_secrets(&att.config),
+                });
+                group_plugins.push(plugin);
+            }
+            let inspect_idx = route_groups_inspect.len();
+            route_groups_inspect.push(RouteGroupInspect {
+                id: group_ir.id.clone(),
+                hosts: group_ir.hosts.clone(),
+                path_prefix: group_ir.path_prefix.clone(),
+                methods: group_ir.methods.clone(),
+                upstream: group_ir.upstream.clone(),
+                plugins: group_inspect_plugins,
+                routes: Vec::new(),
+            });
+            compiled_groups.insert(
+                group_ir.id.as_str(),
+                CompiledGroup {
+                    plugins: group_plugins,
+                    details: group_details,
+                    inspect_idx,
+                },
+            );
+        }
+
+        let mut route_meta: Vec<(Option<String>, Vec<RoutePluginInspect>)> =
             Vec::with_capacity(loaded.config.routes.len());
         for route_ir in &loaded.config.routes {
-            let mut spec = compile_route_ir(route_ir)?;
-            let mut details = Vec::with_capacity(route_ir.plugins.len());
+            let resolved = loaded.config.resolve_route(route_ir).ok_or_else(|| {
+                ConfigError::Validation(vec![format!(
+                    "routes.{}: failed to resolve route group or upstream",
+                    route_ir.id
+                )])
+            })?;
+            let mut spec = compile_resolved_route(&resolved)?;
+            let mut details = Vec::new();
+            if let Some(gid) = resolved.group
+                && let Some(cg) = compiled_groups.get(gid)
+            {
+                route_groups_inspect[cg.inspect_idx]
+                    .routes
+                    .push(route_ir.id.clone());
+                details.extend(cg.details.iter().cloned());
+                for plugin in &cg.plugins {
+                    spec = spec.with_plugin(Arc::clone(plugin));
+                }
+            }
             for (idx, att) in route_ir.plugins.iter().enumerate() {
                 let scope_id = format!(
                     "route:{}:{}",
@@ -220,7 +313,7 @@ impl SnapshotCompiler {
                 });
                 spec = spec.with_plugin(plugin);
             }
-            route_plugin_details.push(details);
+            route_meta.push((resolved.group.map(str::to_owned), details));
             builder = builder.route(spec);
         }
 
@@ -254,8 +347,8 @@ impl SnapshotCompiler {
         let routes_inspect: Vec<RouteInspect> = snapshot
             .routes
             .iter()
-            .zip(route_plugin_details)
-            .map(|(r, plugin_details)| {
+            .zip(route_meta)
+            .map(|(r, (group, plugin_details))| {
                 let path = match &r.matcher.path {
                     PathMatch::Any => "*".to_owned(),
                     PathMatch::Exact(p) => format!("={p}"),
@@ -263,6 +356,7 @@ impl SnapshotCompiler {
                 };
                 RouteInspect {
                     id: r.id.clone(),
+                    group,
                     hosts: r.matcher.hosts.clone(),
                     path,
                     methods: r.matcher.methods.iter().map(ToString::to_string).collect(),
@@ -283,6 +377,7 @@ impl SnapshotCompiler {
             state_backend,
             telemetry_backend,
             global_plugins: global_inspect,
+            route_groups: route_groups_inspect,
             upstreams: upstreams_inspect,
             routes: routes_inspect,
         };
@@ -461,7 +556,7 @@ fn compile_active_health_check_ir(ir: &ActiveHealthCheckIr) -> ActiveHealthCheck
     }
 }
 
-fn compile_route_ir(ir: &RouteIr) -> Result<RouteSpec, ConfigError> {
+fn compile_resolved_route(ir: &ResolvedRoute<'_>) -> Result<RouteSpec, ConfigError> {
     let path = if let Some(exact) = &ir.path_exact {
         PathMatch::Exact(exact.clone())
     } else if let Some(prefix) = &ir.path_prefix {
@@ -494,7 +589,7 @@ fn compile_route_ir(ir: &RouteIr) -> Result<RouteSpec, ConfigError> {
         headers,
     };
 
-    let mut spec = RouteSpec::new(ir.id.clone(), matcher, ir.upstream.clone())
+    let mut spec = RouteSpec::new(ir.id.to_owned(), matcher, ir.upstream.clone())
         .with_max_attempts(ir.max_attempts)
         .allow_websockets(ir.allow_websockets)
         .with_timeouts(TimeoutConfig {
