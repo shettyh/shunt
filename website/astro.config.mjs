@@ -124,6 +124,7 @@ export default defineConfig({
           label: 'Guides & Recipes',
           items: [
             { label: 'Which Plugins Do I Need?', slug: 'guides/recipes' },
+            { label: 'Production & Troubleshooting', slug: 'guides/production-and-troubleshooting' },
             { label: 'Coding Agents & Local LLMs', slug: 'guides/coding-agents' },
             { label: 'Migrating from LiteLLM', slug: 'guides/litellm-migration' },
           ],

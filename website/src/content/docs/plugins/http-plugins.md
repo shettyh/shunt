@@ -3,27 +3,31 @@ title: HTTP Plugins (shunt-plugins)
 description: Complete configuration reference for all 15 built-in HTTP API gateway plugins in shunt-plugins.
 ---
 
-All 15 plugins in `shunt-plugins` can be attached globally (`[[plugins]]`) or per-route (`[[routes.plugins]]`).
+All 15 plugins in `shunt-plugins` can be attached globally (`[[plugins]]`), per route group (`[[route_groups.plugins]]`), or per route (`[[routes.plugins]]`). Plugins execute in **`global → group → route`** order.
+
+:::tip[Zero Buffering & Shared Group State]
+None of the 15 plugins in `shunt-plugins` buffer full request or response bodies—routes using only HTTP plugins stay streaming and allocation-free. For stateful/cached plugins (`rate-limit`, `jwt-auth`), attach them on `[[route_groups.plugins]]` with a stable `id = "..."` to share one bucket or JWKS cache across sibling routes and preserve state across hot reloads.
+:::
 
 ## Plugin Matrix
 
-| Plugin | Hooks Used | Purpose |
-| --- | --- | --- |
-| `request-id` | Request / Response Headers | Generate or propagate `x-request-id` |
-| `access-log` | Complete | Structured `tracing` access logs |
-| `bearer-auth` | Request Headers | Static bearer token auth with subject injection |
-| `jwt-auth` | Request Headers | Pure-Rust JWT/JWKS/OIDC verification & claim forwarding |
-| `mtls-auth` | Request Headers | Mutual TLS client cert authorization (CN, SAN, SPIFFE, SHA-256) |
-| `ip-filter` | Request Headers | IPv4/IPv6 CIDR allow/deny with trusted-proxy `X-Forwarded-For` |
-| `body-limit` | Request Headers (engine stream limit) | Enforce max request body size on `Content-Length` & chunked streams |
-| `compression` | Request / Response Headers + Chunk | Streaming-safe, SSE-aware `zstd`/`br`/`gzip`/`deflate` |
-| `redirect` | Request Headers | HTTP `301`/`302`/`303`/`307`/`308` redirects & path rewrites |
-| `rate-limit` | Request Headers | Token-bucket rate limiting (in-memory or Redis/Valkey) |
-| `header-rewrite` | Request / Upstream / Response Headers | Set, add, or remove headers and rewrite upstream host/path |
-| `cors` | Request / Response Headers | CORS preflight (`OPTIONS`) & response headers |
-| `otel-trace` | Request / Upstream / Response / Complete | W3C `traceparent`/`tracestate` & OTLP span emission |
-| `metrics` | Complete | Prometheus counters & histograms on `/metrics` |
-| `dev-waterfall` | Complete | Per-hook µs trace waterfall (auto-attached by `shunt dev`) |
+| Plugin | Hooks Used | Body Buffering | State / Redis | Purpose |
+| --- | --- | --- | --- | --- |
+| `request-id` | Request / Response Headers | None | Stateless | Generate or propagate `x-request-id` |
+| `access-log` | Complete | None | Stateless | Structured `tracing` access logs |
+| `bearer-auth` | Request Headers | None | Stateless (`env:`) | Static bearer token auth with subject injection |
+| `jwt-auth` | Request Headers | None | In-memory JWKS cache (`env:`) | Pure-Rust JWT/JWKS/OIDC verification & claim forwarding |
+| `mtls-auth` | Request Headers | None | Stateless | Mutual TLS client cert authorization (CN, SAN, SPIFFE, SHA-256) |
+| `ip-filter` | Request Headers | None | Stateless | IPv4/IPv6 CIDR allow/deny with trusted-proxy `X-Forwarded-For` |
+| `body-limit` | Request Headers (stream limit) | None (streaming cap) | Stateless | Enforce max request body size on `Content-Length` & chunked streams |
+| `compression` | Request / Response Headers + Chunk | Streaming chunk | Stateless | Streaming-safe, SSE-aware `zstd`/`br`/`gzip`/`deflate` |
+| `redirect` | Request Headers | None | Stateless | HTTP `301`/`302`/`303`/`307`/`308` redirects & path rewrites |
+| `rate-limit` | Request Headers | None | Stateful (Memory / Redis) | Token-bucket rate limiting across local or Redis/Valkey state |
+| `header-rewrite` | Request / Upstream / Response Headers | None | Stateless | Set, add, or remove headers and rewrite upstream host/path |
+| `cors` | Request / Response Headers | None | Stateless | CORS preflight (`OPTIONS`) & response headers |
+| `otel-trace` | Request / Upstream / Response / Complete | None | Shared OTLP exporter | W3C `traceparent`/`tracestate` & OTLP span emission |
+| `metrics` | Complete | None | Global Prometheus registry | Prometheus counters & histograms on `/metrics` |
+| `dev-waterfall` | Complete | None | Stateless | Per-hook µs trace waterfall (auto-attached by `shunt dev`) |
 
 ---
 
