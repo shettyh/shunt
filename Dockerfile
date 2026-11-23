@@ -12,6 +12,7 @@ COPY crates/shunt-plugin-sdk/Cargo.toml crates/shunt-plugin-sdk/Cargo.toml
 COPY crates/shunt-core/Cargo.toml crates/shunt-core/Cargo.toml
 COPY crates/shunt-plugins/Cargo.toml crates/shunt-plugins/Cargo.toml
 COPY crates/shunt-ai/Cargo.toml crates/shunt-ai/Cargo.toml
+COPY crates/shunt-mcp/Cargo.toml crates/shunt-mcp/Cargo.toml
 COPY crates/shunt-config/Cargo.toml crates/shunt-config/Cargo.toml
 COPY crates/shunt-test/Cargo.toml crates/shunt-test/Cargo.toml
 COPY crates/shunt-cli/Cargo.toml crates/shunt-cli/Cargo.toml

@@ -345,6 +345,8 @@ jobs:
             shunt-plugins
             shunt-config
             shunt-ai
+            shunt-mcp
+            shunt-test
             shunt-cli
           )
 
