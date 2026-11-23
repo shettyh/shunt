@@ -1,13 +1,15 @@
 # Shunt Route Groups & Shared Plugin Chains Example (RFC 0021)
 #
-# Demonstrates organizing multiple API routes under reusable [[route_groups]]
-# with inherited match defaults (hosts, path_prefix, methods), shared timeout
-# policies, and shared plugin instances (one JWT JWKS cache and one shared
-# rate-limit bucket across all routes in a group).
+# Demonstrates both real-world [[route_groups]] patterns:
+#   1. Multi-service API surface (`api_v2`): shared host/prefix, CIDR filter, JWT
+#      JWKS cache, and shared rate-limit bucket across routes targeting different
+#      upstreams (`users_svc`, `orders_svc`).
+#   2. Single-backend group (`billing_api`): sets a default `upstream = "billing_svc"`
+#      once on the group so member routes inherit it automatically without repetition.
 #
 # Usage:
-#   shunt check -c examples/shunt-route-groups.toml
-#   shunt verify -c examples/shunt-route-groups.toml
+#   SHUNT_JWT_SECRET=demo-secret shunt check -c examples/shunt-route-groups.toml
+#   SHUNT_JWT_SECRET=demo-secret shunt verify -c examples/shunt-route-groups.toml
 
 [server]
 listen = "127.0.0.1:8080"
@@ -23,6 +25,7 @@ name = "request-id"
 [[plugins]]
 name = "metrics"
 
+# Upstreams are always top-level so pools, health probes, and mirrors stay shared.
 [[upstreams]]
 name = "users_svc"
 endpoints = ["http://127.0.0.1:18081"]
@@ -32,10 +35,15 @@ name = "orders_svc"
 endpoints = ["http://127.0.0.1:18082"]
 
 [[upstreams]]
+name = "billing_svc"
+endpoints = ["http://127.0.0.1:18084"]
+
+[[upstreams]]
 name = "public_svc"
 endpoints = ["http://127.0.0.1:18083"]
 
-# Group 1: Authenticated v2 API with shared CIDR filter, JWT verifier, and shared rate limit.
+# Group 1 (multi-service): Authenticated v2 API with shared CIDR filter, JWT cache,
+# and shared rate-limit bucket across distinct backend services.
 [[route_groups]]
 id = "api_v2"
 hosts = ["*.example.com"]
@@ -69,6 +77,32 @@ requests_per_second = 100.0
 burst = 200
 key = "client_ip"
 
+# Group 2 (single-backend default upstream): Every member route inherits
+# `upstream = "billing_svc"` unless it explicitly overrides `upstream`.
+[[route_groups]]
+id = "billing_api"
+hosts = ["api.example.com"]
+path_prefix = "/billing"
+upstream = "billing_svc"
+response_headers_timeout_ms = 15000
+
+[[route_groups.plugins]]
+name = "jwt-auth"
+id = "billing-jwt"
+[route_groups.plugins.config]
+algorithms = ["HS256"]
+keys = [{ kid = "demo-hs1", secret = "env:SHUNT_JWT_SECRET" }]
+issuer = "https://auth.example.com"
+audience = "shunt-api"
+
+[[route_groups.plugins]]
+name = "rate-limit"
+id = "billing-shared-rl"
+[route_groups.plugins.config]
+requests_per_second = 50.0
+burst = 100
+key = "client_ip"
+
 # Routes stay in a single top-to-bottom ordered list (explicit first-match-wins precedence).
 [[routes]]
 id = "api_v2_users"
@@ -90,6 +124,17 @@ name = "header-rewrite"         # runs after global + group plugins
 [routes.plugins.config]
 response_set = { "x-service" = "orders" }
 
+[[routes]]
+id = "billing_invoices"
+group = "billing_api"
+path_prefix = "/invoices"       # lowered to "/billing/invoices", inherits upstream = "billing_svc"
+methods = ["GET", "POST"]
+
+[[routes]]
+id = "billing_subscriptions"
+group = "billing_api"
+path_prefix = "/subscriptions"  # lowered to "/billing/subscriptions", inherits upstream = "billing_svc"
+
 # Ungrouped public health endpoint (no auth, no group rate limit).
 [[routes]]
 id = "public_health"
@@ -97,8 +142,12 @@ path_exact = "/health"
 methods = ["GET"]
 upstream = "public_svc"
 
-# Declarative CI verification policy targeting the route group directly.
+# Declarative CI verification policy targeting route groups directly.
 [verify]
 [[verify.route_policies]]
 match_group = "api_*"
+require_plugins = ["jwt-auth", "rate-limit"]
+
+[[verify.route_policies]]
+match_group = "billing_*"
 require_plugins = ["jwt-auth", "rate-limit"]

@@ -94,7 +94,7 @@ shunt verify -c examples/shunt.toml
 shunt test -s specs/conformance/01-core-routing-and-plugins.spec.toml
 ```
 
-Browse all 15 ready-to-run configs in [`examples/`](examples/) (indexed in [`docs/reference.md`](docs/reference.md#example-configurations)).
+Browse all 16 ready-to-run configs in [`examples/`](examples/) (including [`shunt-route-groups.toml`](examples/shunt-route-groups.toml), indexed in [`docs/reference.md`](docs/reference.md#example-configurations)).
 
 ---
 
@@ -162,7 +162,7 @@ impl HttpPlugin for PoweredByPlugin {
 ## Documentation & Development
 
 - **Docs Website**: [shettyh.github.io/shunt](https://shettyh.github.io/shunt/) (source in [`website/`](website/))
-- **Repo Docs**: [Plugin, Admin API & Examples Reference](docs/reference.md) · [Product Vision](docs/vision.md) · [Core Design](docs/design.md) · [Architecture RFCs (0001–0020)](rfcs/README.md) · [Benchmarks](benches/README.md)
+- **Repo Docs**: [Plugin, Admin API & Examples Reference](docs/reference.md) · [Product Vision](docs/vision.md) · [Core Design](docs/design.md) · [Architecture RFCs (0001–0021)](rfcs/README.md) · [Benchmarks](benches/README.md)
 
 ```bash
 cargo fmt --all -- --check

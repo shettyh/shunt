@@ -5,6 +5,73 @@ description: Complete schema reference for shunt.toml and YAML configuration fil
 
 Shunt accepts **TOML** (`.toml`, canonical) or **YAML** (`.yaml` / `.yml`) configuration files, as well as [Kubernetes Gateway API v1](/shunt/api-gateway/kubernetes/) manifests.
 
+## How `shunt.toml` Fits Together
+
+Every Shunt configuration is composed of **four distinct top-level primitives** that compile down into a flat, zero-overhead routing table (`GatewaySnapshot`) before a single request is served:
+
+<div class="shunt-diagram-frame">
+<svg viewBox="0 0 760 250" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="How upstreams, route groups, routes, and plugins compile into flat routes">
+  <rect x="16" y="16" width="166" height="62" rx="8" fill="var(--sl-color-bg)" stroke="var(--sl-color-hairline)" stroke-width="1.3"/>
+  <text x="99" y="40" text-anchor="middle" fill="var(--sl-color-white)" font-family="monospace" font-size="11.5" font-weight="700">[[plugins]]</text>
+  <text x="99" y="58" text-anchor="middle" fill="var(--sl-color-gray-3)" font-size="10.5">Global (all routes)</text>
+
+  <rect x="200" y="16" width="176" height="62" rx="8" fill="var(--sl-color-bg)" stroke="var(--sl-color-accent)" stroke-width="1.4"/>
+  <text x="288" y="40" text-anchor="middle" fill="var(--sl-color-white)" font-family="monospace" font-size="11.5" font-weight="700">[[route_groups]]</text>
+  <text x="288" y="58" text-anchor="middle" fill="var(--sl-color-gray-3)" font-size="10.5">Shared defaults &amp; plugins</text>
+
+  <rect x="394" y="16" width="166" height="62" rx="8" fill="var(--sl-color-bg)" stroke="var(--sl-color-hairline)" stroke-width="1.3"/>
+  <text x="477" y="40" text-anchor="middle" fill="var(--sl-color-white)" font-family="monospace" font-size="11.5" font-weight="700">[[routes]]</text>
+  <text x="477" y="58" text-anchor="middle" fill="var(--sl-color-gray-3)" font-size="10.5">Ordered match table</text>
+
+  <rect x="578" y="16" width="166" height="62" rx="8" fill="var(--sl-color-bg)" stroke="var(--sl-color-hairline)" stroke-width="1.3"/>
+  <text x="661" y="40" text-anchor="middle" fill="var(--sl-color-white)" font-family="monospace" font-size="11.5" font-weight="700">[[upstreams]]</text>
+  <text x="661" y="58" text-anchor="middle" fill="var(--sl-color-gray-3)" font-size="10.5">Shared backend pools</text>
+
+  <line x1="394" y1="47" x2="376" y2="47" stroke="var(--sl-color-accent)" stroke-width="1.5" stroke-dasharray="3 2"/>
+  <line x1="560" y1="47" x2="578" y2="47" stroke="var(--sl-color-gray-4)" stroke-width="1.5" stroke-dasharray="3 2"/>
+
+  <line x1="99" y1="78" x2="99" y2="128" stroke="var(--sl-color-gray-4)" stroke-width="1.4"/>
+  <line x1="288" y1="78" x2="288" y2="128" stroke="var(--sl-color-accent)" stroke-width="1.5"/>
+  <line x1="477" y1="78" x2="477" y2="128" stroke="var(--sl-color-gray-4)" stroke-width="1.4"/>
+  <line x1="661" y1="78" x2="661" y2="128" stroke="var(--sl-color-gray-4)" stroke-width="1.4"/>
+
+  <text x="380" y="112" text-anchor="middle" fill="var(--sl-color-accent)" font-family="monospace" font-size="10.5" font-weight="600">SnapshotCompiler lowers everything at compile time (zero data-plane overhead)</text>
+
+  <rect x="16" y="130" width="728" height="104" rx="10" fill="var(--sl-color-bg)" stroke="var(--sl-color-accent)" stroke-width="1.4" stroke-dasharray="5 3"/>
+  <text x="34" y="152" fill="var(--sl-color-accent)" font-family="monospace" font-size="10" font-weight="700">COMPILED SNAPSHOT (FLAT FIRST-MATCH-WINS TABLE)</text>
+
+  <rect x="34" y="164" width="496" height="52" rx="6" fill="var(--sl-color-gray-6)" stroke="var(--sl-color-hairline)"/>
+  <text x="50" y="185" fill="var(--sl-color-white)" font-family="monospace" font-size="11" font-weight="600">CompiledRoute: /v2/users*</text>
+  <text x="50" y="203" fill="var(--sl-color-gray-3)" font-family="monospace" font-size="10">plugins: [global...] → [group (shared Arc)...] → [route...]  ·  HookMask</text>
+
+  <line x1="530" y1="190" x2="564" y2="190" stroke="var(--sl-color-accent)" stroke-width="1.6"/>
+
+  <rect x="564" y="164" width="162" height="52" rx="6" fill="var(--sl-color-gray-6)" stroke="var(--sl-color-hairline)"/>
+  <text x="645" y="185" text-anchor="middle" fill="var(--sl-color-white)" font-family="monospace" font-size="11" font-weight="600">UpstreamPool</text>
+  <text x="645" y="203" text-anchor="middle" fill="var(--sl-color-gray-3)" font-family="monospace" font-size="10">by name (route → group)</text>
+</svg>
+</div>
+
+- **`[[upstreams]]` are always top-level:** Backend pools, TLS settings, and active health checks live at the top level so multiple routes, route groups, mirrors, and dynamic routers (`ai-model-router`, `mcp-router`) can share warm connection pools by name.
+- **`[[route_groups]]` reference upstreams—they don't nest them:** Set `upstream = "my_pool"` on a group to provide a default backend for all member routes (individual routes can omit `upstream` to inherit it, or set their own `upstream` to override it).
+- **`[[routes]]` stay in one flat ordered list:** Routes opt into a group with `group = "<id>"`. Keeping routes flat guarantees unambiguous top-to-bottom first-match-wins precedence and clean TOML.
+
+### Choosing Plugin Scope: Global vs. Group vs. Route
+
+Plugins execute in deterministic **`global` → `group` → `route`** order. Where you attach a plugin controls both **which routes run it** and **how state is shared**:
+
+| Scope | TOML Block | Instantiation & `StateStore` Scope | Best Used For |
+| --- | --- | --- | --- |
+| **Global** | `[[plugins]]` | Built once (`global:<id>`); runs on **every** route | `request-id`, `metrics`, `access-log`, `otel-trace`, gateway-wide rate limits |
+| **Route Group** | `[[route_groups.plugins]]` | Built **once per group** (`group:<group_id>:<id>`); shared via `Arc` across all member routes | Shared `rate-limit` quota across sibling routes, single warm `jwt-auth` JWKS cache, `ip-filter`, `cors`, shared AI/MCP policies |
+| **Route** | `[[routes.plugins]]` | Built **once per route** (`route:<route_id>:<id>`); isolated state | Route-specific `header-rewrite`, `redirect`, `compression`, or isolated per-endpoint quotas |
+
+:::tip[Preserve State Across Hot Reloads with `id`]
+For stateful plugins (`rate-limit`, `jwt-auth`, `ai-token-rate-limit`, `ai-budget`, `ai-cache`, `ai-failover`, `mcp-rate-limit`), always set an explicit `id = "..."` on the plugin block. Without an explicit `id`, the scope falls back to the plugin's positional index (`name:0`), so reordering plugins resets in-memory counters on reload.
+:::
+
+---
+
 ## Environment Variable Substitution (`env:`)
 
 Secret fields across plugins, `[state]`, and `[telemetry]` support the `env:VAR_NAME` convention so secrets never live in Git:
@@ -126,6 +193,8 @@ burst = 1000
 ## `[[upstreams]]`
 
 Defines named backend pools, connection pooling, upstream TLS, passive health ejection, and optional background active health probes.
+
+Upstreams are always declared at the top level and referenced by name from `[[routes]]`, `[[route_groups]]` (as a default `upstream`), `[[routes.mirrors]]`, `ai-model-router`, and `mcp-router`. This keeps warm TCP/TLS pools, active health probes, and `/upstreams` health reports shared across the whole gateway.
 
 ```toml
 [[upstreams]]

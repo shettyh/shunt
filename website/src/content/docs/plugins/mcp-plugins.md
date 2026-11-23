@@ -3,17 +3,17 @@ title: MCP Plugins (shunt-mcp)
 description: Complete configuration reference for all 5 MCP and agentic governance plugins in shunt-mcp.
 ---
 
-All 5 plugins in `shunt-mcp` run strictly on top of `shunt-plugin-sdk` and compose together on a Streamable HTTP MCP route.
+All 5 plugins in `shunt-mcp` run strictly on top of `shunt-plugin-sdk` and compose together on a Streamable HTTP MCP route (or `[[route_groups.plugins]]` if sharing auth/quotas across multiple MCP endpoints). Always set stable `id = "..."` values so sessions, catalogs, and rate-limit buckets persist across reloads.
 
 ## Plugin Summary
 
-| Plugin | Purpose |
-| --- | --- |
-| `mcp-auth` | Virtual keys / forwarded JWT & mTLS identity, RFC 9728 OAuth metadata, per-agent server/tool/resource/prompt ACLs, `Mcp-Session-Id` principal binding |
-| `mcp-router` | Streamable HTTP JSON-RPC 2.0 router & multi-server virtual multiplexer (`initialize`, cached ACL-filtered `tools/list`, `<server>__<tool>` routing) |
-| `mcp-guardrails` | Tool allow/deny policies, approval gates, per-tool JSON argument regex/schema rules, outbound secret redaction, inbound prompt-injection defense (JSON + SSE), OPA webhooks |
-| `mcp-rate-limit` | Per-principal RPM & `tools/call` RPM, per-tool quotas, per-session call caps, identical-call loop breaker, and RAII `max_parallel_calls` |
-| `mcp-telemetry` | `shunt_mcp_*` Prometheus metrics, OTLP `mcp.*` span enrichment, structured SHA-256 audit logs, and `/api/status` (`"mcp"`) inspection |
+| Plugin | Body Handling | State / Redis | Purpose |
+| --- | --- | --- | --- |
+| `mcp-auth` | Headers only | In-memory session binding (`env:`) | Virtual keys / forwarded JWT & mTLS identity, RFC 9728 OAuth metadata, per-agent server/tool/resource/prompt ACLs, `Mcp-Session-Id` principal binding |
+| `mcp-router` | Buffers JSON-RPC request / streams SSE | In-memory catalog & backend session cache (`env:`) | Streamable HTTP JSON-RPC 2.0 router & multi-server virtual multiplexer (`initialize`, cached ACL-filtered `tools/list`, `<server>__<tool>` routing) |
+| `mcp-guardrails` | JSON-RPC request + JSON/SSE response | In-memory stats (`env:` webhooks) | Tool allow/deny policies, approval gates, per-tool JSON argument regex/schema rules, outbound secret redaction, inbound prompt-injection defense, OPA webhooks |
+| `mcp-rate-limit` | Reads parsed MCP call context | Stateful (Memory / Redis) | Per-principal RPM & `tools/call` RPM, per-tool quotas, per-session call caps, identical-call loop breaker, and RAII `max_parallel_calls` |
+| `mcp-telemetry` | Complete / optional error inspect | Prometheus / OTLP + `/api/status` | `shunt_mcp_*` Prometheus metrics, OTLP `mcp.*` span enrichment, structured SHA-256 audit logs, and `/api/status` (`"mcp"`) inspection |
 
 ---
 

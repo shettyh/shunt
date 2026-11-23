@@ -50,7 +50,49 @@ idle_chunk_timeout_ms = 30000
 
 ## Route Groups & Shared Plugin Chains
 
-When serving multiple services under a shared API prefix or security perimeter, define a reusable `[[route_groups]]` block and attach routes with `group = "<id>"`:
+When serving multiple routes under a shared API prefix, security perimeter, or backend service, define a reusable `[[route_groups]]` block and attach routes with `group = "<id>"`. Backend pools always stay at top-level `[[upstreams]]` and are referenced by name.
+
+Two patterns cover almost all real-world gateways:
+
+### Pattern 1: Single-Backend Group (Inherited Default `upstream`)
+
+Set `upstream = "<pool>"` once on the group so every member route inherits it without repeating `upstream`:
+
+```toml
+[[upstreams]]
+name = "billing_svc"
+endpoints = ["http://10.0.2.10:8080"]
+
+[[route_groups]]
+id = "billing_api"
+hosts = ["api.example.com"]
+path_prefix = "/billing"
+upstream = "billing_svc"             # Inherited by all routes in this group
+response_headers_timeout_ms = 15000
+
+[[route_groups.plugins]]
+name = "jwt-auth"
+id = "billing-jwt"
+[route_groups.plugins.config]
+jwks_uri = "https://auth.example.com/.well-known/jwks.json"
+issuer = "https://auth.example.com"
+audience = "shunt-api"
+
+[[routes]]
+id = "billing_invoices"
+group = "billing_api"
+path_prefix = "/invoices"            # lowered to "/billing/invoices" -> billing_svc
+methods = ["GET", "POST"]
+
+[[routes]]
+id = "billing_subscriptions"
+group = "billing_api"
+path_prefix = "/subscriptions"       # lowered to "/billing/subscriptions" -> billing_svc
+```
+
+### Pattern 2: Multi-Service API Surface (Shared Auth & Rate-Limit Bucket)
+
+Omit `upstream` on the group (or override it per route) when several microservices live under one versioned API perimeter:
 
 ```toml
 [[route_groups]]
@@ -89,7 +131,7 @@ path_prefix = "/orders"     # lowered to "/v2/orders"
 upstream = "orders_pool"
 ```
 
-Group plugins are compiled **once** under `group:<group_id>:<plugin_id>` and shared across all member routes—so `users_v2` and `orders_v2` share a single `rate-limit` bucket and a single `jwt-auth` JWKS cache with zero data-plane overhead. See [`[[route_groups]]`](/shunt/concepts/configuration/#route_groups-reusable-route-groups--shared-plugin-chains) for full lowering and narrowing rules.
+Group plugins are compiled **once** under `group:<group_id>:<plugin_id>` and shared across all member routes—so `users_v2` and `orders_v2` share a single `rate-limit` bucket and a single `jwt-auth` JWKS cache with zero data-plane overhead. Effective plugin execution order is always `global → group → route`. See [`[[route_groups]]`](/shunt/concepts/configuration/#route_groups-reusable-route-groups--shared-plugin-chains) and [`examples/shunt-route-groups.toml`](https://github.com/shettyh/shunt/blob/main/examples/shunt-route-groups.toml) for full lowering and narrowing rules.
 
 ## Active & Passive Health Checking
 

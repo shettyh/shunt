@@ -1,7 +1,7 @@
 # Shunt — Product & Architecture Vision
 
 **Status:** Living Document  
-**Current Baseline:** `v0.1.2` (RFCs 0001–0020 implemented across HTTP API, AI, and MCP gateways)  
+**Current Baseline:** `v0.1.2` (RFCs 0001–0021 implemented across HTTP API, Route Groups, AI, and MCP gateways)  
 **Primary Focus (Now):** **Adoption, Usability & Ecosystem** — Docs, CLI onboarding DX, zero-friction installers, and turnkey deploy/observability kits  
 **Next Platform Milestones:** Wasm Component Model plugins (`Tier 2`) & optional Companion Control Plane (`shunt-console`)
 
@@ -23,7 +23,7 @@ Every core capability (distributed state, virtual keys/JWT/mTLS, weighted & late
 
 ---
 
-## 2. Where We Are Today (`v0.1.2`, RFCs 0001–0020 Implemented)
+## 2. Where We Are Today (`v0.1.2`, RFCs 0001–0021 Implemented)
 
 Shunt has a verified, high-performance, feature-complete gateway foundation ([docs/design.md](design.md), [rfcs/README.md](../rfcs/README.md)):
 
@@ -130,7 +130,7 @@ Five non-negotiable invariants protect Shunt's simplicity and speed as it grows:
 
 ## 7. Roadmap Summary (Completed & Upcoming)
 
-RFCs **0001–0020** are implemented and verified in the codebase (see [rfcs/README.md](../rfcs/README.md) for the full index). Upcoming milestones in priority order:
+RFCs **0001–0021** are implemented and verified in the codebase (see [rfcs/README.md](../rfcs/README.md) for the full index). Upcoming milestones in priority order:
 
 | Priority | Track / Proposed RFC | Scope | Status |
 | --- | --- | --- | --- |
