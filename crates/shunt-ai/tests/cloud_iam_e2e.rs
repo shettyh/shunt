@@ -20,7 +20,7 @@ use shunt_ai::{
     register_ai_plugins,
 };
 use shunt_config::{GatewayConfig, LoadedConfig, SnapshotCompiler};
-use shunt_core::{GatewayServer, RuntimeRegistry};
+use shunt_engine::{GatewayServer, RuntimeRegistry};
 use shunt_plugin_sdk::{ManualClock, PluginRegistry};
 use tokio::net::TcpListener;
 

@@ -11,7 +11,7 @@ use shunt_config::{
     AdminServer, ConfigProvider, InlineConfigProvider, InspectorCapturePlugin, ReloadController,
     SnapshotCompiler, TraceRingBuffer, verify_bundle,
 };
-use shunt_core::{GatewayServer, RuntimeRegistry};
+use shunt_engine::{GatewayServer, RuntimeRegistry};
 use shunt_plugin_sdk::{PluginRegistry, RequestCtx};
 use shunt_plugins::{PrometheusMetrics, register_builtin_plugins};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

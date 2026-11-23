@@ -17,7 +17,7 @@ use shunt_config::{
     ReloadController, SnapshotCompiler, compile_k8s_gateway_snapshot, intersect_two_hostnames,
     parse_k8s_duration_ms, start_k8s_sync_loop,
 };
-use shunt_core::{GatewayServer, RuntimeRegistry};
+use shunt_engine::{GatewayServer, RuntimeRegistry};
 use shunt_plugin_sdk::PluginRegistry;
 use shunt_plugins::{PrometheusMetrics, register_builtin_plugins};
 use tokio::net::TcpListener;

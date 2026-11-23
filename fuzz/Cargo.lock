@@ -760,7 +760,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "shunt-ai"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "regex",
  "ring",
@@ -774,7 +774,7 @@ dependencies = [
 
 [[package]]
 name = "shunt-config"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -788,7 +788,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
- "shunt-core",
+ "shunt-engine",
  "shunt-plugin-sdk",
  "thiserror",
  "tokio",
@@ -797,8 +797,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "shunt-core"
-version = "0.0.1"
+name = "shunt-engine"
+version = "0.1.1"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -830,7 +830,7 @@ dependencies = [
  "serde_yaml",
  "shunt-ai",
  "shunt-config",
- "shunt-core",
+ "shunt-engine",
  "shunt-mcp",
  "shunt-plugin-sdk",
  "shunt-plugins",
@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "shunt-mcp"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "regex",
  "serde",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "shunt-plugin-sdk"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "http",
@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "shunt-plugins"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "brotli",
  "flate2",

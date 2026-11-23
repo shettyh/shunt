@@ -1,7 +1,7 @@
 # RFC 0005: Benchmark Harness vs. Envoy & Caddy & Hardening
 
 - **Status:** Implemented
-- **Crates:** `benches/shunt-bench`, `shunt-core`, `shunt-config`
+- **Crates:** `benches/shunt-bench`, `shunt-engine`, `shunt-config`
 
 ## Summary
 
@@ -66,7 +66,7 @@ benches/
 
 ### 2. Reload-Under-Load Soak Suite
 
-An automated integration/soak test (`crates/shunt-core` or `benches/`):
+An automated integration/soak test (`crates/shunt-engine` or `benches/`):
 - Drives continuous concurrent traffic (mix of short HTTP requests + multi-second SSE streams) while firing config reloads every 50–100ms (alternating routes, plugin configs, and TLS certs).
 - Asserts:
   - **Zero** `5xx`, connection resets, or truncated SSE streams.

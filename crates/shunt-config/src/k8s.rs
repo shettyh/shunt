@@ -15,7 +15,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use shunt_core::{CoreHttpClient, CoreHttpClientConfig};
+use shunt_engine::{CoreHttpClient, CoreHttpClientConfig};
 use shunt_plugin_sdk::{HeaderValue, HttpClient, HttpRequest, Uri, header};
 use tokio::sync::watch;
 use tracing::{info, warn};
@@ -1215,12 +1215,12 @@ pub fn intersect_two_hostnames(a: &str, b: &str) -> Option<String> {
             }
             return None;
         }
-        if shunt_core::host_matches(a, b) {
+        if shunt_engine::host_matches(a, b) {
             return Some(b.to_owned());
         }
         return None;
     }
-    if b.starts_with("*.") && shunt_core::host_matches(b, a) {
+    if b.starts_with("*.") && shunt_engine::host_matches(b, a) {
         return Some(a.to_owned());
     }
     None

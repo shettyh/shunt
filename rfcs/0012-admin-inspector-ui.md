@@ -11,7 +11,7 @@ Operators and developers get live browser visibility into:
 - **Live Per-Hook µs Trace Waterfall (SSE):** Real-time request stream backed by a bounded in-memory ring buffer (`TraceRingBuffer`) with per-hook timings, upstream TTFB, aggregated stream chunk timings, W3C `trace_id`, and structured HTTP/GenAI trace attributes.
 - **Compiled Snapshot & `HookMask` Graph:** Visual route-to-plugin-to-upstream pipeline with per-plugin and compiled route `HookMask` bit badges (secrets redacted).
 - **Upstreams & Active/Passive Health:** Live endpoint weights, active probe status/latency, and passive failure counters from `GET /upstreams`.
-- **AI Runtime & Provider Cooldowns:** Pluggable read-only status inspection showing per-model token/cost/TTFT breakdowns, `StateStore`-backed failover cooldowns, smart-routing EWMA latency tables, and `ai-cache` utilization—without leaking any AI types into `shunt-core`, `shunt-plugin-sdk`, or `shunt-config`.
+- **AI Runtime & Provider Cooldowns:** Pluggable read-only status inspection showing per-model token/cost/TTFT breakdowns, `StateStore`-backed failover cooldowns, smart-routing EWMA latency tables, and `ai-cache` utilization—without leaking any AI types into `shunt-engine`, `shunt-plugin-sdk`, or `shunt-config`.
 - **Searchable Prometheus Metrics:** Live filtered view of `GET /metrics`.
 
 ## 2. Motivation
@@ -21,7 +21,7 @@ Operators and developers get live browser visibility into:
 At the same time, Shunt must preserve its strict architectural guardrails:
 - `shunt.toml` (or the active `ConfigProvider`) remains the sole source of truth—no embedded write/edit control plane in the data-plane binary.
 - Zero database, zero heavy web frameworks or Node/npm build chains, and zero hot-path allocations when `--ui` is off.
-- Strict crate isolation: **zero AI concepts** in `shunt-core`, `shunt-plugin-sdk`, or `shunt-config`.
+- Strict crate isolation: **zero AI concepts** in `shunt-engine`, `shunt-plugin-sdk`, or `shunt-config`.
 
 ## 3. Goals & Non-Goals
 
@@ -73,7 +73,7 @@ At the same time, Shunt must preserve its strict architectural guardrails:
 
 ## 5. Alternatives Considered & Rejected
 
-1. **Embedding a separate HTTP framework (e.g., `axum` / `tower-http`) or `rust-embed`:** Rejected because `AdminServer` already runs on `hyper` + `shunt_core::ShuntBody::channel`, and a single embedded HTML asset via `include_str!` adds zero dependencies and keeps binary size minimal.
+1. **Embedding a separate HTTP framework (e.g., `axum` / `tower-http`) or `rust-embed`:** Rejected because `AdminServer` already runs on `hyper` + `shunt_engine::ShuntBody::channel`, and a single embedded HTML asset via `include_str!` adds zero dependencies and keeps binary size minimal.
 2. **Bundling a React/TypeScript SPA requiring Node/npm in CI:** Rejected because it breaks single-toolchain `cargo build`, slows CI, and adds unnecessary supply-chain surface for a ~500-line read-only developer inspector.
 3. **Allowing live config edits or virtual key CRUD inside `--ui`:** Rejected to keep `shunt.toml` / `ConfigProvider` strictly authoritative in the data plane; centralized write management belongs in Layer 3 (`shunt-console`, RFC 0015).
 

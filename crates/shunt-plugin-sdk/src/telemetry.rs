@@ -357,7 +357,7 @@ impl Drop for SpanState {
 /// ONLY when tracing is enabled and the request is sampled.
 ///
 /// Any plugin (including `shunt-ai` plugins inside immutable `&RequestCtx` `on_complete` hooks)
-/// can attach attributes or refine the span name without depending on OTLP or `shunt-core`.
+/// can attach attributes or refine the span name without depending on OTLP or `shunt-engine`.
 /// When `RequestCtx` drops after all `on_complete` hooks finish, the completed [`SpanRecord`]
 /// is emitted exactly once to the configured [`TelemetrySink`].
 #[derive(Debug, Clone)]
@@ -489,7 +489,7 @@ impl SpanHandle {
 ///
 /// Mirrors [`SpanHandle`]'s interior-mutability pattern so any plugin can attach structured
 /// metadata during immutable `&RequestCtx` `on_complete` hooks without depending on OTLP,
-/// `shunt-core`, or any specific plugin domain.
+/// `shunt-engine`, or any specific plugin domain.
 #[derive(Debug, Clone, Default)]
 pub struct TraceAnnotations {
     inner: Arc<Mutex<BTreeMap<String, SpanValue>>>,

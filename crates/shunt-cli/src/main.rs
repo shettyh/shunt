@@ -13,7 +13,7 @@ use shunt_config::{
     TraceRingBuffer, load_policy_file, start_file_watcher, start_k8s_sync_loop,
     ui_feature_compiled, verify_bundle,
 };
-use shunt_core::{DynamicCertResolver, GatewayServer, RuntimeRegistry, TlsListenerConfig};
+use shunt_engine::{DynamicCertResolver, GatewayServer, RuntimeRegistry, TlsListenerConfig};
 use shunt_mcp::{McpMetrics, inspect_mcp_runtime, register_mcp_plugins};
 use shunt_plugin_sdk::PluginRegistry;
 use shunt_plugins::{DevWaterfallPlugin, PrometheusMetrics, register_builtin_plugins};

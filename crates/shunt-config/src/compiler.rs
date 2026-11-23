@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use http::Method;
 use serde::Serialize;
-use shunt_core::{
+use shunt_engine::{
     ActiveHealthCheckConfig, ActiveProbeKind, CertStore, ClientAuthConfig, ClientAuthMode,
     GatewaySnapshot, OtlpExporterConfig, PathMatch, RedisStoreConfig, RouteMatch, RouteSpec,
     RuntimeRegistry, SnapshotBuilder, TimeoutConfig, TrafficMirrorSpec, UpstreamConfig,
@@ -300,7 +300,7 @@ impl SnapshotCompiler {
         &self,
         att: &PluginAttachment,
         scope_id: &str,
-        session: &shunt_core::BuildSession,
+        session: &shunt_engine::BuildSession,
     ) -> Result<Arc<dyn HttpPlugin>, ConfigError> {
         let cfg = PluginConfig::new(att.config.clone());
         let build_ctx = session.context_for(scope_id);
@@ -600,9 +600,9 @@ fn load_client_auth(tls: &ServerTlsConfig) -> Result<Option<ClientAuthConfig>, C
     };
 
     // Validate the CA bundle upfront so invalid PEM fails compilation cleanly.
-    let dummy_resolver = Arc::new(shunt_core::DynamicCertResolver::new(CertStore::new()));
+    let dummy_resolver = Arc::new(shunt_engine::DynamicCertResolver::new(CertStore::new()));
     let cfg = ClientAuthConfig { mode, ca_pem };
-    shunt_core::TlsListenerConfig::new(dummy_resolver)
+    shunt_engine::TlsListenerConfig::new(dummy_resolver)
         .with_client_auth(Some(cfg.clone()))
         .build_server_config()
         .map_err(|e| ConfigError::Tls(e.to_string()))?;

@@ -1,6 +1,6 @@
 //! Multimodal, rerank, legacy completions, and WebSocket Realtime endpoint translators & helpers.
 //!
-//! Keeps all protocol adaptation strictly inside `shunt-ai` while preserving zero-AI `shunt-core`.
+//! Keeps all protocol adaptation strictly inside `shunt-ai` while preserving zero-AI `shunt-engine`.
 
 use serde_json::{Map, Value, json};
 use shunt_plugin_sdk::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};

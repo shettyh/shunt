@@ -16,7 +16,7 @@ use shunt_ai::{AiMetrics, register_ai_plugins};
 use shunt_config::{
     ConfigProvider, InlineConfigProvider, Severity, SnapshotCompiler, verify_bundle,
 };
-use shunt_core::{
+use shunt_engine::{
     GatewayServer, RouteMatch, RouteSpec, RuntimeRegistry, SnapshotBuilder, UpstreamConfig,
 };
 use shunt_plugin_sdk::{
@@ -79,7 +79,7 @@ async fn build_replica_server(
     clock: Arc<ManualClock>,
     dist: Arc<dyn DistributedStore>,
     sink: Arc<dyn TelemetrySink>,
-) -> (SocketAddr, shunt_core::ServerHandle, Arc<AiMetrics>) {
+) -> (SocketAddr, shunt_engine::ServerHandle, Arc<AiMetrics>) {
     let metrics = Arc::new(PrometheusMetrics::new());
     let ai_metrics = Arc::new(AiMetrics::new());
     let mut reg = PluginRegistry::new();
@@ -408,7 +408,7 @@ fn otlp_exporter_config_debug_redacts_headers() {
         "Authorization".to_owned(),
         "Bearer top-secret-key".to_owned(),
     );
-    let cfg = shunt_core::OtlpExporterConfig {
+    let cfg = shunt_engine::OtlpExporterConfig {
         headers,
         ..Default::default()
     };

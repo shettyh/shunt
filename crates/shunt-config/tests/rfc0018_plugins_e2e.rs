@@ -17,7 +17,7 @@ use ring::rand::SystemRandom;
 use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, Ed25519KeyPair, KeyPair};
 use serde_json::{Value, json};
 use shunt_config::{ConfigProvider, InlineConfigProvider, SnapshotCompiler};
-use shunt_core::{GatewayServer, RuntimeRegistry};
+use shunt_engine::{GatewayServer, RuntimeRegistry};
 use shunt_plugin_sdk::{ManualClock, PluginRegistry};
 use shunt_plugins::{PrometheusMetrics, base64url_encode, register_builtin_plugins};
 use tokio::net::TcpListener;
@@ -79,7 +79,7 @@ fn sign_es256(header_json: &Value, claims_json: &Value, kp: &EcdsaKeyPair) -> St
 async fn start_gateway_from_toml(
     toml_src: &str,
     clock: Arc<ManualClock>,
-) -> shunt_core::ServerHandle {
+) -> shunt_engine::ServerHandle {
     let mut reg = PluginRegistry::new();
     let metrics = Arc::new(PrometheusMetrics::new());
     register_builtin_plugins(&mut reg, metrics);

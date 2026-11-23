@@ -361,7 +361,7 @@ jobs:
           # Topological order respecting both normal and dev dependencies:
           CRATES=(
             shunt-plugin-sdk
-            shunt-core
+            shunt-engine
             shunt-plugins
             shunt-config
             shunt-ai

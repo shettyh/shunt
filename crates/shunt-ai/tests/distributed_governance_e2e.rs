@@ -14,7 +14,9 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use serde_json::{Value, json};
 use shunt_ai::{AiMetrics, register_ai_plugins};
 use shunt_config::{ConfigProvider, InlineConfigProvider, SnapshotCompiler};
-use shunt_core::{GatewayServer, RespValue, RuntimeRegistry, decode_resp_frame, encode_resp_value};
+use shunt_engine::{
+    GatewayServer, RespValue, RuntimeRegistry, decode_resp_frame, encode_resp_value,
+};
 use shunt_plugin_sdk::PluginRegistry;
 use shunt_plugins::{PrometheusMetrics, register_builtin_plugins};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -212,7 +214,7 @@ async fn spawn_mock_http(
     (addr, hits, handle)
 }
 
-async fn start_replica(toml_src: &str) -> (SocketAddr, shunt_core::ServerHandle, Arc<AiMetrics>) {
+async fn start_replica(toml_src: &str) -> (SocketAddr, shunt_engine::ServerHandle, Arc<AiMetrics>) {
     let metrics = Arc::new(PrometheusMetrics::new());
     let ai_metrics = Arc::new(AiMetrics::new());
     let mut reg = PluginRegistry::new();

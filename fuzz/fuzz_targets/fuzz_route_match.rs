@@ -2,8 +2,8 @@
 
 use http::{Method, Request, Uri, header};
 use libfuzzer_sys::fuzz_target;
-use shunt_core::pipeline::strip_uri_prefix;
-use shunt_core::{PathMatch, RouteMatch, host_matches};
+use shunt_engine::pipeline::strip_uri_prefix;
+use shunt_engine::{PathMatch, RouteMatch, host_matches};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(s) = std::str::from_utf8(data) else {

@@ -5,7 +5,7 @@
 
 ## 1. Summary
 
-This RFC introduces **`shunt-mcp`**, a complete Model Context Protocol (MCP) Streamable HTTP router, multi-server virtual multiplexer, and agentic security/governance plugin pack built **100% strictly on `shunt-plugin-sdk`** with **zero dependencies on `shunt-core` or `shunt-ai`**.
+This RFC introduces **`shunt-mcp`**, a complete Model Context Protocol (MCP) Streamable HTTP router, multi-server virtual multiplexer, and agentic security/governance plugin pack built **100% strictly on `shunt-plugin-sdk`** with **zero dependencies on `shunt-engine` or `shunt-ai`**.
 
 It adds five composable plugins:
 
@@ -31,7 +31,7 @@ Building `shunt-mcp` strictly on `shunt-plugin-sdk` lets teams govern **HTTP API
 ## 3. Goals & Non-Goals
 
 ### Goals
-- **Zero MCP leakage in `shunt-core` or `shunt-plugin-sdk`:** Reuse existing general-purpose primitives (`HttpPlugin`, `HookMask`, `Flow::InspectResponseBody`, `HttpClient`, `StateStore`, `DistributedStore`, `Clock`, `SpanValue`).
+- **Zero MCP leakage in `shunt-engine` or `shunt-plugin-sdk`:** Reuse existing general-purpose primitives (`HttpPlugin`, `HookMask`, `Flow::InspectResponseBody`, `HttpClient`, `StateStore`, `DistributedStore`, `Clock`, `SpanValue`).
 - **Pay only for what you use:** Non-MCP routes pay zero cost. Warm `tools/list` catalogs, local rate limits, loop checks, and auth run synchronously (`HookResult::Ready`).
 - **Least-privilege tool disclosure:** `tools/list`, `resources/list`, and `prompts/list` filter items against `McpPrincipal` ACLs *before* returning results to the agent.
 - **Defense in depth for tool I/O:** Validate structured JSON arguments before execution, redact outbound secrets in place, gate destructive tools behind explicit approval, and block/redact indirect prompt injections in inbound tool outputs (JSON & SSE).
@@ -89,12 +89,12 @@ Added to `shunt-config::verify`:
 
 ## 5. Alternatives Considered & Rejected
 
-1. **Adding MCP-specific hooks or JSON-RPC framing to `shunt-core`:** Rejected—violates Shunt's zero-AI/zero-protocol-leakage guardrail in `shunt-core`. Every transport need (buffered POST inspection, `HttpClient` fan-out, `Flow::InspectResponseBody`, SSE chunk hooks, `StateStore`, `DistributedStore`) already existed as general-purpose primitives in `shunt-plugin-sdk`.
+1. **Adding MCP-specific hooks or JSON-RPC framing to `shunt-engine`:** Rejected—violates Shunt's zero-AI/zero-protocol-leakage guardrail in `shunt-engine`. Every transport need (buffered POST inspection, `HttpClient` fan-out, `Flow::InspectResponseBody`, SSE chunk hooks, `StateStore`, `DistributedStore`) already existed as general-purpose primitives in `shunt-plugin-sdk`.
 2. **Bundling `shunt-mcp` inside `shunt-ai`:** Rejected—teams may deploy an MCP governance gateway independently of LLM inference proxying (or embed `shunt-mcp` without pulling in LLM dialect translators). Keeping `shunt-mcp` as its own pure-SDK crate preserves clean modularity.
 3. **Allowing JSON-RPC batch arrays by default:** Rejected—batching multiple `tools/call` invocations in a single HTTP request complicates per-tool routing, approval gating, and loop breaking across heterogeneous upstream servers. Batch parsing is supported in `parse_mcp_jsonrpc_request` for single-server mode (`allow_batch = true`), while defaulting safely to `false`.
 
 ## 6. Future Work
 
-- **Ergonomic `[mcp]` / `[ai]` config sugar in `shunt-config`:** Compile concise top-level TOML blocks into the canonical pure-plugin IR chains to reduce onboarding boilerplate while keeping `shunt-core` unchanged.
+- **Ergonomic `[mcp]` / `[ai]` config sugar in `shunt-config`:** Compile concise top-level TOML blocks into the canonical pure-plugin IR chains to reduce onboarding boilerplate while keeping `shunt-engine` unchanged.
 - **MCP OAuth token exchange / per-server downstream token delegation:** Exchange agent JWTs for scoped downstream OAuth tokens per backend MCP server via `HttpClient`.
 - **Cross-tool agent cost attribution:** Correlate `x-shunt-session-id` / `Mcp-Session-Id` spans across both `shunt-ai` LLM calls and `shunt-mcp` tool calls via W3C `traceparent`.

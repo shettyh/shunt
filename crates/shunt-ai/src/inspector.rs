@@ -131,7 +131,7 @@ pub struct AiRuntimeInspect {
 /// per-model breakdowns, active failover cooldowns, EWMA smart-routing stats, and cache utilization.
 ///
 /// Built purely on `shunt-plugin-sdk`'s generic `StateStore::collect_by_type` so neither
-/// `shunt-core` nor `shunt-config` knows anything about AI concepts.
+/// `shunt-engine` nor `shunt-config` knows anything about AI concepts.
 pub fn inspect_ai_runtime(
     metrics: &AiMetrics,
     state_store: &StateStore,

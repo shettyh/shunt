@@ -10,7 +10,7 @@ use shunt_config::{
     AdminServer, ConfigProvider, InlineConfigProvider, ReloadController, SnapshotCompiler,
     verify_bundle,
 };
-use shunt_core::{GatewayServer, RuntimeRegistry};
+use shunt_engine::{GatewayServer, RuntimeRegistry};
 use shunt_plugin_sdk::{
     BuildContext, HookMask, HttpPlugin, PluginBuildError, PluginConfig, PluginFactory,
     PluginRegistry,

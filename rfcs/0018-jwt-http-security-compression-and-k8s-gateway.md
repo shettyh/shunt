@@ -1,7 +1,7 @@
 # RFC 0018: JWT/OIDC Auth, HTTP Gateway Security, Response Compression & Kubernetes Gateway API
 
 - **Status:** Implemented
-- **Crates:** `shunt-plugin-sdk`, `shunt-core`, `shunt-plugins`, `shunt-config`, `shunt-cli`, `specs/`, `examples/`, `fuzz/`
+- **Crates:** `shunt-plugin-sdk`, `shunt-engine`, `shunt-plugins`, `shunt-config`, `shunt-cli`, `specs/`, `examples/`, `fuzz/`
 
 ## 1. Summary
 
@@ -10,8 +10,8 @@ This RFC inaugurates **Path B (Phases B1–B2)**—turning Shunt into a full-fea
 1. **Pure-Rust JWT / JWKS / OIDC Authentication (`jwt-auth`):** Zero external JWT/transport crates; verifies `HS256/384/512`, `RS256/384/512`, `PS256/384/512`, `ES256/384`, and `EdDSA` via `ring`, with `HttpClient`-backed OIDC Discovery (`/.well-known/openid-configuration`) & `StateStore`-cached JWKS refresh (singleflight coalesced, unknown-`kid` rotation with anti-DoS cooldown, sync zero-alloc warm fast path), RFC 7519 claim/scope/audience/issuer/skew checks, and anti-spoofing claim header forwarding.
 2. **HTTP Security & Traffic Plugins (`ip-filter`, `mtls-auth`, `body-limit`, `redirect`):**
    - `ip-filter`: IPv4/IPv6 CIDR allow/deny rules (`deny_first` / `allow_first`), IPv4-mapped IPv6 normalization, and secure right-to-left `X-Forwarded-For` traversal with `trusted_proxies`.
-   - Mutual TLS (`ClientAuthMode::Optional | Required`) in `shunt-core` with zero-downtime Client CA hot reloads (`ArcSwap<TlsAcceptor>`), panic-free pure-Rust X.509 DER metadata extraction (`ClientCertInfo` on `RequestCtx`), and the `mtls-auth` authorization plugin (CN, SAN DNS, SPIFFE SAN URI, SHA-256 fingerprint).
-   - Zero-copy streaming request body size enforcement (`LimitedIncomingBody` in `shunt-core`) paired with the `body-limit` plugin for fast `413` rejection on both `Content-Length` and chunked/HTTP2 streams.
+   - Mutual TLS (`ClientAuthMode::Optional | Required`) in `shunt-engine` with zero-downtime Client CA hot reloads (`ArcSwap<TlsAcceptor>`), panic-free pure-Rust X.509 DER metadata extraction (`ClientCertInfo` on `RequestCtx`), and the `mtls-auth` authorization plugin (CN, SAN DNS, SPIFFE SAN URI, SHA-256 fingerprint).
+   - Zero-copy streaming request body size enforcement (`LimitedIncomingBody` in `shunt-engine`) paired with the `body-limit` plugin for fast `413` rejection on both `Content-Length` and chunked/HTTP2 streams.
    - `redirect` plugin and `header-rewrite` URL/Host rewrite extensions (`upstream_host`, `path_replace_full`, `path_replace_prefix`).
 3. **Streaming-Safe Response Compression (`compression`):** Negotiates `zstd`, `br`, `gzip`, and `deflate` via RFC 9110 `Accept-Encoding` q-values, compresses incrementally chunk-by-chunk, weakens strong `ETag`s (`W/"..."`), appends `Vary: Accept-Encoding`, and unconditionally skips `text/event-stream` (SSE), `Cache-Control: no-transform`, already-encoded responses, media/archives, and bodies below `min_size_bytes`.
 4. **Zero-Bloat Kubernetes Gateway API v1 `ConfigProvider` (`shunt-config::k8s`):** Compiles `GatewayClass`, `Gateway`, `HTTPRoute`, `Service`, `Endpoints`, `EndpointSlice`, and TLS `Secret` resources (including exact/prefix/header/method matching, Gateway API precedence sorting, hostname intersection, `allowedRoutes` namespace policy, canary weight LCM scaling, filters, and in-memory TLS Secrets) into Shunt's canonical `GatewayConfig`—supporting both static manifest files (`--k8s-manifest`) and live Kubernetes API sync/hot-reloads (`--k8s-gateway`) using `HttpClient` with zero `kube-rs` bloat.
@@ -36,16 +36,16 @@ With Path A (RFCs 0007–0017) achieving production AI gateway parity, teams dep
 
 ### 4.1 Core & SDK Primitives
 - **`ClientCertInfo` (`shunt-plugin-sdk`):** Added `pub client_cert: Option<Arc<ClientCertInfo>>` to `RequestCtx` carrying `subject_cn`, `subject_dn`, `issuer_dn`, `san_dns`, `san_uris`, `san_emails`, `serial_hex`, and `sha256_fingerprint`.
-- **mTLS & Hot CA Rotation (`shunt-core::tls` & `server.rs`):** `TlsListenerConfig` accepts `Option<ClientAuthConfig>` (`ClientAuthMode::None | Optional | Required` + PEM CA bundle). `GatewayServer` wraps `TlsAcceptor` in `ArcSwap<TlsAcceptor>` so `ServerReloader::reload_client_auth` atomically swaps client CA roots for all subsequent handshakes without dropping active connections. Leaf peer DER certificates are parsed once per TLS connection via a panic-free pure-Rust ASN.1 DER extractor (`parse_client_cert_info`).
-- **Streaming Body Caps (`shunt-core::body` & `pipeline.rs`):** `CompiledRoute::explicit_max_body_bytes` enforces explicit route or plugin `max_request_body_bytes()` caps upfront via `Content-Length` AND on unbuffered streaming request bodies via zero-copy `LimitedIncomingBody` (mapping overflow to HTTP `413 Payload Too Large`).
-- **Header Route Matching (`shunt-core::snapshot` & `shunt-config::ir`):** `RouteMatch::headers` (`RouteIr::headers`) adds optional exact header matching, integrated into `shunt verify`'s `route_subsumes` shadowing checker.
+- **mTLS & Hot CA Rotation (`shunt-engine::tls` & `server.rs`):** `TlsListenerConfig` accepts `Option<ClientAuthConfig>` (`ClientAuthMode::None | Optional | Required` + PEM CA bundle). `GatewayServer` wraps `TlsAcceptor` in `ArcSwap<TlsAcceptor>` so `ServerReloader::reload_client_auth` atomically swaps client CA roots for all subsequent handshakes without dropping active connections. Leaf peer DER certificates are parsed once per TLS connection via a panic-free pure-Rust ASN.1 DER extractor (`parse_client_cert_info`).
+- **Streaming Body Caps (`shunt-engine::body` & `pipeline.rs`):** `CompiledRoute::explicit_max_body_bytes` enforces explicit route or plugin `max_request_body_bytes()` caps upfront via `Content-Length` AND on unbuffered streaming request bodies via zero-copy `LimitedIncomingBody` (mapping overflow to HTTP `413 Payload Too Large`).
+- **Header Route Matching (`shunt-engine::snapshot` & `shunt-config::ir`):** `RouteMatch::headers` (`RouteIr::headers`) adds optional exact header matching, integrated into `shunt verify`'s `route_subsumes` shadowing checker.
 - **Custom CA Support on `CoreHttpClientConfig`:** Added `extra_ca_pem: Option<Vec<u8>>` so `K8sApiConfigProvider` verifies in-cluster `https://kubernetes.default.svc` against `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt`.
 
 ### 4.2 General HTTP Plugins (`shunt-plugins`)
 - **`jwt-auth`:** Validates JWTs using `ring` (`HS256/384/512`, `RS256/384/512`, `PS256/384/512`, `ES256/384`, `EdDSA`), strictly matching key material type to `alg` and rejecting `alg: "none"` and unsupported `crit` headers. Caches JWKS in `StateStore` with pure-`std` singleflight coalescing and anti-DoS minimum refresh cooldown (`jwks_min_refresh_secs`) for unknown `kid` lookups. Strips configured `forward_claims` headers before auth to prevent spoofing.
 - **`ip-filter`:** Pure-Rust `IpNet` CIDR matcher with IPv4-mapped IPv6 normalization, `deny_first` / `allow_first` precedence, and right-to-left `X-Forwarded-For` hop peeling constrained by `trusted_proxies`.
 - **`mtls-auth`:** Authorizes `ctx.client_cert` against `allowed_cns`, `allowed_san_dns`, `allowed_san_uris` (SPIFFE globs), and `allowed_fingerprints`; strips spoofed identity headers and injects verified subject/DN/SPIFFE/fingerprint headers.
-- **`body-limit`:** Synchronous `Content-Length` `413` check in `on_request_headers` + `max_request_body_bytes()` delegation to `shunt-core`'s zero-copy `LimitedIncomingBody`.
+- **`body-limit`:** Synchronous `Content-Length` `413` check in `on_request_headers` + `max_request_body_bytes()` delegation to `shunt-engine`'s zero-copy `LimitedIncomingBody`.
 - **`compression`:** RFC 9110 `Accept-Encoding` negotiation (`zstd`, `br`, `gzip`, `deflate`) with chunked streaming encoders in `on_response_body_chunk`, SSE/`no-transform`/already-encoded/min-size guards, `Vary: Accept-Encoding`, and RFC 9110 `ETag` weakening.
 - **`redirect` & `header-rewrite` URL rewrites:** Standalone HTTP redirect and upstream host/path rewrite plugins that also serve as direct compilation targets for Kubernetes Gateway API filters.
 

@@ -1,13 +1,13 @@
 # RFC 0010: Smart Routing & Active Upstream Health Checks
 
 - **Status:** Implemented
-- **Crates:** `shunt-core`, `shunt-config`, `shunt-ai`, `shunt-cli`, `shunt-test`
+- **Crates:** `shunt-engine`, `shunt-config`, `shunt-ai`, `shunt-cli`, `shunt-test`
 
 ## Summary
 
 RFC 0010 delivers the first half of Phase A3 and core Path B1 traffic-management primitives from [docs/vision.md](../docs/vision.md) across two strictly isolated layers:
 
-1. **Weighted Upstream Pools & Active Health Checks (`shunt-core`, `shunt-config`, 100% AI-agnostic):**
+1. **Weighted Upstream Pools & Active Health Checks (`shunt-engine`, `shunt-config`, 100% AI-agnostic):**
    - Adds per-endpoint `weight` support to `UpstreamConfig` / `UpstreamPool` using a precomputed, lock-free Smooth Weighted Round-Robin (SWRR) schedule composed with Shunt's 3-pass health-preferring selector.
    - Adds optional background **active HTTP and TCP health probes** (`[upstreams.health_check]`) managed by a reload-safe `ProbeSupervisor` bound to `GatewayServer`, with atomic active+passive health composition, `GET /upstreams` admin visibility, and Prometheus health/probe metrics.
 2. **Smart AI Routing Strategies & Capability Guards (`shunt-ai`, 100% plugin-side via `shunt-plugin-sdk`):**
@@ -30,7 +30,7 @@ With Phase A1 (universal providers & multi-protocol ingress) and Phase A2 (virtu
 ## Goals & Non-Goals
 
 ### Goals
-- **Strict architectural isolation:** Zero AI concepts in `shunt-core` or `shunt-plugin-sdk`. Weighted upstream pools, active HTTP/TCP probes, `ProbeSupervisor`, and `GET /upstreams` serve Path A and Path B identically.
+- **Strict architectural isolation:** Zero AI concepts in `shunt-engine` or `shunt-plugin-sdk`. Weighted upstream pools, active HTTP/TCP probes, `ProbeSupervisor`, and `GET /upstreams` serve Path A and Path B identically.
 - **Pay only for what you use:**
   - Uniform-weight upstreams keep the zero-allocation modulo round-robin fast path; weighted upstreams use a lock-free `AtomicUsize` index over a precomputed SWRR schedule.
   - Upstreams without `health_check` spawn zero background tasks.
@@ -49,10 +49,10 @@ With Phase A1 (universal providers & multi-protocol ingress) and Phase A2 (virtu
 
 ## Design
 
-### 1. Weighted Upstream Pools (`shunt-core`, `shunt-config`)
+### 1. Weighted Upstream Pools (`shunt-engine`, `shunt-config`)
 
 #### Canonical Types & Config Schema
-In `shunt-core`:
+In `shunt-engine`:
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UpstreamEndpoint {
@@ -85,7 +85,7 @@ endpoints = [
 
 ---
 
-### 2. Active Upstream Health Checks (`shunt-core`, `shunt-config`)
+### 2. Active Upstream Health Checks (`shunt-engine`, `shunt-config`)
 
 #### Configuration Schema
 ```toml
@@ -258,15 +258,15 @@ targets = [
 
 ### 1. Mutex-Protected Nginx SWRR on Every Request
 - **Why considered:** Textbook SWRR mutates `current_weight` per endpoint on every request.
-- **Why rejected:** Introduces lock contention or CAS loops across all endpoints on the hot path, regressing Shunt's lock-free `shunt-core` throughput. Precomputing the GCD-reduced smooth schedule at pool construction time achieves identical smooth interleaving with a single `AtomicUsize::fetch_add(1)` on the fast path.
+- **Why rejected:** Introduces lock contention or CAS loops across all endpoints on the hot path, regressing Shunt's lock-free `shunt-engine` throughput. Precomputing the GCD-reduced smooth schedule at pool construction time achieves identical smooth interleaving with a single `AtomicUsize::fetch_add(1)` on the fast path.
 
 ### 2. Spawning Active Health Probe Tasks Inside `SnapshotBuilder::build`
 - **Why considered:** Self-contained inside `UpstreamPool::new`.
 - **Why rejected:** `shunt check`, `shunt verify`, and synchronous unit tests call `SnapshotBuilder::build` / `SnapshotCompiler::compile` without running a server (or even without a Tokio runtime). Spawning network probes during config validation would cause unexpected outbound connections and leaked tasks. Driving probes via `GatewayServer`'s `ProbeSupervisor` keeps compilation pure and makes reload/shutdown cancellation exact.
 
-### 3. Adding AI-Specific Strategy Hooks Into `shunt-core`
+### 3. Adding AI-Specific Strategy Hooks Into `shunt-engine`
 - **Why considered:** Core could inspect model pricing or TTFT directly.
-- **Why rejected:** Violates Shunt's foundational invariant (*zero AI in `shunt-core`*). Keeping weighted pools and active HTTP/TCP probes AI-agnostic in `shunt-core` while building weighted/latency/cost/capability AI routing inside `shunt-ai` proves `shunt-plugin-sdk`'s composability and immediately benefits Path B HTTP gateways.
+- **Why rejected:** Violates Shunt's foundational invariant (*zero AI in `shunt-engine`*). Keeping weighted pools and active HTTP/TCP probes AI-agnostic in `shunt-engine` while building weighted/latency/cost/capability AI routing inside `shunt-ai` proves `shunt-plugin-sdk`'s composability and immediately benefits Path B HTTP gateways.
 
 ### 4. Separate `ai-smart-router` Plugin Instead of Extending `ai-model-router`
 - **Why considered:** Splitting strategy logic into a second plugin.
@@ -277,7 +277,7 @@ targets = [
 ## Verification
 
 - **Unit tests:**
-  - `shunt-core`: SWRR schedule smoothness & GCD reduction, weighted 3-pass health selection, active+passive health composition, HTTP & TCP active probe execution, and `ProbeSupervisor` reload/shutdown cancellation.
+  - `shunt-engine`: SWRR schedule smoothness & GCD reduction, weighted 3-pass health selection, active+passive health composition, HTTP & TCP active probe execution, and `ProbeSupervisor` reload/shutdown cancellation.
   - `shunt-config`: weighted endpoint & `health_check` TOML parsing, validation errors, `upstream.health_check_timeout` verify rule, and `GET /upstreams` admin response.
   - `shunt-ai`: multi-protocol capability extraction (`vision`, `tools`, `json_schema`, `reasoning`, `streaming`, `embeddings`), weighted/latency/cost strategy ranking, EWMA update math, and cold-start exploration.
 - **Conformance spec (`specs/conformance/08-smart-routing-and-active-health.spec.toml`):** End-to-end tests covering Path B weighted upstream pools, active HTTP & TCP health ejection/recovery, `GET /upstreams` & Prometheus health metrics, AI weighted canary splits, capability guards across OpenAI/Anthropic/Responses + failover exclusion, latency/TTFT-aware dynamic routing, and cost-aware routing + failover.

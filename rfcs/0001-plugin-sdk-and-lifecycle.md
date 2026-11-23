@@ -1,11 +1,11 @@
 # RFC 0001: Plugin SDK & Request Lifecycle
 
 - **Status:** Implemented
-- **Crates:** `shunt-plugin-sdk`, `shunt-core`
+- **Crates:** `shunt-plugin-sdk`, `shunt-engine`
 
 ## Summary
 
-This RFC defines Shunt's plugin contract (`HttpPlugin`, `HookMask`, `HookResult`, `Flow`, `StreamFlow`, `RequestCtx`) and the 7-stage request execution pipeline in `shunt-core`. Every feature above raw HTTP/TLS transport—first-party or third-party—is implemented through this single public SDK with zero privileged internal shortcuts.
+This RFC defines Shunt's plugin contract (`HttpPlugin`, `HookMask`, `HookResult`, `Flow`, `StreamFlow`, `RequestCtx`) and the 7-stage request execution pipeline in `shunt-engine`. Every feature above raw HTTP/TLS transport—first-party or third-party—is implemented through this single public SDK with zero privileged internal shortcuts.
 
 ## Motivation
 

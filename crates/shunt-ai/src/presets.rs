@@ -1,6 +1,6 @@
 //! Built-in AI provider presets and reload-persistent multi-key upstream pools.
 //!
-//! Presets live strictly inside `shunt-ai` (`ai-provider-adapter`) so `shunt-core` and
+//! Presets live strictly inside `shunt-ai` (`ai-provider-adapter`) so `shunt-engine` and
 //! `shunt-config` remain completely AI-agnostic while eliminating repetitive dialect/path/auth
 //! boilerplate for common LLM providers.
 

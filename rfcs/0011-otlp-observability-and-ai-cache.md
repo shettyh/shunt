@@ -1,7 +1,7 @@
 # RFC 0011: OTLP/HTTP Observability & Exact-Match AI Response Cache
 
 - **Status:** Implemented
-- **Crates:** `shunt-plugin-sdk`, `shunt-core`, `shunt-plugins`, `shunt-ai`, `shunt-config`, `shunt-cli`, `shunt-test`, `fuzz`
+- **Crates:** `shunt-plugin-sdk`, `shunt-engine`, `shunt-plugins`, `shunt-ai`, `shunt-config`, `shunt-cli`, `shunt-test`, `fuzz`
 
 ## 1. Summary
 
@@ -17,13 +17,13 @@ Teams deploying Shunt in front of LLMs and HTTP APIs face two immediate producti
 - **End-to-end trace visibility across HTTP & GenAI stacks:** Prometheus metrics tell operators *that* latency or spend spiked, but debugging slow prompts, provider failovers, or downstream API hops requires distributed traces (`traceparent`) with OpenTelemetry HTTP and GenAI semantic attributes (`gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, TTFT, cost, cache status).
 - **Eliminating redundant deterministic LLM/embedding calls:** Embeddings pipelines, CI eval suites, classifiers, and agentic tool loops repeatedly send identical deterministic (`temperature = 0`) prompts. Serving exact-match hits directly from Shunt saves upstream latency, token quotas, and provider spend.
 
-At the same time, Shunt must preserve its core guardrails: zero AI types in `shunt-core` or `shunt-plugin-sdk`, zero heavy SDK dependencies, zero hot-path blocking, and zero external sidecars required by default.
+At the same time, Shunt must preserve its core guardrails: zero AI types in `shunt-engine` or `shunt-plugin-sdk`, zero heavy SDK dependencies, zero hot-path blocking, and zero external sidecars required by default.
 
 ## 3. Goals & Non-Goals
 
 ### Goals
 - **AI-free SDK telemetry seam:** Define `TraceContext`, `SpanRecord`, `SpanHandle`, and `TelemetrySink` in `shunt-plugin-sdk` with zero AI concepts.
-- **Non-blocking OTLP/HTTP JSON exporter:** Bounded `tokio::sync::mpsc` batching exporter in `shunt-core` (`OtlpHttpExporter`) that drops excess spans under backpressure (counted via `shunt_telemetry_spans_total`) rather than stalling proxy requests, and flushes cleanly on graceful shutdown.
+- **Non-blocking OTLP/HTTP JSON exporter:** Bounded `tokio::sync::mpsc` batching exporter in `shunt-engine` (`OtlpHttpExporter`) that drops excess spans under backpressure (counted via `shunt_telemetry_spans_total`) rather than stalling proxy requests, and flushes cleanly on graceful shutdown.
 - **Order-independent span enrichment:** Allow `shunt-ai` plugins (`ai-usage-tracker`, `ai-budget`, `ai-cache`) to attach OpenTelemetry GenAI attributes from immutable `&RequestCtx` `on_complete` hooks regardless of whether `otel-trace` is global or per-route.
 - **Safe exact-match `ai-cache`:** Cache only deterministic non-streaming `200 OK` JSON responses by default (`embeddings` always; conversational endpoints when `temperature == 0`), honor `Cache-Control: no-store`/`no-cache`, isolate tenants via `scope = "virtual_key"` by default, work across translated provider dialects (Anthropic/Gemini/Bedrock), and skip upstream token/budget charging on cache hit.
 - **Multi-replica cache sharing:** Extend `DistributedStore` with `get_bytes` / `set_bytes` (`GET` / `SET ... PX` on `RedisStateStore`) and perform distributed cache writes off the hot path in `on_complete`.
@@ -43,7 +43,7 @@ At the same time, Shunt must preserve its core guardrails: zero AI types in `shu
 - `TelemetrySink`: Non-blocking trait (`emit_span(&self, span: SpanRecord) -> bool`) injected into plugins via `BuildContext::telemetry_sink()`.
 - `SpanHandle` (RAII emission): Inserted into `RequestCtx::extensions` by `otel-trace` **only when `[telemetry]` is enabled and the request is sampled** (zero allocation on unsampled requests). `SpanHandle` wraps an interior-mutable `Arc<SpanState>` so any plugin can attach attributes from immutable `&RequestCtx` `on_complete` hooks. When `RequestCtx` drops after **all** `on_complete` hooks finish, `SpanState::drop` emits the single enriched `SpanRecord` to the `TelemetrySink`—eliminating ordering fragility between global `otel-trace` and route-scoped `ai-*` plugins.
 
-### 4.2 Bounded Async OTLP/HTTP JSON Exporter (`shunt-core`)
+### 4.2 Bounded Async OTLP/HTTP JSON Exporter (`shunt-engine`)
 
 `OtlpHttpExporter` accepts `SpanRecord`s via non-blocking `mpsc::Sender::try_send`, spawns its background batching worker lazily on the active Tokio runtime (so synchronous `shunt check` / `shunt verify` never spawn stray tasks), and exports standard Protobuf-JSON `ExportTraceServiceRequest` batches (`POST /v1/traces`) when `batch_size` is reached, `flush_interval` ticks, or `flush(timeout)` is called on graceful shutdown. `RuntimeRegistry` caches warm exporters across hot reloads and garbage-collects removed exporters after snapshot commit.
 

@@ -1,11 +1,11 @@
 # RFC 0015: Pluggable AI Guardrails (`ai-guardrails`), Redacted Audit Sinks (`ai-audit`) & Alert Webhooks (`ai-alerts`)
 
 - **Status:** Implemented
-- **Crates:** `shunt-plugin-sdk`, `shunt-core`, `shunt-config`, `shunt-ai`, `specs/`, `examples/`, `fuzz/`
+- **Crates:** `shunt-plugin-sdk`, `shunt-engine`, `shunt-config`, `shunt-ai`, `specs/`, `examples/`, `fuzz/`
 
 ## 1. Summary
 
-This RFC adds production AI safety, compliance auditing, and operational alerting to Shunt as three composable, strictly SDK-based plugins inside `shunt-ai`—**`ai-guardrails`**, **`ai-audit`**, and **`ai-alerts`**—plus a minimal, strictly AI-free **OTLP `SpanEvent`** primitive in `shunt-plugin-sdk` and `shunt-core`. Every external callout (guardrail APIs, audit webhooks, and Slack/PagerDuty/HTTP alerts) reuses RFC 0014's pooled `HttpClient`, preserving Shunt's zero-AI core and single-binary leanness.
+This RFC adds production AI safety, compliance auditing, and operational alerting to Shunt as three composable, strictly SDK-based plugins inside `shunt-ai`—**`ai-guardrails`**, **`ai-audit`**, and **`ai-alerts`**—plus a minimal, strictly AI-free **OTLP `SpanEvent`** primitive in `shunt-plugin-sdk` and `shunt-engine`. Every external callout (guardrail APIs, audit webhooks, and Slack/PagerDuty/HTTP alerts) reuses RFC 0014's pooled `HttpClient`, preserving Shunt's zero-AI core and single-binary leanness.
 
 ## 2. Motivation
 
@@ -18,7 +18,7 @@ Enterprise AI gateway deployments cannot ship to production on routing and cost 
 ## 3. Goals & Non-Goals
 
 ### Goals
-- **Strictly AI-free SDK/core addition:** Add only general-purpose `SpanEvent` support to `shunt-plugin-sdk` (`SpanRecord::events`, `SpanHandle::add_event`, `RequestCtx::add_span_event`) and OTLP JSON serialization in `shunt-core::otlp`.
+- **Strictly AI-free SDK/core addition:** Add only general-purpose `SpanEvent` support to `shunt-plugin-sdk` (`SpanRecord::events`, `SpanHandle::add_event`, `RequestCtx::add_span_event`) and OTLP JSON serialization in `shunt-engine::otlp`.
 - **Zero-allocation sync fast path & pay-only-for-what-you-use:**
   - `ai-guardrails` stays synchronous (`HookResult::Ready`) whenever no external callouts apply to a stage, and omits `HookMask::RESPONSE_BODY_STREAM` for request-only configurations.
   - `ai-audit` adapts its `HookMask` to `include_prompt` / `include_completion` / `include_headers`, and performs all disk/HTTP sink I/O off the hot path over bounded non-blocking queues.
@@ -33,10 +33,10 @@ Enterprise AI gateway deployments cannot ship to production on routing and cost 
 
 ## 4. Design
 
-### 4.1 AI-Free OTLP Span Events (`shunt-plugin-sdk` + `shunt-core`)
+### 4.1 AI-Free OTLP Span Events (`shunt-plugin-sdk` + `shunt-engine`)
 - `SpanEvent { name, time_unix_nanos, attributes }` is appended to `SpanRecord::events`.
 - `RequestCtx::add_span_event(name, attributes)` is a zero-cost no-op when no sampled `SpanHandle` is attached.
-- `shunt-core::otlp::encode_single_span` emits `"events": [...]` per OTLP/HTTP JSON spec only when non-empty.
+- `shunt-engine::otlp::encode_single_span` emits `"events": [...]` per OTLP/HTTP JSON spec only when non-empty.
 
 ### 4.2 `ai-guardrails`
 - **Built-in detectors & presets:** `pii` (`email`, `ssn` with SSA range checks, `credit_card` with Luhn validation, `phone`, `ip_address` with IPv4 octet validation), `secrets` (`private_key`, `aws_access_key`, `anthropic_api_key`, `openai_api_key`, `github_token`, `stripe_key`, `slack_token`, `gcp_api_key`, `jwt`, `bearer_token`), and `prompt_injection`.

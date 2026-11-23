@@ -1,7 +1,7 @@
 //! First-party general HTTP plugins for Shunt.
 //!
 //! Every plugin in this crate depends **strictly** on `shunt-plugin-sdk` (never
-//! on `shunt-core`), proving that first-party and third-party plugins use the
+//! on `shunt-engine`), proving that first-party and third-party plugins use the
 //! exact same public contract.
 
 pub mod access_log;

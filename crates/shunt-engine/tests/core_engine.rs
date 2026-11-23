@@ -12,7 +12,7 @@ use hyper::server::conn::{http1, http2};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::ServerName;
-use shunt_core::{
+use shunt_engine::{
     CertStore, DynamicCertResolver, GatewayServer, RouteMatch, RouteSpec, RuntimeRegistry,
     ShuntBody, SnapshotBuilder, TimeoutConfig, TlsListenerConfig, UpstreamConfig,
     load_certified_key_pem,
@@ -283,7 +283,7 @@ impl HttpPlugin for SniEchoPlugin {
 
 #[tokio::test]
 async fn tls_sni_and_hot_cert_reload() {
-    shunt_core::ensure_crypto_provider();
+    shunt_engine::ensure_crypto_provider();
 
     let upstream = spawn_http1_upstream(|_req| async move {
         Response::builder()
@@ -330,7 +330,7 @@ async fn tls_sni_and_hot_cert_reload() {
         .unwrap();
 
     async fn tls_get_with_ca(addr: SocketAddr, sni: &str, ca_pem: &[u8]) -> Result<String, String> {
-        let up_tls = shunt_core::UpstreamTlsConfig {
+        let up_tls = shunt_engine::UpstreamTlsConfig {
             extra_ca_pem: Some(ca_pem.to_vec()),
             alpn_protocols: vec![b"http/1.1".to_vec()],
             ..Default::default()

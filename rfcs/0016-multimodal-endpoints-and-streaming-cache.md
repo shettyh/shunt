@@ -5,7 +5,7 @@
 
 ## 1. Summary
 
-This RFC completes Shunt's endpoint breadth and AI caching layer strictly inside `shunt-ai`—with **zero changes to `shunt-core` or `shunt-plugin-sdk`**. It adds first-class support for **`POST /v1/rerank`**, **`POST /v1/completions`**, **`POST /v1/moderations`**, **`POST /v1/images/*`**, **`POST /v1/audio/*`**, **`GET /v1/realtime` (WebSocket)**, **`/v1/files`**, **`/v1/batches`**, and **`GET /v1/generation?id=...`**, alongside **streaming SSE response caching & instant replay**, **singleflight request coalescing**, and an **opt-in semantic vector cache seam** in `ai-cache`.
+This RFC completes Shunt's endpoint breadth and AI caching layer strictly inside `shunt-ai`—with **zero changes to `shunt-engine` or `shunt-plugin-sdk`**. It adds first-class support for **`POST /v1/rerank`**, **`POST /v1/completions`**, **`POST /v1/moderations`**, **`POST /v1/images/*`**, **`POST /v1/audio/*`**, **`GET /v1/realtime` (WebSocket)**, **`/v1/files`**, **`/v1/batches`**, and **`GET /v1/generation?id=...`**, alongside **streaming SSE response caching & instant replay**, **singleflight request coalescing**, and an **opt-in semantic vector cache seam** in `ai-cache`.
 
 ## 2. Motivation
 
@@ -21,7 +21,7 @@ Teams migrating production workloads from LiteLLM or OpenRouter need more than c
 ## 3. Goals & Non-Goals
 
 ### Goals
-- **Strictly zero AI in `shunt-core` and `shunt-plugin-sdk`:** Reuse `shunt-core`'s existing WebSocket upgrade tunnel (`allow_websockets = true`), `StateStore`, `DistributedStore`, and RFC 0014's pooled `HttpClient`.
+- **Strictly zero AI in `shunt-engine` and `shunt-plugin-sdk`:** Reuse `shunt-engine`'s existing WebSocket upgrade tunnel (`allow_websockets = true`), `StateStore`, `DistributedStore`, and RFC 0014's pooled `HttpClient`.
 - **Binary-safe multipart handling:** Pure-Rust, zero-dependency RFC 7578 `multipart/form-data` parser & `model`-field rewriter so `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/images/edits`, `/v1/images/variations`, and `/v1/files` route by model alias and enforce virtual-key ACLs without corrupting binary payloads.
 - **Cross-dialect multimodal translation:**
   - `POST /v1/rerank`: native passthrough for `openai_compatible`/Cohere/Jina/vLLM, Voyage response normalization (`data[]` → `results[]`), and full AWS Bedrock Agent Runtime `/rerank` + SigV4 translation.
@@ -35,7 +35,7 @@ Teams migrating production workloads from LiteLLM or OpenRouter need more than c
 ### Non-Goals
 - **Artificial SSE chunk pacing / typing-speed delays on cache hits:** Production gateways (Cloudflare AI Gateway, Portkey, Helicone) flush cached SSE streams immediately so clients get sub-ms latency while remaining 100% compliant with WHATWG EventSource and official OpenAI/Anthropic SDKs.
 - **Bundling local embedding model weights into `shunt`:** Semantic caching calls an external/local embedding API (OpenAI, Ollama, vLLM) or vector sidecar over `HttpClient`, preserving the ~20 MB single binary.
-- **WebSocket frame-level JSON rewriting on `/v1/realtime`:** The WebSocket upgrade handshake performs full virtual-key auth, model routing, and upstream URI/auth translation, then hands off to `shunt-core`'s zero-copy bidirectional tunnel.
+- **WebSocket frame-level JSON rewriting on `/v1/realtime`:** The WebSocket upgrade handshake performs full virtual-key auth, model routing, and upstream URI/auth translation, then hands off to `shunt-engine`'s zero-copy bidirectional tunnel.
 
 ## 4. Design
 
@@ -83,7 +83,7 @@ Teams migrating production workloads from LiteLLM or OpenRouter need more than c
   - Semantic hits emit `x-shunt-cache: semantic_hit` and `x-shunt-cache-similarity: <score>`.
 
 ## 5. Alternatives Considered & Rejected
-1. **Adding WebSocket frame rewriting or multipart parsing to `shunt-core`:** Rejected—violates the zero-AI core invariant; `shunt-core`'s generic `allow_websockets` tunnel and `REQUEST_BODY_BUFFERED` hook already provide everything `shunt-ai` needs.
+1. **Adding WebSocket frame rewriting or multipart parsing to `shunt-engine`:** Rejected—violates the zero-AI core invariant; `shunt-engine`'s generic `allow_websockets` tunnel and `REQUEST_BODY_BUFFERED` hook already provide everything `shunt-ai` needs.
 2. **Artificial timer delays when replaying cached SSE streams:** Rejected—adds latency and holds open tasks/sockets without improving SDK compatibility.
 3. **Embedding ONNX/BERT weights for local semantic caching:** Rejected—would bloat the ~20 MB binary by hundreds of megabytes; calling an existing embedding endpoint via `HttpClient` keeps `shunt` tiny and composable.
 

@@ -5,7 +5,7 @@
 
 ## 1. Summary
 
-This RFC deepens Shunt's pure-plugin AI gateway (`shunt-ai`) to close the highest-impact protocol translation, cost accounting, and provider ergonomics gaps compared to LiteLLM and OpenRouter—with **zero changes to `shunt-core` or `shunt-plugin-sdk`** and **zero new external dependencies**:
+This RFC deepens Shunt's pure-plugin AI gateway (`shunt-ai`) to close the highest-impact protocol translation, cost accounting, and provider ergonomics gaps compared to LiteLLM and OpenRouter—with **zero changes to `shunt-engine` or `shunt-plugin-sdk`** and **zero new external dependencies**:
 
 1. **Cross-Provider Reasoning & Thinking Translation:** Bidirectional mapping across OpenAI `reasoning_effort` / Responses `reasoning.effort`, Anthropic `thinking`, Gemini `generationConfig.thinkingConfig`, and Bedrock Converse `additionalModelRequestFields`, plus streaming/non-streaming `reasoning_content` / `thinking_delta` / `reasoning` item translation and `reasoning_tokens` accounting.
 2. **Prompt-Cache Writes, Tiered Pricing & `cachePoint` Translation:** Tracks `cache_creation_input_tokens` / `cacheWriteInputTokens`, translates Anthropic `cache_control` ↔ Bedrock `cachePoint`, and extends `ModelPricing` with `cache_write_per_million_usd` and long-context tiered rates (`>200k` tokens).
@@ -26,7 +26,7 @@ Teams migrating production workloads from LiteLLM or OpenRouter to Shunt encount
 ## 3. Goals & Non-Goals
 
 ### Goals
-- **Strictly pure-plugin:** Keep `shunt-core` and `shunt-plugin-sdk` 100% AI-free and untouched.
+- **Strictly pure-plugin:** Keep `shunt-engine` and `shunt-plugin-sdk` 100% AI-free and untouched.
 - **Zero-copy fast path preserved:** Same-protocol passthrough with no parameter overrides, `drop_params = false`, and matching model name continues to skip JSON re-serialization (`Ok(None)`).
 - **Pay only for what you use:** `ai-provider-adapter` enables `HookMask::ON_ROUTE` only when at least one provider configures a multi-key pool (`api_keys.len() > 1`).
 - **Deterministic & reload-safe state:** Multi-key pool cursors and per-key cooldowns live in `StateStore` (`KeyPoolTable`) and use `BuildContext::clock()` so they survive hot reloads and test deterministically with `ManualClock`.

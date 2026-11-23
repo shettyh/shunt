@@ -1,11 +1,11 @@
 # RFC 0014: Dynamic Cloud IAM Auth & Outbound `HttpClient` Primitive
 
 - **Status:** Implemented
-- **Crates:** `shunt-plugin-sdk`, `shunt-core`, `shunt-ai`, `shunt-test`, `specs/`, `examples/`, `fuzz/`
+- **Crates:** `shunt-plugin-sdk`, `shunt-engine`, `shunt-ai`, `shunt-test`, `specs/`, `examples/`, `fuzz/`
 
 ## 1. Summary
 
-This RFC introduces a general-purpose, strictly AI-free outbound [`HttpClient`] primitive in `shunt-plugin-sdk` backed by `shunt-core`'s pooled `hyper` + `rustls` stack, and uses it inside `shunt-ai` (`ai-provider-adapter`) to deliver zero-SDK, auto-refreshing cloud IAM authentication across **AWS** (EC2 IMDSv2, ECS Task Role, EKS IRSA / `AssumeRoleWithWebIdentity`, STS `AssumeRole`), **Google Cloud** (GCE/GKE Metadata Server / Workload Identity, Service Account RS256 JWT OAuth2, ADC Authorized User), and **Azure Entra ID** (Managed Identity IMDS, `client_credentials`, AKS Workload Identity).
+This RFC introduces a general-purpose, strictly AI-free outbound [`HttpClient`] primitive in `shunt-plugin-sdk` backed by `shunt-engine`'s pooled `hyper` + `rustls` stack, and uses it inside `shunt-ai` (`ai-provider-adapter`) to deliver zero-SDK, auto-refreshing cloud IAM authentication across **AWS** (EC2 IMDSv2, ECS Task Role, EKS IRSA / `AssumeRoleWithWebIdentity`, STS `AssumeRole`), **Google Cloud** (GCE/GKE Metadata Server / Workload Identity, Service Account RS256 JWT OAuth2, ADC Authorized User), and **Azure Entra ID** (Managed Identity IMDS, `client_credentials`, AKS Workload Identity).
 
 ## 2. Motivation
 
@@ -21,7 +21,7 @@ At the same time, upcoming Shunt capabilities (RFC 0015 external guardrails/webh
 
 ### Goals
 - **AI-free SDK primitive:** Add `HttpClient`, `HttpRequest`, `HttpResponse`, and `HttpClientError` to `shunt-plugin-sdk` with zero AI concepts and zero `hyper` types exposed.
-- **Zero new external SDK bloat:** Implement `CoreHttpClient` on `shunt-core`'s existing `ShuntConnector` (`hyper` + `rustls` + `webpki-roots`), and implement AWS STS XML parsing, GCP RS256 PKCS#8 JWT signing (reusing `ring` already compiled by `rustls`), and Azure Entra ID exchanges directly in `shunt-ai`—zero cloud SDK dependencies.
+- **Zero new external SDK bloat:** Implement `CoreHttpClient` on `shunt-engine`'s existing `ShuntConnector` (`hyper` + `rustls` + `webpki-roots`), and implement AWS STS XML parsing, GCP RS256 PKCS#8 JWT signing (reusing `ring` already compiled by `rustls`), and Azure Entra ID exchanges directly in `shunt-ai`—zero cloud SDK dependencies.
 - **Zero-allocation warm fast path:** Static auth and **warm cached dynamic cloud tokens** execute synchronously via `HookResult::Ready`; only cache misses and proactive/reactive refreshes return `HookResult::Pending`.
 - **Singleflight coalescing & stale-while-valid resilience:** Concurrent requests hitting an expiring token coalesce onto one outbound refresh via a cancellation-safe gate. If a proactive refresh fails transiently while the cached token is still valid, Shunt continues serving with the valid token rather than failing traffic.
 - **Reload-persistent & deterministic:** `CloudTokenCache` lives in `StateStore`, keyed by `(provider_name, config_fingerprint)`, and uses `BuildContext::clock()` so tokens survive hot reloads of unchanged configs, invalidate immediately when auth config changes, and test deterministically with `ManualClock`.
@@ -34,7 +34,7 @@ At the same time, upcoming Shunt capabilities (RFC 0015 external guardrails/webh
 
 ## 4. Design
 
-### 4.1 Outbound `HttpClient` Primitive (`shunt-plugin-sdk` + `shunt-core`)
+### 4.1 Outbound `HttpClient` Primitive (`shunt-plugin-sdk` + `shunt-engine`)
 
 `shunt-plugin-sdk` defines:
 
@@ -49,7 +49,7 @@ pub trait HttpClient: fmt::Debug + Send + Sync + 'static {
 
 - `HttpRequest` carries `method`, `uri`, `headers`, `body: Bytes`, optional per-request `timeout`, and optional `max_response_bytes`.
 - `BuildContext::http_client(&self) -> Option<Arc<dyn HttpClient>>` exposes the shared client to plugins during `PluginFactory::build`.
-- `shunt-core::CoreHttpClient` implements `HttpClient` on top of `hyper_util::client::legacy::Client<ShuntConnector, Full<Bytes>>`, enforcing absolute `http://`/`https://` URIs, end-to-end timeouts, and incremental frame-by-frame response size caps (`ResponseTooLarge`).
+- `shunt-engine::CoreHttpClient` implements `HttpClient` on top of `hyper_util::client::legacy::Client<ShuntConnector, Full<Bytes>>`, enforcing absolute `http://`/`https://` URIs, end-to-end timeouts, and incremental frame-by-frame response size caps (`ResponseTooLarge`).
 - `RuntimeRegistry` lazily creates and retains a single warm `CoreHttpClient` (with `with_http_client(...)` override for tests) and attaches it to every `BuildSession`.
 
 ### 4.2 Reload-Persistent `CloudTokenCache` & Singleflight Gate (`shunt-ai`)
@@ -95,9 +95,9 @@ pub trait HttpClient: fmt::Debug + Send + Sync + 'static {
 
 ## 5. Alternatives Considered & Rejected
 
-1. **Pulling `aws-config` / `gcp_auth` / `azure_identity` crates:** Rejected—would add dozens of transitive dependencies, pull in `reqwest`/`openssl`/heavy proc macros, break single-binary leanness, and duplicate TLS stacks alongside `shunt-core`.
+1. **Pulling `aws-config` / `gcp_auth` / `azure_identity` crates:** Rejected—would add dozens of transitive dependencies, pull in `reqwest`/`openssl`/heavy proc macros, break single-binary leanness, and duplicate TLS stacks alongside `shunt-engine`.
 2. **Spawning background refresh timers inside `ai-provider-adapter`:** Rejected—background tasks complicate hot-reload lifecycle, leak across `shunt check` / ephemeral snapshots, and break deterministic `ManualClock` testing. On-demand singleflight refresh with stale-while-valid fallback achieves equal resilience with zero background threads.
-3. **Making `ai-provider-adapter` construct its own `hyper` client:** Rejected—violates Shunt's crate isolation rule (`shunt-ai` must depend strictly on `shunt-plugin-sdk`, never on `shunt-core` or `hyper`).
+3. **Making `ai-provider-adapter` construct its own `hyper` client:** Rejected—violates Shunt's crate isolation rule (`shunt-ai` must depend strictly on `shunt-plugin-sdk`, never on `shunt-engine` or `hyper`).
 
 ## 6. Verification
 

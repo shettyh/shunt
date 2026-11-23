@@ -82,7 +82,7 @@ impl PluginFactory for OtelTraceFactory {
 /// - Propagates `traceparent` / `tracestate` to upstream services in `on_upstream_request`.
 /// - When sampled and a gateway `[telemetry]` [`TelemetrySink`] is configured, attaches a
 ///   [`SpanHandle`] to `ctx.extensions` so downstream plugins (e.g., `shunt-ai`) can enrich
-///   the span with GenAI semantic attributes without coupling to OTLP or `shunt-core`.
+///   the span with GenAI semantic attributes without coupling to OTLP or `shunt-engine`.
 pub struct OtelTracePlugin {
     sample_rate: f64,
     respect_parent_sampling: bool,

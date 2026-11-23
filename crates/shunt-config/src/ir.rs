@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use http::Method;
 use http::header::{HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
-use shunt_core::RedisStoreConfig;
+use shunt_engine::RedisStoreConfig;
 use shunt_plugin_sdk::FailurePolicy;
 
 use crate::error::ConfigError;

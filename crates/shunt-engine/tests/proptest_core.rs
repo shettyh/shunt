@@ -4,8 +4,8 @@ use std::time::Duration;
 use http::header::{self, HeaderName, HeaderValue};
 use http::{HeaderMap, Uri};
 use proptest::prelude::*;
-use shunt_core::pipeline::{strip_hop_by_hop_headers, strip_uri_prefix};
-use shunt_core::{
+use shunt_engine::pipeline::{strip_hop_by_hop_headers, strip_uri_prefix};
+use shunt_engine::{
     EndpointState, PathMatch, UpstreamConfig, UpstreamPool, host_matches, select_endpoint_index,
 };
 use shunt_plugin_sdk::{Clock, ManualClock};
@@ -331,20 +331,20 @@ proptest! {
         num in any::<i64>(),
         bulk in prop::option::of(prop::collection::vec(any::<u8>(), 0..64)),
     ) {
-        let frame = shunt_core::RespValue::Array(Some(vec![
-            shunt_core::RespValue::SimpleString(simple),
-            shunt_core::RespValue::Error(err_msg),
-            shunt_core::RespValue::Integer(num),
-            shunt_core::RespValue::BulkString(bulk),
-            shunt_core::RespValue::Array(None),
+        let frame = shunt_engine::RespValue::Array(Some(vec![
+            shunt_engine::RespValue::SimpleString(simple),
+            shunt_engine::RespValue::Error(err_msg),
+            shunt_engine::RespValue::Integer(num),
+            shunt_engine::RespValue::BulkString(bulk),
+            shunt_engine::RespValue::Array(None),
         ]));
         let mut wire = Vec::new();
-        shunt_core::encode_resp_value(&frame, &mut wire);
+        shunt_engine::encode_resp_value(&frame, &mut wire);
 
         for cut in 0..wire.len() {
-            prop_assert_eq!(shunt_core::decode_resp_frame(&wire[..cut]), Ok(None));
+            prop_assert_eq!(shunt_engine::decode_resp_frame(&wire[..cut]), Ok(None));
         }
-        let decoded = shunt_core::decode_resp_frame(&wire).unwrap().unwrap();
+        let decoded = shunt_engine::decode_resp_frame(&wire).unwrap().unwrap();
         prop_assert_eq!(decoded.0, frame);
         prop_assert_eq!(decoded.1, wire.len());
     }
@@ -353,14 +353,14 @@ proptest! {
     fn resp2_decoder_never_panics_on_arbitrary_bytes(
         raw in prop::collection::vec(any::<u8>(), 0..256),
     ) {
-        let _ = shunt_core::decode_resp_frame(&raw);
+        let _ = shunt_engine::decode_resp_frame(&raw);
     }
 
     #[test]
     fn swrr_schedule_preserves_exact_weight_ratios(
         weights in prop::collection::vec(1u32..50, 2..6),
     ) {
-        let schedule = shunt_core::build_swrr_schedule(&weights);
+        let schedule = shunt_engine::build_swrr_schedule(&weights);
         if weights.iter().all(|&w| w == weights[0]) {
             prop_assert!(schedule.is_empty());
         } else {
@@ -385,9 +385,9 @@ proptest! {
         let len = weights.len().min(healthy_raw.len());
         let weights = &weights[..len];
         let healthy = &healthy_raw[..len];
-        let schedule = shunt_core::build_swrr_schedule(weights);
+        let schedule = shunt_engine::build_swrr_schedule(weights);
 
-        let chosen = shunt_core::select_weighted_endpoint_index(
+        let chosen = shunt_engine::select_weighted_endpoint_index(
             cursor,
             weights,
             &schedule,
@@ -419,7 +419,7 @@ proptest! {
     ) {
         let h1 = HeaderName::from_bytes(format!("x-hdr-a-{k1}").as_bytes()).unwrap();
         let h2 = HeaderName::from_bytes(format!("x-hdr-b-{k2}").as_bytes()).unwrap();
-        let rm = shunt_core::RouteMatch::prefix("/v2")
+        let rm = shunt_engine::RouteMatch::prefix("/v2")
             .with_header(h1.clone(), v1.clone())
             .with_header(h2.clone(), v2.clone());
 
@@ -456,7 +456,7 @@ proptest! {
     fn x509_der_client_cert_parser_never_panics_on_arbitrary_bytes(
         raw in prop::collection::vec(any::<u8>(), 0..512),
     ) {
-        if let Some(info) = shunt_core::parse_client_cert_info(&raw) {
+        if let Some(info) = shunt_engine::parse_client_cert_info(&raw) {
             prop_assert_eq!(info.sha256_fingerprint.len(), 64);
         }
     }

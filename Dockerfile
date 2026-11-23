@@ -9,7 +9,7 @@ WORKDIR /src
 # Copy manifests first to maximize Docker layer caching.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/shunt-plugin-sdk/Cargo.toml crates/shunt-plugin-sdk/Cargo.toml
-COPY crates/shunt-core/Cargo.toml crates/shunt-core/Cargo.toml
+COPY crates/shunt-engine/Cargo.toml crates/shunt-engine/Cargo.toml
 COPY crates/shunt-plugins/Cargo.toml crates/shunt-plugins/Cargo.toml
 COPY crates/shunt-ai/Cargo.toml crates/shunt-ai/Cargo.toml
 COPY crates/shunt-mcp/Cargo.toml crates/shunt-mcp/Cargo.toml

@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use shunt_core::{RespValue, decode_resp_frame, encode_resp_value};
+use shunt_engine::{RespValue, decode_resp_frame, encode_resp_value};
 
 fuzz_target!(|data: &[u8]| {
     // 1. Arbitrary bytes must never panic or OOM the RESP2 frame decoder.

@@ -12,7 +12,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use shunt_core::{
+use shunt_engine::{
     GatewayServer, RouteMatch, RouteSpec, RuntimeRegistry, ShuntBody, SnapshotBuilder,
     TimeoutConfig, UpstreamConfig,
 };
