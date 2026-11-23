@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0 (2026-11-23)
+
+## What's Changed
+* docs: add documentation website and update product vision by @shettyh in https://github.com/shettyh/shunt/pull/38
+* docs: improve config mental model, route-group patterns, plugin matrices & production guide by @shettyh in https://github.com/shettyh/shunt/pull/41
+* feat(config): add route groups and shared plugin chains (RFC 0021) by @shettyh in https://github.com/shettyh/shunt/pull/40
+
+
+**Full Changelog**: https://github.com/shettyh/shunt/compare/v0.1.2...v0.2.0
+
 ## 0.1.2 (2026-11-23)
 
 ## What's Changed
