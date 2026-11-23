@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2 (2026-11-23)
+
+## What's Changed
+* fix(crates): rename shunt-core to shunt-engine by @shettyh in https://github.com/shettyh/shunt/pull/36
+
+
+**Full Changelog**: https://github.com/shettyh/shunt/compare/v0.1.1...v0.1.2
+
 ## 0.1.1 (2026-11-23)
 
 ## What's Changed
