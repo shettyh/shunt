@@ -26,8 +26,9 @@ hyper.workspace = true
 hyper-util.workspace = true
 proptest.workspace = true
 rcgen.workspace = true
-shunt-config.workspace = true
-shunt-core.workspace = true
+# Path-only dev-deps break the cyclic dev-dependency with `shunt-config` on `cargo publish`.
+shunt-config = { path = "../shunt-config" }
+shunt-core = { path = "../shunt-core" }
 tokio.workspace = true
 
 [lints]

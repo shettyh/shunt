@@ -22,23 +22,31 @@ COPY benches/shunt-bench/Cargo.toml benches/shunt-bench/Cargo.toml
 COPY crates ./crates
 COPY benches ./benches
 
-RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git \
-    --mount=type=cache,id=cargo-target-${TARGETARCH},target=/src/target \
+RUN --mount=type=cache,id=cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=cargo-target-${TARGETARCH},target=/src/target,sharing=locked \
     cargo build --release --locked -p shunt-cli --bin shunt && \
     cp /src/target/release/shunt /usr/local/bin/shunt
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime-base
 
 LABEL org.opencontainers.image.title="shunt" \
       org.opencontainers.image.description="Ultra-lean, pluggable Rust HTTP & AI gateway" \
       org.opencontainers.image.source="https://github.com/shettyh/shunt" \
       org.opencontainers.image.licenses="Apache-2.0"
 
-COPY --from=builder /usr/local/bin/shunt /usr/local/bin/shunt
 COPY examples/shunt.toml /etc/shunt/shunt.toml
 
 EXPOSE 8080 9090
 
 ENTRYPOINT ["/usr/local/bin/shunt"]
 CMD ["run", "-c", "/etc/shunt/shunt.toml"]
+
+# Release target: packages prebuilt static Linux binaries (avoids QEMU Rust builds).
+FROM runtime-base AS prebuilt
+ARG TARGETARCH
+COPY docker-bin/linux/${TARGETARCH}/shunt /usr/local/bin/shunt
+
+# Default target: builds from source in the `builder` stage.
+FROM runtime-base AS runtime
+COPY --from=builder /usr/local/bin/shunt /usr/local/bin/shunt

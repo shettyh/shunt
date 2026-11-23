@@ -34,7 +34,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-shunt-plugins.workspace = true
+# Path-only dev-dep breaks the cyclic dev-dependency with `shunt-plugins` on `cargo publish`.
+shunt-plugins = { path = "../shunt-plugins" }
 rcgen.workspace = true
 
 [lints]
