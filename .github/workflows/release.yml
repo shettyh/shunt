@@ -69,6 +69,7 @@ jobs:
         env:
           RELEASE_CREATED: ${{ steps.release.outputs.release_created || 'false' }}
           RELEASE_TAG: ${{ steps.release.outputs.tag_name || '' }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           python3 - <<'PY'
           import os, tomllib
@@ -95,7 +96,8 @@ jobs:
               tag_name = f"v{version}"
               checkout_ref = os.environ["GITHUB_SHA"]
               should_build = "true"
-              should_publish = "false"
+              dry_run = os.environ.get("DRY_RUN", "true").lower() == "true"
+              should_publish = "false" if dry_run else "true"
 
           is_prerelease = "true" if "-" in version else "false"
 
@@ -211,7 +213,7 @@ jobs:
 
   docker-publish:
     name: Publish Docker Image (GHCR)
-    needs: release_please
+    needs: [release_please, build-binaries]
     if: needs.release_please.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -222,7 +224,25 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.release_please.outputs.tag_name }}
+          ref: ${{ needs.release_please.outputs.checkout_ref }}
+
+      - name: Download prebuilt Linux musl binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*-unknown-linux-musl
+          path: dist
+
+      - name: Stage multi-arch binaries for Docker build
+        env:
+          TAG_NAME: ${{ needs.release_please.outputs.tag_name }}
+        run: |
+          mkdir -p docker-bin/linux/amd64 docker-bin/linux/arm64
+          tar -xzf "dist/release-x86_64-unknown-linux-musl/shunt-${TAG_NAME}-x86_64-unknown-linux-musl.tar.gz" \
+            --strip-components=1 -C docker-bin/linux/amd64 "shunt-${TAG_NAME}-x86_64-unknown-linux-musl/shunt"
+          tar -xzf "dist/release-aarch64-unknown-linux-musl/shunt-${TAG_NAME}-aarch64-unknown-linux-musl.tar.gz" \
+            --strip-components=1 -C docker-bin/linux/arm64 "shunt-${TAG_NAME}-aarch64-unknown-linux-musl/shunt"
+          chmod +x docker-bin/linux/amd64/shunt docker-bin/linux/arm64/shunt
+          ls -lh docker-bin/linux/*/shunt
 
       - name: Set lowercased image name
         id: img
@@ -230,7 +250,6 @@ jobs:
           repo="$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
           echo "name=ghcr.io/${repo}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
@@ -245,6 +264,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.img.outputs.name }}
+          flavor: |
+            latest=false
           tags: |
             type=semver,pattern={{version}},value=${{ needs.release_please.outputs.tag_name }}
             type=semver,pattern={{major}}.{{minor}},value=${{ needs.release_please.outputs.tag_name }}
@@ -257,12 +278,11 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          target: prebuilt
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Attest container image provenance
         uses: actions/attest-build-provenance@v2
@@ -323,7 +343,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.release_please.outputs.tag_name }}
+          ref: ${{ needs.release_please.outputs.checkout_ref }}
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

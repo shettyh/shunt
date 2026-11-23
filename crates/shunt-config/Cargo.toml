@@ -33,9 +33,13 @@ toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+brotli.workspace = true
+flate2.workspace = true
 proptest.workspace = true
-shunt-plugins.workspace = true
 rcgen.workspace = true
+ring.workspace = true
+shunt-plugins.workspace = true
+zstd.workspace = true
 
 [lints]
 workspace = true

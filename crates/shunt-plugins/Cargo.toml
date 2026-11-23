@@ -26,7 +26,7 @@ hyper.workspace = true
 hyper-util.workspace = true
 proptest.workspace = true
 rcgen.workspace = true
-shunt-config.workspace = true
+# `shunt-config` e2e tests live in `crates/shunt-config/tests/` to keep the workspace DAG acyclic.
 shunt-core.workspace = true
 tokio.workspace = true
 

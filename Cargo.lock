@@ -1190,7 +1190,9 @@ name = "shunt-config"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "brotli",
  "bytes",
+ "flate2",
  "http",
  "http-body",
  "http-body-util",
@@ -1199,6 +1201,7 @@ dependencies = [
  "notify",
  "proptest",
  "rcgen",
+ "ring",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1210,6 +1213,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "zstd",
 ]
 
 [[package]]
@@ -1290,7 +1294,6 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
- "shunt-config",
  "shunt-core",
  "shunt-plugin-sdk",
  "tokio",
