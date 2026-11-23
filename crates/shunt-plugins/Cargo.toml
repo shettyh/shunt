@@ -26,9 +26,8 @@ hyper.workspace = true
 hyper-util.workspace = true
 proptest.workspace = true
 rcgen.workspace = true
-# Path-only dev-deps break the cyclic dev-dependency with `shunt-config` on `cargo publish`.
-shunt-config = { path = "../shunt-config" }
-shunt-core = { path = "../shunt-core" }
+# `shunt-config` e2e tests live in `crates/shunt-config/tests/` to keep the workspace DAG acyclic.
+shunt-core.workspace = true
 tokio.workspace = true
 
 [lints]

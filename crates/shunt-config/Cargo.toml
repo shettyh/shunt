@@ -33,10 +33,13 @@ toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+brotli.workspace = true
+flate2.workspace = true
 proptest.workspace = true
-# Path-only dev-dep breaks the cyclic dev-dependency with `shunt-plugins` on `cargo publish`.
-shunt-plugins = { path = "../shunt-plugins" }
 rcgen.workspace = true
+ring.workspace = true
+shunt-plugins.workspace = true
+zstd.workspace = true
 
 [lints]
 workspace = true
