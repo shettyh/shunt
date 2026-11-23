@@ -105,6 +105,7 @@ While `shunt dev` is running, edit `response_set` in `shunt.toml` and save the f
 
 ## Next Steps
 
+- Share auth, rate-limit buckets, prefixes, and default upstreams across multiple routes with [`[[route_groups]]`](/shunt/api-gateway/overview/#route-groups--shared-plugin-chains)
 - Add pure-Rust JWT/JWKS authentication, CIDR IP filtering, and streaming body limits: see [HTTP Plugins Reference](/shunt/plugins/http-plugins/)
 - Run Shunt with Kubernetes Gateway API manifests: see [Kubernetes Gateway API](/shunt/api-gateway/kubernetes/)
-- Deploy to production with `shunt run -c shunt.toml`
+- Deploy multi-replica production gateways with Redis state and zero-downtime reloads: see [Production & Troubleshooting](/shunt/guides/production-and-troubleshooting/)

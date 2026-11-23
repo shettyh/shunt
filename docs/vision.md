@@ -1,7 +1,7 @@
 # Shunt — Product & Architecture Vision
 
 **Status:** Living Document  
-**Current Baseline:** `v0.1.2` (RFCs 0001–0020 implemented across HTTP API, AI, and MCP gateways)  
+**Current Baseline:** `v0.1.2` (RFCs 0001–0021 implemented across HTTP API, Route Groups, AI, and MCP gateways)  
 **Primary Focus (Now):** **Adoption, Usability & Ecosystem** — Docs, CLI onboarding DX, zero-friction installers, and turnkey deploy/observability kits  
 **Next Platform Milestones:** Wasm Component Model plugins (`Tier 2`) & optional Companion Control Plane (`shunt-console`)
 
@@ -23,7 +23,7 @@ Every core capability (distributed state, virtual keys/JWT/mTLS, weighted & late
 
 ---
 
-## 2. Where We Are Today (`v0.1.2`, RFCs 0001–0020 Implemented)
+## 2. Where We Are Today (`v0.1.2`, RFCs 0001–0021 Implemented)
 
 Shunt has a verified, high-performance, feature-complete gateway foundation ([docs/design.md](design.md), [rfcs/README.md](../rfcs/README.md)):
 
@@ -110,7 +110,7 @@ To give developers and companies strong visibility and self-service management *
 ### Layer 2 — First-Class Integration with Existing Observability Stacks *(OTLP/Prometheus Implemented; Dashboards in Phase U3)*
 - Built-in **OpenTelemetry (`OTLP/HTTP`) trace export** (RFC 0011, compatible with Langfuse, Arize Phoenix, Jaeger, Tempo, and ClickHouse) and **Prometheus `/metrics`**, paired with official **Grafana dashboards** and Docker Compose recipes (Phase U3).
 
-### Layer 3 — Full Management UI & Runtime CRUD Control Plane (`shunt-console`) *(Future — Proposed RFC 0022)*
+### Layer 3 — Full Management UI & Runtime CRUD Control Plane (`shunt-console`) *(Future — Proposed RFC 0023)*
 - A full read/write management portal and runtime CRUD API (dynamic virtual key creation/rotation/expiry, spend ledger queries, model/route edits) will **never** be embedded inside `shunt` or `shunt-engine`. Instead, when teams need centralized UI- or API-driven management, it lives as a **separate optional companion service** (`shunt-console`, backed by SQLite/Postgres) that drives one or more stateless `shunt` data-plane instances strictly through the `ConfigProvider` and telemetry/admin seams.
 - Solo developers and GitOps teams deploy only the ~20 MB `shunt` binary; larger organizations deploy `shunt` + `shunt-console` side by side.
 
@@ -130,15 +130,15 @@ Five non-negotiable invariants protect Shunt's simplicity and speed as it grows:
 
 ## 7. Roadmap Summary (Completed & Upcoming)
 
-RFCs **0001–0020** are implemented and verified in the codebase (see [rfcs/README.md](../rfcs/README.md) for the full index). Upcoming milestones in priority order:
+RFCs **0001–0021** are implemented and verified in the codebase (see [rfcs/README.md](../rfcs/README.md) for the full index). Upcoming milestones in priority order:
 
 | Priority | Track / Proposed RFC | Scope | Status |
 | --- | --- | --- | --- |
 | **1** | **Phase U1 — Documentation Website** | Astro Starlight docs site (`website/`), GitHub Pages CI, per-plugin config reference, quickstarts, LiteLLM migration guide, and `llms.txt` | **In Progress** |
 | **2** | **Phase U2 — CLI Onboarding & Schema DX** | `shunt init` presets/demo mode, `shunt schema` (JSON Schema + SchemaStore), `shunt plugins`, `shunt completions`, friendly error hints | **Next** |
 | **3** | **Phase U3 — Distribution & Deploy Kits** | Homebrew tap, `install.sh`/`install.ps1`, `cargo-binstall` metadata, official Grafana dashboards, Docker Compose stacks, Helm chart | **Next** |
-| **4** | **Proposed RFC 0021 — Wasm Component Model Plugin Host** | Tier 2 hot-reloadable Wasm plugins (WIT) on `shunt-plugin-sdk` so non-Rust teams can extend Shunt without recompiling | Planned |
-| **5** | **Proposed RFC 0022 — Companion Control Plane (`shunt-console`)** | Optional DB-backed management UI & runtime CRUD control plane for AI, MCP, and API gateway fleets driving `shunt` via `ConfigProvider` | Planned |
+| **4** | **Proposed RFC 0022 — Wasm Component Model Plugin Host** | Tier 2 hot-reloadable Wasm plugins (WIT) on `shunt-plugin-sdk` so non-Rust teams can extend Shunt without recompiling | Planned |
+| **5** | **Proposed RFC 0023 — Companion Control Plane (`shunt-console`)** | Optional DB-backed management UI & runtime CRUD control plane for AI, MCP, and API gateway fleets driving `shunt` via `ConfigProvider` | Planned |
 | **6** | **HTTP/3 (QUIC) & gRPC Observability** | Optional QUIC/HTTP3 listener and gRPC status/trailer metrics in `shunt-engine` / `shunt-plugins` | Planned |
 
 ---

@@ -26,6 +26,7 @@ This directory contains Request for Comments (RFC) design documents for **Shunt*
 | [0018](./0018-jwt-http-security-compression-and-k8s-gateway.md) | JWT/OIDC Auth, HTTP Gateway Security, Response Compression & Kubernetes Gateway API | Implemented | `shunt-plugin-sdk`, `shunt-engine`, `shunt-plugins`, `shunt-config`, `shunt-cli`, `specs/`, `examples/`, `fuzz/` |
 | [0019](./0019-mcp-and-agentic-gateway.md) | `shunt-mcp`: Model Context Protocol (MCP) & Agentic Governance Plugin Pack | Implemented | `shunt-mcp`, `shunt-config`, `shunt-cli`, `shunt-test`, `specs/`, `examples/`, `fuzz/` |
 | [0020](./0020-unified-comprehensive-benchmarks.md) | Unified & Comprehensive Gateway Benchmark Suite (API, AI & MCP) | Implemented | `benches/shunt-bench`, `benches/configs/`, `benches/scripts/`, `benches/results/` |
+| [0021](./0021-route-groups.md) | Route Groups & Shared Plugin Chains | Implemented | `shunt-config`, `shunt-cli`, `shunt-test`, `specs/`, `examples/` |
 
 ## Status Definitions
 

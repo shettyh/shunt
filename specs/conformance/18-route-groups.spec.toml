@@ -1,0 +1,268 @@
+[spec]
+name = "route-groups-and-shared-plugin-chains"
+config_inline = """
+[server]
+listen = "127.0.0.1:0"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+[[plugins]]
+name = "request-id"
+
+[[upstreams]]
+name = "users_svc"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "orders_svc"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "public_svc"
+endpoints = ["http://127.0.0.1:1"]
+
+[[route_groups]]
+id = "api_v2"
+hosts = ["*.example.com"]
+path_prefix = "/v2"
+strip_prefix = "/v2"
+methods = ["GET", "POST"]
+headers = { "x-api-version" = "2" }
+upstream = "users_svc"
+max_attempts = 2
+
+[[route_groups.plugins]]
+name = "bearer-auth"
+[route_groups.plugins.config]
+tokens = ["route-group-secret-token-777"]
+
+[[route_groups.plugins]]
+name = "rate-limit"
+id = "api-v2-shared-rl"
+[route_groups.plugins.config]
+requests_per_second = 0.5
+burst = 2
+key = "header"
+header_name = "x-client"
+
+[[route_groups.plugins]]
+name = "header-rewrite"
+[route_groups.plugins.config]
+request_set = { "x-group-injected" = "api_v2" }
+response_set = { "x-group" = "api_v2", "x-layer" = "group" }
+
+[[routes]]
+id = "users"
+group = "api_v2"
+hosts = ["api.example.com"]
+path_prefix = "/users"
+methods = ["GET"]
+
+[[routes]]
+id = "orders"
+group = "api_v2"
+path_prefix = "/orders"
+upstream = "orders_svc"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+response_set = { "x-layer" = "route-orders" }
+
+[[routes]]
+id = "public_ping"
+path_exact = "/ping"
+upstream = "public_svc"
+"""
+
+[[mocks]]
+upstream = "users_svc"
+name = "users_ok"
+status = 200
+json = { service = "users" }
+
+[[mocks]]
+upstream = "orders_svc"
+name = "orders_ok"
+status = 200
+json = { service = "orders" }
+
+[[mocks]]
+upstream = "public_svc"
+name = "public_ok"
+status = 200
+json = { service = "public" }
+
+[[cases]]
+name = "route groups enforce shared auth/rate-limit across member routes and preserve state on reload"
+use_mocks = ["users_ok", "orders_ok", "public_ok"]
+
+[[cases.steps]]
+name = "missing group bearer token returns 401 and redacts secret in snapshot"
+[cases.steps.request]
+method = "GET"
+path = "/v2/users/1"
+headers = { "host" = "api.example.com", "x-api-version" = "2" }
+[cases.steps.expect]
+status = 401
+snapshot_redacts = ["route-group-secret-token-777"]
+
+[[cases.steps]]
+name = "first request to /v2/users strips /v2 prefix, inherits upstream, and consumes token 1 of 2"
+[cases.steps.request]
+method = "GET"
+path = "/v2/users/1"
+headers = { "host" = "api.example.com", "x-api-version" = "2", "authorization" = "Bearer route-group-secret-token-777", "x-client" = "alice" }
+[cases.steps.expect]
+status = 200
+headers = { "x-group" = "api_v2", "x-layer" = "group", "x-ratelimit-remaining" = "1" }
+headers_present = ["x-request-id"]
+json_path = { "/service" = "users" }
+
+[[cases.steps.expect.upstream_calls]]
+upstream = "users_svc"
+count = 1
+method = "GET"
+path = "/users/1"
+headers = { "x-group-injected" = "api_v2" }
+
+[[cases.steps]]
+name = "second request to sibling route /v2/orders shares the same group rate-limit bucket (remaining=0) and overrides x-layer"
+[cases.steps.request]
+method = "POST"
+path = "/v2/orders/9"
+headers = { "host" = "shop.example.com", "x-api-version" = "2", "authorization" = "Bearer route-group-secret-token-777", "x-client" = "alice" }
+[cases.steps.expect]
+status = 200
+headers = { "x-group" = "api_v2", "x-layer" = "route-orders", "x-ratelimit-remaining" = "0" }
+json_path = { "/service" = "orders" }
+
+[[cases.steps.expect.upstream_calls]]
+upstream = "orders_svc"
+count = 1
+method = "POST"
+path = "/orders/9"
+headers = { "x-group-injected" = "api_v2" }
+
+[[cases.steps]]
+name = "third request back to /v2/users hits shared group 429 limit"
+[cases.steps.request]
+method = "GET"
+path = "/v2/users/2"
+headers = { "host" = "api.example.com", "x-api-version" = "2", "authorization" = "Bearer route-group-secret-token-777", "x-client" = "alice" }
+[cases.steps.expect]
+status = 429
+headers_present = ["retry-after"]
+
+[[cases.steps]]
+name = "ungrouped /ping route is unaffected by group auth and rate limits"
+[cases.steps.request]
+method = "GET"
+path = "/ping"
+[cases.steps.expect]
+status = 200
+json_path = { "/service" = "public" }
+
+[[cases.steps]]
+name = "hot reload adding a third route to api_v2 preserves the shared group rate-limit bucket"
+reload_config_inline = """
+[server]
+listen = "127.0.0.1:0"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+[[plugins]]
+name = "request-id"
+
+[[upstreams]]
+name = "users_svc"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "orders_svc"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "public_svc"
+endpoints = ["http://127.0.0.1:1"]
+
+[[route_groups]]
+id = "api_v2"
+hosts = ["*.example.com"]
+path_prefix = "/v2"
+strip_prefix = "/v2"
+methods = ["GET", "POST"]
+headers = { "x-api-version" = "2" }
+upstream = "users_svc"
+max_attempts = 2
+
+[[route_groups.plugins]]
+name = "bearer-auth"
+[route_groups.plugins.config]
+tokens = ["route-group-secret-token-777"]
+
+[[route_groups.plugins]]
+name = "rate-limit"
+id = "api-v2-shared-rl"
+[route_groups.plugins.config]
+requests_per_second = 0.5
+burst = 2
+key = "header"
+header_name = "x-client"
+
+[[route_groups.plugins]]
+name = "header-rewrite"
+[route_groups.plugins.config]
+request_set = { "x-group-injected" = "api_v2" }
+response_set = { "x-group" = "api_v2", "x-layer" = "group-v2" }
+
+[[routes]]
+id = "users"
+group = "api_v2"
+hosts = ["api.example.com"]
+path_prefix = "/users"
+methods = ["GET"]
+
+[[routes]]
+id = "orders"
+group = "api_v2"
+path_prefix = "/orders"
+upstream = "orders_svc"
+
+[[routes]]
+id = "profile"
+group = "api_v2"
+path_exact = "/profile"
+
+[[routes]]
+id = "public_ping"
+path_exact = "/ping"
+upstream = "public_svc"
+"""
+expect_reload_ok = true
+expect_pool_reused = ["users_svc", "orders_svc"]
+
+[[cases.steps]]
+name = "newly added /v2/profile route immediately sees exhausted shared group bucket (429)"
+[cases.steps.request]
+method = "GET"
+path = "/v2/profile"
+headers = { "host" = "api.example.com", "x-api-version" = "2", "authorization" = "Bearer route-group-secret-token-777", "x-client" = "alice" }
+[cases.steps.expect]
+status = 429
+
+[[cases.steps]]
+name = "advance ManualClock by 2500ms -> shared bucket refills -> /v2/profile succeeds"
+advance_clock_ms = 2500
+[cases.steps.request]
+method = "GET"
+path = "/v2/profile"
+headers = { "host" = "api.example.com", "x-api-version" = "2", "authorization" = "Bearer route-group-secret-token-777", "x-client" = "alice" }
+[cases.steps.expect]
+status = 200
+headers = { "x-group" = "api_v2", "x-layer" = "group-v2" }
+json_path = { "/service" = "users" }

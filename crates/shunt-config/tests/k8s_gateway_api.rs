@@ -253,7 +253,7 @@ spec:
     assert_eq!(api_route.path_prefix.as_deref(), Some("/api"));
     // Hostname intersection keeps `api.example.com`, drops `other.unrelated.io`!
     assert_eq!(api_route.hosts, vec!["api.example.com"]);
-    assert_eq!(api_route.max_attempts, 2);
+    assert_eq!(api_route.max_attempts, Some(2));
     assert_eq!(api_route.response_headers_timeout_ms, Some(2_500));
     assert_eq!(api_route.mirrors.len(), 1);
     assert!(api_route.plugins.iter().any(|p| p.name == "header-rewrite"));
@@ -264,7 +264,7 @@ spec:
     let up = cfg
         .upstreams
         .iter()
-        .find(|u| u.name == api_route.upstream)
+        .find(|u| Some(u.name.as_str()) == api_route.upstream.as_deref())
         .unwrap();
     assert_eq!(up.endpoints.len(), 3); // 2 ready pods in v1 + 1 ready pod in v2 (unready 10.0.2.2 excluded!)
     let v1_weight: u32 = up

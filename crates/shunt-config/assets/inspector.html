@@ -327,6 +327,7 @@
   .pipe-node.match { border-color: rgba(56, 189, 248, 0.45); }
   .pipe-node.upstream { border-color: rgba(52, 211, 153, 0.45); }
   .pipe-node.global { border-color: rgba(167, 139, 250, 0.4); }
+  .pipe-node.group { border-color: rgba(251, 191, 36, 0.45); }
   .pipe-arrow {
     align-self: center;
     color: var(--muted);
@@ -956,7 +957,8 @@
     if (!snap) return;
 
     const globals = snap.global_plugins || [];
-    $("global-plugins-box").innerHTML = globals.length > 0
+    const groups = snap.route_groups || [];
+    const globalsHtml = globals.length > 0
       ? `<div class="card">
           <div class="card-header"><span class="card-title">Global Plugins (${globals.length})</span><span style="color:var(--muted);font-size:11px">Secrets redacted</span></div>
           <div class="card-body">
@@ -970,6 +972,24 @@
           </div>
         </div>`
       : "";
+
+    const groupsHtml = groups.length > 0
+      ? `<div class="card">
+          <div class="card-header"><span class="card-title">Route Groups (${groups.length})</span><span style="color:var(--muted);font-size:11px">Shared plugin instances &amp; state scopes</span></div>
+          <div class="card-body">
+            <div class="pipeline">${groups.map((g) => `
+              <div class="pipe-node group">
+                <div style="font-size:10px;color:var(--amber);font-weight:700">GROUP</div>
+                <div class="mono" style="font-weight:700">${esc(g.id)}</div>
+                <div class="mono" style="font-size:10.5px;color:var(--muted)">${esc(g.path_prefix || "*")} · ${(g.routes || []).length} route(s)</div>
+                <div class="mono" style="font-size:10.5px;color:var(--muted)">${(g.plugins || []).map((p) => esc(p.name)).join(" → ") || "no plugins"}</div>
+              </div>`).join("")}
+            </div>
+          </div>
+        </div>`
+      : "";
+
+    $("global-plugins-box").innerHTML = globalsHtml + groupsHtml;
 
     const routes = snap.routes || [];
     if (routes.length === 0) {
@@ -998,9 +1018,10 @@
       }
 
       for (const rp of details) {
+        const isGroup = typeof rp.scope_id === "string" && rp.scope_id.startsWith("group:");
         nodes.push(`<div class="pipe-arrow">→</div>`);
-        nodes.push(`<div class="pipe-node">
-          <div style="font-size:10px;color:var(--muted);font-weight:700">PLUGIN</div>
+        nodes.push(`<div class="pipe-node ${isGroup ? "group" : ""}">
+          <div style="font-size:10px;color:${isGroup ? "var(--amber)" : "var(--muted)"};font-weight:700">${isGroup ? "GROUP" : "PLUGIN"}</div>
           <div class="mono" style="font-weight:700">${esc(rp.name)}</div>
           ${renderMaskBits(rp.hook_mask)}
         </div>`);
@@ -1013,9 +1034,11 @@
         <div class="mono" style="font-size:10.5px;color:var(--muted)">max_attempts=${r.max_attempts} · cap=${fmtBytes(r.max_body_bytes)}</div>
       </div>`);
 
+      const groupPill = r.group ? ` <span class="pill warn">group: ${esc(r.group)}</span>` : "";
+
       return `<div class="route-card">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
-          <div><strong class="mono" style="font-size:13.5px">${esc(r.id)}</strong> <span style="color:var(--muted);font-size:11.5px">compiled HookMask:</span></div>
+          <div><strong class="mono" style="font-size:13.5px">${esc(r.id)}</strong>${groupPill} <span style="color:var(--muted);font-size:11.5px">compiled HookMask:</span></div>
           <div>${renderMaskBits(r.hook_mask)}</div>
         </div>
         <div class="pipeline">${nodes.join("")}</div>

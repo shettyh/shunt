@@ -3,23 +3,23 @@ title: AI Plugins (shunt-ai)
 description: Complete configuration reference for all 11 built-in AI gateway plugins in shunt-ai.
 ---
 
-All 11 plugins in `shunt-ai` run strictly on top of `shunt-plugin-sdk`. See [AI Gateway Overview](/shunt/ai-gateway/overview/) for the recommended execution order.
+All 11 plugins in `shunt-ai` run strictly on top of `shunt-plugin-sdk`. Attach them on a route (`[[routes.plugins]]`) or share stateful instances across multiple `/v1/*` routes using `[[route_groups.plugins]]` with stable `id = "..."` values. See [AI Gateway Overview](/shunt/ai-gateway/overview/) for the recommended execution order.
 
 ## Plugin Summary
 
-| Plugin | Purpose |
-| --- | --- |
-| `ai-virtual-keys` | Constant-time SHA-256 virtual keys with team/org, model/provider ACLs, expiry, and quota overrides |
-| `ai-model-router` | Multi-protocol ingress, model aliases, smart routing (`priority`/`weighted`/`latency`/`cost`/`throughput`/`headroom`), capability/context guards, `/v1/models` |
-| `ai-guardrails` | Inline PII/secret redaction, prompt-injection heuristics, regex/keyword/policy filters, and external callouts (request, response & SSE) |
-| `ai-cache` | Exact-match SHA-256, streaming SSE replay, singleflight coalescing, and semantic vector caching (in-memory or Redis) |
-| `ai-token-rate-limit` | Pre-flight token estimation + post-response `AiUsage` reconciliation for RPM/TPM & concurrency caps |
-| `ai-budget` | Exact integer nano-USD spend tracking, rolling budgets (key/user/team/org/global), pre-flight reservations & pricing catalogs |
-| `ai-provider-adapter` | 17 presets, 5 dialects, multi-key pools, BYOK passthrough, Cloud IAM (AWS/GCP/Azure), `drop_params` & JSON/SSE/EventStream translation |
-| `ai-failover` | Automatic `Flow::RetryUpstream` on `429`/`5xx`/`529`, TTFT timeouts & context overflow with circuit cooldowns |
-| `ai-usage-tracker` | Token & TTFT extraction across all dialects, Prometheus metrics, OTLP GenAI spans, and `GET /v1/generation` |
-| `ai-audit` | Opt-in redacted prompt & completion audit sinks (JSONL, OTLP span events, HMAC-signed HTTP webhooks) |
-| `ai-alerts` | Non-blocking deduplicated alerts to Slack, PagerDuty, or signed HTTP webhooks |
+| Plugin | Body Handling | State / Redis | Purpose |
+| --- | --- | --- | --- |
+| `ai-virtual-keys` | Headers only | Stateless (`env:`) | Constant-time SHA-256 virtual keys with team/org, model/provider ACLs, expiry, and quota overrides |
+| `ai-model-router` | Buffers request JSON | In-memory EWMA latency/throughput/headroom | Multi-protocol ingress, model aliases, smart routing (`priority`/`weighted`/`latency`/`cost`/`throughput`/`headroom`), capability/context guards, `/v1/models` |
+| `ai-guardrails` | Request / response + streaming SSE | In-memory stats (`env:` webhooks) | Inline PII/secret redaction, prompt-injection heuristics, regex/keyword/policy filters, and external callouts |
+| `ai-cache` | Buffers cacheable JSON / replays SSE | Stateful (Memory / Redis) | Exact-match SHA-256, streaming SSE replay, singleflight coalescing, and semantic vector caching |
+| `ai-token-rate-limit` | Reads parsed request + `AiUsage` | Stateful (Memory / Redis) | Pre-flight token estimation + post-response `AiUsage` reconciliation for RPM/TPM & concurrency caps |
+| `ai-budget` | Reads parsed request + `AiUsage` | Stateful (Memory / Redis) | Exact integer nano-USD spend tracking, rolling budgets (key/user/team/org/global), pre-flight reservations & pricing catalogs |
+| `ai-provider-adapter` | Translates request JSON + streaming SSE/EventStream | In-memory key-pool & Cloud IAM token cache (`env:`) | 17 presets, 5 dialects, multi-key pools, BYOK passthrough, Cloud IAM (AWS/GCP/Azure), `drop_params` & protocol translation |
+| `ai-failover` | Headers + upstream errors | Stateful (Memory / Redis) | Automatic `Flow::RetryUpstream` on `429`/`5xx`/`529`, TTFT timeouts & context overflow with circuit cooldowns |
+| `ai-usage-tracker` | Streaming SSE / response inspect | In-memory generation store + Prometheus/OTLP | Token & TTFT extraction across all dialects, Prometheus metrics, OTLP GenAI spans, and `GET /v1/generation` |
+| `ai-audit` | Complete (redacted summaries) | Async sink (`env:` webhooks) | Opt-in redacted prompt & completion audit sinks (JSONL, OTLP span events, HMAC-signed HTTP webhooks) |
+| `ai-alerts` | Complete | In-memory dedup window (`env:` webhooks) | Non-blocking deduplicated alerts to Slack, PagerDuty, or signed HTTP webhooks |
 
 ---
 

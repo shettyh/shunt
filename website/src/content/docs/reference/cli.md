@@ -20,6 +20,39 @@ shunt check [-c FILE] [--k8s-manifest PATH] [--k8s-controller-name NAME] [--k8s-
 | `--k8s-controller-name <NAME>` | `shunt.io/gateway-controller` | `GatewayClass.spec.controllerName` filter |
 | `--k8s-namespace <NS>` | — | Optional Kubernetes namespace filter |
 
+**Example output (`shunt check -c examples/shunt-route-groups.toml`):**
+
+```text
+Configuration valid: examples/shunt-route-groups.toml
+Snapshot v1 (digest: fd1970ac5990, state: memory, telemetry: disabled)
+
+Global Plugins:
+  - request-id         mask=[on_request_headers | on_response_headers]
+  - metrics            mask=[on_complete]
+
+Route Groups (2):
+  - api_v2           [*.example.com /v2] routes=2 plugins=[ip-filter -> jwt-auth -> rate-limit]
+  - billing_api      [api.example.com /billing] routes=2 plugins=[jwt-auth -> rate-limit]
+
+Upstreams (4):
+  - billing_svc        pool=#3 [h1/h2] -> http://127.0.0.1:18084
+  - orders_svc         pool=#2 [h1/h2] -> http://127.0.0.1:18082
+  - public_svc         pool=#4 [h1/h2] -> http://127.0.0.1:18083
+  - users_svc          pool=#1 [h1/h2] -> http://127.0.0.1:18081
+
+Routes (5):
+  - api_v2_users     [GET,POST api.example.com /v2/users*] -> users_svc (attempts=2 group=api_v2, plugins=[request-id -> metrics -> ip-filter -> jwt-auth -> rate-limit])
+    HookMask: on_request_headers | on_response_headers | on_complete
+  - api_v2_orders    [ANY *.example.com /v2/orders*] -> orders_svc (attempts=3 group=api_v2, plugins=[request-id -> metrics -> ip-filter -> jwt-auth -> rate-limit -> header-rewrite])
+    HookMask: on_request_headers | on_response_headers | on_complete
+  - billing_invoices [GET,POST api.example.com /billing/invoices*] -> billing_svc (attempts=1 group=billing_api, plugins=[request-id -> metrics -> jwt-auth -> rate-limit])
+    HookMask: on_request_headers | on_response_headers | on_complete
+  - billing_subscriptions [ANY api.example.com /billing/subscriptions*] -> billing_svc (attempts=1 group=billing_api, plugins=[request-id -> metrics -> jwt-auth -> rate-limit])
+    HookMask: on_request_headers | on_response_headers | on_complete
+  - public_health    [GET * =/health] -> public_svc (attempts=1, plugins=[request-id -> metrics])
+    HookMask: on_request_headers | on_response_headers | on_complete
+```
+
 ---
 
 ## `shunt verify`
@@ -37,6 +70,12 @@ shunt verify [-c FILE | --k8s-manifest PATH] [--policy FILE] [--strict] [--forma
 | `--policy <FILE>` | — | External policy TOML file overriding `[verify]` |
 | `--format <text\|json>` | `text` | Output format |
 | `--strict` | `false` | Treat warnings as errors (non-zero exit code) |
+
+**Example output:**
+
+```text
+Verification passed: examples/shunt-route-groups.toml (0 errors, 0 warnings)
+```
 
 ---
 

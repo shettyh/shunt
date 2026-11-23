@@ -13,9 +13,14 @@ Use this matrix to pick the minimal plugin chain for your goal.
 | --- | --- | --- |
 | **Minimal reverse proxy + metrics** | `request-id` → `metrics` → `access-log` | `examples/shunt.toml` |
 | **Public REST API with auth & limits** | `ip-filter` → `jwt-auth` → `rate-limit` → `body-limit` → `compression` → `cors` | `examples/shunt-api-gateway.toml` |
+| **Multi-service API with shared auth & rate-limit bucket** | `[[route_groups.plugins]]` (`ip-filter` → `jwt-auth` → `rate-limit`) + per-route `header-rewrite` | `examples/shunt-route-groups.toml` |
 | **Zero-trust service-to-service (mTLS)** | `[server.tls]` (`client_ca`) + `mtls-auth` → `otel-trace` → `metrics` | `examples/shunt-api-gateway.toml` |
 | **Legacy URL migration** | `redirect` (on legacy route) + `header-rewrite` (on v2 route) | `examples/shunt-api-gateway.toml` |
 | **Kubernetes Gateway API ingress** | `shunt run --k8s-gateway` + `shunt.io/plugins` annotations | `examples/k8s-gateway-api.yaml` |
+
+:::tip[Share State Across Sibling Routes with `[[route_groups]]`]
+If multiple routes share the same prefix, backend, or security boundary, attach `jwt-auth` and `rate-limit` on `[[route_groups.plugins]]` instead of duplicating them on each `[[routes]]` entry. That shares one warm JWKS cache and one rate-limit bucket across every route in the group.
+:::
 
 ## AI Gateway Recipes (`shunt-ai`)
 
