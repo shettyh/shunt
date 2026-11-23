@@ -161,7 +161,8 @@ impl HttpPlugin for PoweredByPlugin {
 
 ## Documentation & Development
 
-- **Docs**: [Plugin, Admin API & Examples Reference](docs/reference.md) · [Product Vision](docs/vision.md) · [Core Design](docs/design.md) · [Architecture RFCs (0001–0019)](rfcs/README.md) · [Benchmarks](benches/README.md)
+- **Docs Website**: [shettyh.github.io/shunt](https://shettyh.github.io/shunt/) (source in [`website/`](website/))
+- **Repo Docs**: [Plugin, Admin API & Examples Reference](docs/reference.md) · [Product Vision](docs/vision.md) · [Core Design](docs/design.md) · [Architecture RFCs (0001–0020)](rfcs/README.md) · [Benchmarks](benches/README.md)
 
 ```bash
 cargo fmt --all -- --check

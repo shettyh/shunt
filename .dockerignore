@@ -4,5 +4,6 @@
 target
 docs
 rfcs
+website
 benches/results
 *.log

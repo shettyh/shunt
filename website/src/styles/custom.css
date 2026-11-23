@@ -1,0 +1,304 @@
+/* Shunt Docs Theme — Unified Quiet Editorial Minimalism */
+
+:root {
+  --sl-font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --sl-font-serif: 'Source Serif 4', Georgia, Cambria, 'Times New Roman', serif;
+  --sl-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Unified crisp white canvas across header, sidebar, and main content */
+  --sl-color-bg: #ffffff;
+  --sl-color-bg-nav: #ffffff;
+  --sl-color-bg-sidebar: #ffffff;
+  --sl-color-bg-inline-code: #f3f4f6;
+  --sl-color-hairline-light: #f1f3f5;
+  --sl-color-hairline: #e5e7eb;
+
+  /* Quiet slate-ink accent matching the landing page */
+  --sl-color-accent-low: #f3f4f6;
+  --sl-color-accent: #1d4ed8;
+  --sl-color-accent-high: #111827;
+
+  --sl-color-white: #111827;
+  --sl-color-gray-1: #1f2937;
+  --sl-color-gray-2: #374151;
+  --sl-color-gray-3: #6b7280;
+  --sl-color-gray-4: #9ca3af;
+  --sl-color-gray-5: #e5e7eb;
+  --sl-color-gray-6: #f8f9fa;
+
+  --shunt-code-bg: #f6f8fa;
+  --shunt-code-header: #eff2f5;
+  --shunt-code-border: #e5e7eb;
+
+  --sl-text-body: 0.955rem;
+  --sl-line-height: 1.75;
+  --sl-content-width: 47rem;
+  --sl-sidebar-width: 16.5rem;
+}
+
+:root[data-theme='dark'] {
+  --sl-color-bg: #0d1117;
+  --sl-color-bg-nav: #0d1117;
+  --sl-color-bg-sidebar: #0d1117;
+  --sl-color-bg-inline-code: #1c2128;
+  --sl-color-hairline-light: #1e242c;
+  --sl-color-hairline: #262c36;
+
+  --sl-color-accent-low: #161b22;
+  --sl-color-accent: #60a5fa;
+  --sl-color-accent-high: #f0f6fc;
+
+  --sl-color-white: #f0f6fc;
+  --sl-color-gray-1: #e6edf3;
+  --sl-color-gray-2: #c9d1d9;
+  --sl-color-gray-3: #8b949e;
+  --sl-color-gray-4: #6e7681;
+  --sl-color-gray-5: #262c36;
+  --sl-color-gray-6: #161b22;
+
+  --shunt-code-bg: #161b22;
+  --shunt-code-header: #1c2128;
+  --shunt-code-border: #262c36;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Editorial serif page titles, crisp Inter prose */
+h1#_top {
+  font-family: var(--sl-font-serif);
+  font-weight: 500;
+  font-size: clamp(2rem, 3.1vw, 2.55rem);
+  line-height: 1.18;
+  letter-spacing: -0.02em;
+  color: var(--sl-color-white);
+}
+
+.sl-markdown-content {
+  color: var(--sl-color-gray-2);
+  font-size: var(--sl-text-body);
+  line-height: var(--sl-line-height);
+}
+
+.sl-markdown-content h2 {
+  font-family: var(--sl-font);
+  font-weight: 600;
+  font-size: 1.3rem;
+  letter-spacing: -0.02em;
+  color: var(--sl-color-white);
+  margin-top: 2.5rem;
+  padding-bottom: 0.45rem;
+  border-bottom: 1px solid var(--sl-color-hairline-light);
+}
+
+.sl-markdown-content h3 {
+  font-family: var(--sl-font);
+  font-weight: 600;
+  font-size: 1.06rem;
+  letter-spacing: -0.015em;
+  color: var(--sl-color-white);
+  margin-top: 1.8rem;
+}
+
+.sl-markdown-content p,
+.sl-markdown-content li {
+  line-height: 1.75;
+}
+
+.sl-markdown-content strong {
+  color: var(--sl-color-white);
+  font-weight: 600;
+}
+
+/* Clean, neutral inline code */
+.sl-markdown-content :not(pre) > code {
+  font-family: var(--sl-font-mono);
+  font-size: 0.84em;
+  font-weight: 400;
+  color: var(--sl-color-gray-1);
+  background: var(--sl-color-bg-inline-code);
+  padding: 0.15em 0.4em;
+  border-radius: 5px;
+  border: none;
+}
+
+/* Expressive code spacing */
+.expressive-code {
+  margin-block: 1.4rem !important;
+}
+
+/* Minimal Swiss tables */
+.sl-markdown-content table {
+  display: table;
+  width: 100%;
+  font-size: 0.89rem;
+  font-variant-numeric: tabular-nums;
+  border-collapse: collapse;
+  margin-block: 1.5rem;
+}
+
+.sl-markdown-content thead th {
+  font-weight: 600;
+  font-size: 0.78rem;
+  color: var(--sl-color-gray-3);
+  border-bottom: 1px solid var(--sl-color-hairline);
+  padding: 0.65rem 0.85rem;
+  text-align: left;
+  background: transparent;
+}
+
+.sl-markdown-content tbody td {
+  padding: 0.68rem 0.85rem;
+  border-bottom: 1px solid var(--sl-color-hairline-light);
+  vertical-align: top;
+}
+
+.sl-markdown-content tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* Unified Top Header */
+.site-title {
+  font-family: var(--sl-font);
+  font-weight: 600;
+  font-size: 1.05rem;
+  letter-spacing: -0.02em;
+  color: var(--sl-color-white) !important;
+}
+
+header.header {
+  border-bottom: 1px solid var(--sl-color-hairline);
+  background: color-mix(in srgb, var(--sl-color-bg-nav) 92%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+/* Unified Quiet Sidebar — matches main canvas & landing aesthetics */
+.sidebar-pane {
+  background: var(--sl-color-bg-sidebar);
+  border-inline-end: 1px solid var(--sl-color-hairline);
+}
+
+.sidebar-content {
+  padding: 1.1rem 0.9rem !important;
+}
+
+.sidebar-content .top-level > li + li {
+  margin-top: 1.15rem;
+}
+
+.sidebar-content summary .large {
+  font-size: 0.74rem !important;
+  font-weight: 600 !important;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--sl-color-gray-3) !important;
+}
+
+.sidebar-content ul ul {
+  border-inline-start: 1px solid var(--sl-color-hairline-light);
+  margin-inline-start: 0.4rem;
+  padding-inline-start: 0.5rem;
+}
+
+.sidebar-content a {
+  border-radius: 6px;
+  font-size: 0.855rem !important;
+  line-height: 1.45 !important;
+  padding: 0.34rem 0.6rem !important;
+  color: var(--sl-color-gray-2);
+  font-weight: 450;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.sidebar-content a:hover {
+  background: var(--sl-color-gray-6);
+  color: var(--sl-color-white);
+}
+
+.sidebar-content a[aria-current='page'],
+.sidebar-content a[aria-current='page']:hover {
+  background: var(--sl-color-accent-low) !important;
+  color: var(--sl-color-white) !important;
+  font-weight: 600 !important;
+}
+
+/* Quiet Right Table of Contents */
+.right-sidebar-panel {
+  border-inline-start: 1px solid var(--sl-color-hairline-light);
+}
+
+.right-sidebar-panel h2 {
+  font-size: 0.74rem !important;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--sl-color-gray-3);
+}
+
+/* Compact, Refined Previous / Next Pagination Links */
+.pagination-links {
+  gap: 0.85rem !important;
+  margin-top: 2.5rem !important;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--sl-color-hairline-light);
+}
+
+.pagination-links a {
+  padding: 0.72rem 0.95rem !important;
+  border-radius: 8px !important;
+  border: 1px solid var(--sl-color-hairline) !important;
+  box-shadow: none !important;
+  background: var(--sl-color-bg) !important;
+  gap: 0.5rem !important;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.pagination-links a:hover {
+  border-color: var(--sl-color-gray-4) !important;
+  background: var(--sl-color-gray-6) !important;
+}
+
+.pagination-links a > span {
+  font-size: 0.72rem !important;
+  line-height: 1.35 !important;
+  color: var(--sl-color-gray-3) !important;
+  gap: 0.2rem;
+}
+
+.pagination-links .link-title {
+  font-family: var(--sl-font) !important;
+  font-size: 0.88rem !important;
+  font-weight: 600 !important;
+  line-height: 1.35 !important;
+  color: var(--sl-color-white) !important;
+}
+
+.pagination-links svg {
+  width: 0.95rem !important;
+  height: 0.95rem !important;
+  color: var(--sl-color-gray-3) !important;
+}
+
+/* Callouts / Asides */
+.starlight-aside {
+  border-radius: 8px;
+  border-inline-start-width: 3px;
+}
+
+/* Inline SVG diagram frames */
+.shunt-diagram-frame {
+  margin: 1.6rem 0;
+  padding: 1.5rem;
+  border-radius: 10px;
+  border: 1px solid var(--sl-color-hairline);
+  background: var(--sl-color-gray-6);
+  overflow-x: auto;
+}
+
+.shunt-diagram-frame svg {
+  display: block;
+  margin: 0 auto;
+  max-width: 100%;
+  height: auto;
+}

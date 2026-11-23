@@ -1,0 +1,17 @@
+{
+  "name": "shunt-docs",
+  "type": "module",
+  "version": "0.1.2",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/generate-llms.mjs && astro dev --force",
+    "build": "node scripts/generate-llms.mjs && astro build --force",
+    "preview": "astro preview",
+    "check": "astro check",
+    "llms": "node scripts/generate-llms.mjs"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.43.1",
+    "astro": "^7.4.13"
+  }
+}

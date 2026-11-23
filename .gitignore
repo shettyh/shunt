@@ -10,3 +10,8 @@
 /fuzz/artifacts/
 specs/tla/*_TTrace_*
 /states/
+/website/node_modules/
+/website/dist/
+/website/.astro/
+/website/public/llms.txt
+/website/public/llms-full.txt
