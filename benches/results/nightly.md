@@ -6,35 +6,35 @@
 
 | Field | Value |
 | --- | --- |
-| **Timestamp** | 2026-11-23 02:18:50 UTC |
-| **Commit** | `976fee1` (`976fee1eb33a1a5c9ce103226824d42c7a54a386`) |
+| **Timestamp** | 2026-11-24 02:19:17 UTC |
+| **Commit** | `3932232` (`393223252558a5ef3200b0fcecea7f115fbf85da`) |
 | **Profile / Suites** | `ci` · suites: `all` · competitors: `none` |
 | **Toolchain** | `rustc 1.100.0 (0ef1bc386 2026-11-09)` |
 | **OS / Kernel** | `Linux 7.0.0-1020-azure x86_64` |
-| **CPU** | AMD EPYC 9V45 96-Core Processor (4 cores) |
+| **CPU** | INTEL(R) XEON(R) PLATINUM 8573C (4 cores) |
 | **HTTP Params** | `c=64`, `duration=5s`, `warmup=2s` |
 | **SSE Params** | `c=500` (med `200`), `chunks=20`, `interval=25ms` |
-| **Gateway Versions** | shunt 0.0.1 |
+| **Gateway Versions** | shunt 0.1.2 |
 
 ## Footprint & Cold Start
 
 | Gateway / Profile | Cold Start | Idle RSS | Processes |
 | --- | ---: | ---: | ---: |
-| Shunt (raw) | **26 ms** | 10.8 MB | 1 |
-| Shunt (TLS 1.3 + H2) | **27 ms** | 11.3 MB | 1 |
-| Shunt (3-plugin) | **27 ms** | 11.7 MB | 1 |
-| Shunt (JWT + Security) | **31 ms** | 11.6 MB | 1 |
-| Shunt (JWT + zstd) | **31 ms** | 11.6 MB | 1 |
-| Shunt (200 routes + LB) | **27 ms** | 12.2 MB | 1 |
-| Shunt (SSE passthrough) | **29 ms** | 11.1 MB | 1 |
-| Shunt AI (3-plugin) | **28 ms** | 12.5 MB | 1 |
-| Shunt AI Governed (8-plugin) | **29 ms** | 12.8 MB | 1 |
-| Shunt AI Guardrailed | **27 ms** | 13.9 MB | 1 |
-| Shunt AI Cached | **27 ms** | 13.1 MB | 1 |
-| Shunt AI Multi-Protocol | **26 ms** | 12.8 MB | 1 |
-| Shunt AI Failover | **27 ms** | 13.1 MB | 1 |
-| Shunt MCP (5-plugin) | **29 ms** | 13.0 MB | 1 |
-| Shunt (ArcSwap Reload) | **26 ms** | 11.5 MB | 1 |
+| Shunt (raw) | **29 ms** | 11.2 MB | 1 |
+| Shunt (TLS 1.3 + H2) | **29 ms** | 11.5 MB | 1 |
+| Shunt (3-plugin) | **31 ms** | 11.6 MB | 1 |
+| Shunt (JWT + Security) | **29 ms** | 11.2 MB | 1 |
+| Shunt (JWT + zstd) | **29 ms** | 11.2 MB | 1 |
+| Shunt (200 routes + LB) | **29 ms** | 12.2 MB | 1 |
+| Shunt (SSE passthrough) | **29 ms** | 11.0 MB | 1 |
+| Shunt AI (3-plugin) | **29 ms** | 12.7 MB | 1 |
+| Shunt AI Governed (8-plugin) | **29 ms** | 13.1 MB | 1 |
+| Shunt AI Guardrailed | **29 ms** | 13.9 MB | 1 |
+| Shunt AI Cached | **29 ms** | 13.3 MB | 1 |
+| Shunt AI Multi-Protocol | **31 ms** | 12.8 MB | 1 |
+| Shunt AI Failover | **30 ms** | 12.8 MB | 1 |
+| Shunt MCP (5-plugin) | **30 ms** | 13.1 MB | 1 |
+| Shunt (ArcSwap Reload) | **30 ms** | 11.6 MB | 1 |
 
 ## 1. API Gateway Suite
 
@@ -42,20 +42,20 @@
 
 | Workload | Gateway | Throughput | p50 | p99 | p99.9 | CPU / 1k | RSS | Errors |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Raw HTTP/1.1 Passthrough (256B, `HookMask::EMPTY`) | Shunt (raw) | **74,556.1 req/s** | 824 µs | 1.65 ms | 2.15 ms | 34.4 ms | 18.3 MB | 0 |
-| 256 KB Streaming Passthrough (Zero-Copy) | Shunt (raw) | **12,927.0 req/s** | 4.74 ms | 9.54 ms | 12.11 ms | 187.9 ms | 42.9 MB | 0 |
-| HTTPS + HTTP/2 Multiplexed Passthrough (TLS 1.3) | Shunt (TLS 1.3 + H2) | **72,975.0 req/s** | 848 µs | 1.67 ms | 2.23 ms | 39.3 ms | 18.2 MB | 0 |
-| 3-Plugin Chain (`request-id` + `bearer-auth` + `rate-limit`) | Shunt (3-plugin) | **72,032.8 req/s** | 859 µs | 1.65 ms | 2.13 ms | 37.9 ms | 19.3 MB | 0 |
-| Auth Rejection Fast-Path (401, Zero Upstream I/O) | Shunt (3-plugin) | **162,202.7 req/s** | 373 µs | 781 µs | 1.15 ms | 13.8 ms | 19.4 MB | 0 |
-| JWT HS256 & Security Chain (`ip-filter` + `jwt-auth` + `body-limit`) | Shunt (JWT + Security) | **53,130.4 req/s** | 1.16 ms | 2.23 ms | 2.99 ms | 55.0 ms | 19.2 MB | 0 |
-| JWT + Security + Streaming `zstd` (~4.3 KB `/json`) | Shunt (JWT + zstd) | **38,541.8 req/s** | 1.62 ms | 3.05 ms | 3.83 ms | 89.4 ms | 27.7 MB | 0 |
-| 200-Route Table + 3-Endpoint Weighted LB + Health Probes | Shunt (200 routes + LB) | **73,196.5 req/s** | 825 µs | 2.11 ms | 3.21 ms | 37.3 ms | 22.9 MB | 0 |
+| Raw HTTP/1.1 Passthrough (256B, `HookMask::EMPTY`) | Shunt (raw) | **62,820.6 req/s** | 992 µs | 1.86 ms | 2.32 ms | 46.8 ms | 18.3 MB | 0 |
+| 256 KB Streaming Passthrough (Zero-Copy) | Shunt (raw) | **10,567.7 req/s** | 5.81 ms | 11.54 ms | 14.24 ms | 228.8 ms | 49.5 MB | 0 |
+| HTTPS + HTTP/2 Multiplexed Passthrough (TLS 1.3) | Shunt (TLS 1.3 + H2) | **53,725.9 req/s** | 1.15 ms | 2.21 ms | 2.75 ms | 57.4 ms | 18.1 MB | 0 |
+| 3-Plugin Chain (`request-id` + `bearer-auth` + `rate-limit`) | Shunt (3-plugin) | **58,231.8 req/s** | 1.07 ms | 1.97 ms | 2.42 ms | 53.9 ms | 18.4 MB | 0 |
+| Auth Rejection Fast-Path (401, Zero Upstream I/O) | Shunt (3-plugin) | **147,590.7 req/s** | 422 µs | 831 µs | 1.09 ms | 14.4 ms | 18.6 MB | 0 |
+| JWT HS256 & Security Chain (`ip-filter` + `jwt-auth` + `body-limit`) | Shunt (JWT + Security) | **42,506.5 req/s** | 1.47 ms | 2.68 ms | 3.33 ms | 81.3 ms | 18.5 MB | 0 |
+| JWT + Security + Streaming `zstd` (~4.3 KB `/json`) | Shunt (JWT + zstd) | **23,962.5 req/s** | 2.60 ms | 4.92 ms | 6.84 ms | 169.5 ms | 26.4 MB | 0 |
+| 200-Route Table + 3-Endpoint Weighted LB + Health Probes | Shunt (200 routes + LB) | **62,409.7 req/s** | 993 µs | 2.06 ms | 2.81 ms | 48.9 ms | 22.4 MB | 0 |
 
 ### High-Concurrency SSE Passthrough
 
 | Workload | Gateway | Concurrency | Completed / Failed | Chunks/s | TTFC p50 / p99 | Wall Time | RSS |
 | --- | --- | ---: | :---: | ---: | ---: | ---: | ---: |
-| SSE Passthrough (20 chunks @ 25ms) | Shunt (SSE passthrough) | 500 | **500 / 0** | 18,481.4/s | 29.89 ms / 41.36 ms | 0.57s | 33.6 MB |
+| SSE Passthrough (20 chunks @ 25ms) | Shunt (SSE passthrough) | 500 | **500 / 0** | 18,427.9/s | 31.50 ms / 37.85 ms | 0.57s | 33.4 MB |
 
 ## 2. AI Gateway Suite
 
@@ -63,35 +63,35 @@
 
 | Workload | Gateway | Throughput | p50 | p99 | p99.9 | CPU / 1k | RSS | Errors |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| OpenAI Chat Passthrough (~70B prompt) | Shunt AI (3-plugin) | **47,769.8 req/s** | 1.29 ms | 2.51 ms | 3.21 ms | 64.2 ms | 20.3 MB | 0 |
-| ↳ | Shunt AI Governed (8-plugin) | **42,729.5 req/s** | 1.45 ms | 2.78 ms | 3.50 ms | 76.8 ms | 20.7 MB | 0 |
-| Anthropic <-> OpenAI Translate (~70B prompt) | Shunt AI (3-plugin) | **44,584.9 req/s** | 1.39 ms | 2.69 ms | 3.40 ms | 72.9 ms | 21.5 MB | 0 |
-| ↳ | Shunt AI Governed (8-plugin) | **38,562.5 req/s** | 1.61 ms | 3.06 ms | 3.83 ms | 89.0 ms | 21.6 MB | 0 |
-| Realistic 4 KB Multi-Turn Translate (Governed) | Shunt AI Governed (8-plugin) | **23,463.2 req/s** | 2.66 ms | 4.89 ms | 5.80 ms | 162.7 ms | 22.0 MB | 0 |
-| Inline Guardrails — Clean 4 KB Prompt (Zero Violations) | Shunt AI Guardrailed | **21,196.4 req/s** | 2.96 ms | 5.42 ms | 6.50 ms | 193.0 ms | 24.9 MB | 0 |
-| Inline Guardrails — Active PII/Secret Redaction (Req + Resp) | Shunt AI Guardrailed | **24,196.1 req/s** | 2.58 ms | 4.74 ms | 5.64 ms | 166.8 ms | 25.9 MB | 0 |
-| Inline Guardrails — Prompt-Injection Block (400 Pre-Upstream) | Shunt AI Guardrailed | **110,773.1 req/s** | 576 µs | 1.22 ms | 1.87 ms | 29.3 ms | 26.4 MB | 0 |
-| AI Cache — 100% Exact-Match Hit (Zero Upstream I/O) | Shunt AI Cached | **115,852.6 req/s** | 543 µs | 1.20 ms | 1.83 ms | 27.6 ms | 21.4 MB | 0 |
-| AI Cache — 100% Miss Path (Key Hash + Capture + Evict) | Shunt AI Cached | **38,595.7 req/s** | 1.61 ms | 3.16 ms | 3.91 ms | 88.4 ms | 28.3 MB | 0 |
-| Multi-Protocol Ingress (`POST /v1/messages` -> OpenAI) | Shunt AI Multi-Protocol | **44,788.3 req/s** | 1.39 ms | 2.62 ms | 3.25 ms | 73.8 ms | 20.3 MB | 0 |
-| Multi-Protocol Ingress (`POST /v1/responses` -> Anthropic) | Shunt AI Multi-Protocol | **40,395.8 req/s** | 1.54 ms | 2.91 ms | 3.59 ms | 88.0 ms | 21.0 MB | 0 |
-| AWS Bedrock Converse + Pure-Rust SigV4 Signing | Shunt AI Multi-Protocol | **40,950.9 req/s** | 1.52 ms | 2.85 ms | 3.45 ms | 87.3 ms | 21.6 MB | 0 |
-| Upstream 503 Failover & Circuit Breaker (`ai-failover`) | Shunt AI Failover | **45,898.9 req/s** | 1.35 ms | 2.56 ms | 3.18 ms | 72.4 ms | 22.2 MB | 0 |
+| OpenAI Chat Passthrough (~70B prompt) | Shunt AI (3-plugin) | **33,231.0 req/s** | 1.87 ms | 3.53 ms | 4.41 ms | 108.1 ms | 20.1 MB | 0 |
+| ↳ | Shunt AI Governed (8-plugin) | **25,799.7 req/s** | 2.43 ms | 4.34 ms | 5.09 ms | 146.9 ms | 20.8 MB | 0 |
+| Anthropic <-> OpenAI Translate (~70B prompt) | Shunt AI (3-plugin) | **28,313.1 req/s** | 2.21 ms | 4.01 ms | 4.79 ms | 133.9 ms | 20.6 MB | 0 |
+| ↳ | Shunt AI Governed (8-plugin) | **21,966.5 req/s** | 2.87 ms | 5.05 ms | 5.93 ms | 180.5 ms | 21.4 MB | 0 |
+| Realistic 4 KB Multi-Turn Translate (Governed) | Shunt AI Governed (8-plugin) | **13,023.3 req/s** | 4.84 ms | 8.47 ms | 10.12 ms | 324.8 ms | 22.0 MB | 0 |
+| Inline Guardrails — Clean 4 KB Prompt (Zero Violations) | Shunt AI Guardrailed | **12,941.8 req/s** | 4.86 ms | 8.51 ms | 10.02 ms | 339.9 ms | 24.5 MB | 0 |
+| Inline Guardrails — Active PII/Secret Redaction (Req + Resp) | Shunt AI Guardrailed | **13,946.0 req/s** | 4.50 ms | 8.13 ms | 10.08 ms | 316.4 ms | 25.8 MB | 0 |
+| Inline Guardrails — Prompt-Injection Block (400 Pre-Upstream) | Shunt AI Guardrailed | **83,732.0 req/s** | 734 µs | 1.75 ms | 3.02 ms | 46.6 ms | 26.5 MB | 0 |
+| AI Cache — 100% Exact-Match Hit (Zero Upstream I/O) | Shunt AI Cached | **87,119.3 req/s** | 704 µs | 1.66 ms | 3.02 ms | 44.3 ms | 21.3 MB | 0 |
+| AI Cache — 100% Miss Path (Key Hash + Capture + Evict) | Shunt AI Cached | **22,506.4 req/s** | 2.79 ms | 4.99 ms | 5.93 ms | 171.8 ms | 27.8 MB | 0 |
+| Multi-Protocol Ingress (`POST /v1/messages` -> OpenAI) | Shunt AI Multi-Protocol | **27,788.3 req/s** | 2.25 ms | 4.10 ms | 4.94 ms | 135.7 ms | 20.2 MB | 0 |
+| Multi-Protocol Ingress (`POST /v1/responses` -> Anthropic) | Shunt AI Multi-Protocol | **23,886.6 req/s** | 2.62 ms | 4.80 ms | 5.77 ms | 169.0 ms | 20.6 MB | 0 |
+| AWS Bedrock Converse + Pure-Rust SigV4 Signing | Shunt AI Multi-Protocol | **24,147.9 req/s** | 2.60 ms | 4.60 ms | 5.38 ms | 169.2 ms | 21.5 MB | 0 |
+| Upstream 503 Failover & Circuit Breaker (`ai-failover`) | Shunt AI Failover | **28,921.5 req/s** | 2.16 ms | 3.92 ms | 4.65 ms | 130.4 ms | 20.6 MB | 0 |
 
 ### Singleflight Thundering-Herd Coalescing
 
 | Workload | Gateway | Concurrency | Ok / Errors | p50 | p99 | Wall Time | RSS |
 | --- | --- | ---: | :---: | ---: | ---: | ---: | ---: |
-| AI Cache — Singleflight Wave (100 Concurrent Identical Misses) | Shunt AI Cached | 100 | **100 / 0** | 2.69 ms | 3.50 ms | 0.004s | 28.6 MB |
+| AI Cache — Singleflight Wave (100 Concurrent Identical Misses) | Shunt AI Cached | 100 | **100 / 0** | 2.68 ms | 4.25 ms | 0.005s | 28.3 MB |
 
 ### High-Concurrency AI SSE Streaming
 
 | Workload | Gateway | Concurrency | Completed / Failed | Chunks/s | TTFC p50 / p99 | Wall Time | RSS |
 | --- | --- | ---: | :---: | ---: | ---: | ---: | ---: |
-| Live SSE Translation (`Anthropic -> OpenAI`) | Shunt AI (3-plugin) | 500 | **500 / 0** | 17,687.2/s | 33.41 ms / 42.22 ms | 0.65s | 41.7 MB |
-| ↳ | Shunt AI Governed (8-plugin) | 500 | **500 / 0** | 17,801.1/s | 25.41 ms / 33.72 ms | 0.65s | 43.8 MB |
-| Guardrailed SSE (`Anthropic -> OpenAI` + 64-char Holdback Scan) | Shunt AI Guardrailed | 500 | **500 / 0** | 8,554.6/s | 29.02 ms / 36.70 ms | 0.64s | 47.6 MB |
-| AI Cache — Streaming SSE Cache Replay (Zero Upstream I/O) | Shunt AI Cached | 500 | **500 / 0** | 20,571.7/s | 12.53 ms / 16.90 ms | 24.0 ms | 31.7 MB |
+| Live SSE Translation (`Anthropic -> OpenAI`) | Shunt AI (3-plugin) | 500 | **500 / 0** | 17,734.4/s | 27.71 ms / 38.48 ms | 0.65s | 41.8 MB |
+| ↳ | Shunt AI Governed (8-plugin) | 500 | **500 / 0** | 17,754.7/s | 29.88 ms / 40.21 ms | 0.65s | 44.6 MB |
+| Guardrailed SSE (`Anthropic -> OpenAI` + 64-char Holdback Scan) | Shunt AI Guardrailed | 500 | **500 / 0** | 8,458.8/s | 30.03 ms / 42.23 ms | 0.65s | 47.7 MB |
+| AI Cache — Streaming SSE Cache Replay (Zero Upstream I/O) | Shunt AI Cached | 500 | **500 / 0** | 17,325.2/s | 14.72 ms / 22.27 ms | 29.0 ms | 31.6 MB |
 
 ## 3. MCP & Agentic Gateway Suite
 
@@ -99,17 +99,17 @@
 
 | Workload | Gateway | Throughput | p50 | p99 | p99.9 | CPU / 1k | RSS | Errors |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Virtual 2-Server `tools/list` + ACL Tool Filtering (Warm Catalog) | Shunt MCP (5-plugin) | **32,314.8 req/s** | 1.94 ms | 4.30 ms | 5.18 ms | 151.2 ms | 16.8 MB | 0 |
-| Governed `tools/call` (Auth + Route + SQL/Secret Guardrails + Limits) | Shunt MCP (5-plugin) | **46,246.0 req/s** | 1.35 ms | 2.49 ms | 3.09 ms | 76.6 ms | 38.5 MB | 0 |
-| MCP Guardrails — Destructive SQL Argument Block (403 Pre-Upstream) | Shunt MCP (5-plugin) | **114,623.5 req/s** | 552 µs | 1.22 ms | 2.13 ms | 27.4 ms | 38.9 MB | 0 |
-| MCP Guardrails — Inbound Indirect Prompt-Injection Block (JSON-RPC -32005) | Shunt MCP (5-plugin) | **45,300.5 req/s** | 1.37 ms | 2.56 ms | 3.19 ms | 78.7 ms | 39.7 MB | 0 |
-| MCP Agent Loop Breaker — Identical-Call Rejection (429 Fast-Path) | Shunt MCP (5-plugin) | **106,473.4 req/s** | 601 µs | 1.25 ms | 2.58 ms | 33.7 ms | 39.8 MB | 0 |
+| Virtual 2-Server `tools/list` + ACL Tool Filtering (Warm Catalog) | Shunt MCP (5-plugin) | **17,506.8 req/s** | 3.54 ms | 7.81 ms | 9.60 ms | 285.4 ms | 17.2 MB | 0 |
+| Governed `tools/call` (Auth + Route + SQL/Secret Guardrails + Limits) | Shunt MCP (5-plugin) | **26,823.0 req/s** | 2.34 ms | 4.19 ms | 5.72 ms | 149.1 ms | 34.1 MB | 0 |
+| MCP Guardrails — Destructive SQL Argument Block (403 Pre-Upstream) | Shunt MCP (5-plugin) | **89,616.0 req/s** | 684 µs | 1.64 ms | 3.04 ms | 43.9 ms | 34.8 MB | 0 |
+| MCP Guardrails — Inbound Indirect Prompt-Injection Block (JSON-RPC -32005) | Shunt MCP (5-plugin) | **26,182.4 req/s** | 2.40 ms | 4.15 ms | 5.02 ms | 156.4 ms | 39.1 MB | 0 |
+| MCP Agent Loop Breaker — Identical-Call Rejection (429 Fast-Path) | Shunt MCP (5-plugin) | **66,440.3 req/s** | 938 µs | 2.09 ms | 2.75 ms | 60.5 ms | 39.4 MB | 0 |
 
 ### Streamable HTTP SSE Tool Calls
 
 | Workload | Gateway | Concurrency | Completed / Failed | Chunks/s | TTFC p50 / p99 | Wall Time | RSS |
 | --- | --- | ---: | :---: | ---: | ---: | ---: | ---: |
-| MCP Streamable HTTP SSE `tools/call` (Governed) | Shunt MCP (5-plugin) | 200 | **200 / 0** | 7,730.7/s | 15.21 ms / 17.85 ms | 0.54s | 44.9 MB |
+| MCP Streamable HTTP SSE `tools/call` (Governed) | Shunt MCP (5-plugin) | 200 | **200 / 0** | 7,689.6/s | 12.80 ms / 17.68 ms | 0.55s | 45.0 MB |
 
 ## 4. Stability, Hot-Reload & Memory Guardrails
 
@@ -117,10 +117,10 @@
 
 | Workload | Throughput | p50 | p99 | Reloads Ok / Fail | Request Errors | RSS | Status |
 | --- | ---: | ---: | ---: | :---: | ---: | ---: | :---: |
-| 3-Plugin HTTP Under Continuous `POST /reload` (every 500ms) | **76,273.7 req/s** | 814 µs | 1.55 ms | 9 / 0 | 0 | 18.8 MB | **PASS** |
+| 3-Plugin HTTP Under Continuous `POST /reload` (every 500ms) | **58,691.9 req/s** | 1.07 ms | 1.95 ms | 9 / 0 | 0 | 19.4 MB | **PASS** |
 
 ### Steady-State Memory Stability (Guardrail: delta <= 20.0 MB)
 
 | Workload | Burst 1 Reqs / RSS | Burst 2 Reqs / RSS | RSS Delta | Status |
 | --- | ---: | ---: | ---: | :---: |
-| Shunt-AI 8-Plugin Governed (Burst 1 OpenAI -> Burst 2 Anthropic on same PID) | 222,436 / 21.5 MB | 199,438 / 22.3 MB | +0.8 MB | **PASS** |
+| Shunt-AI 8-Plugin Governed (Burst 1 OpenAI -> Burst 2 Anthropic on same PID) | 128,470 / 20.9 MB | 110,502 / 21.5 MB | +0.6 MB | **PASS** |
