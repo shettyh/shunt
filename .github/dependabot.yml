@@ -23,6 +23,9 @@ updates:
       time: "06:00"
       timezone: "UTC"
     open-pull-requests-limit: 5
+    ignore:
+      # Toolchain channels (`stable`, `nightly`) and pinned MSRV (`1.91`) are managed explicitly.
+      - dependency-name: "dtolnay/rust-toolchain"
     groups:
       github-actions:
         patterns:
