@@ -42,7 +42,9 @@ env:
 jobs:
   benchmark:
     name: Nightly Shunt Benchmarks (API, AI, MCP & Soak)
-    runs-on: ubuntu-latest
+    # Use the homogeneous ARM64 runner (Azure Cobalt 100 / Neoverse-N2, 4 vCPU, no SMT)
+    # instead of `ubuntu-latest`, which schedules across mixed AMD EPYC / Intel Xeon SKUs.
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
 
