@@ -28,6 +28,11 @@ This directory contains Request for Comments (RFC) design documents for **Shunt*
 | [0020](./0020-unified-comprehensive-benchmarks.md) | Unified & Comprehensive Gateway Benchmark Suite (API, AI & MCP) | Implemented | `benches/shunt-bench`, `benches/configs/`, `benches/scripts/`, `benches/results/` |
 | [0021](./0021-route-groups.md) | Route Groups & Shared Plugin Chains | Implemented | `shunt-config`, `shunt-cli`, `shunt-test`, `specs/`, `examples/` |
 | [0022](./0022-path-templates-and-regex-routing.md) | Path Templates, Regex Routing & Captured Path Parameters | Implemented | `shunt-plugin-sdk`, `shunt-engine`, `shunt-plugins`, `shunt-config`, `specs/`, `examples/`, `fuzz/` |
+| [0023](./0023-shunt-console-architecture-and-control-plane.md) | `shunt-console`: Core Architecture, Control-Plane Protocol & Dynamic State Sync | Draft | `shunt-plugin-sdk`, `shunt-config`, `shunt-cli`, `console/` |
+| [0024](./0024-shunt-console-fleet-and-config-studio.md) | `shunt-console`: Fleet Operations & Visual Config Studio | Draft | `shunt-config`, `console/` |
+| [0025](./0025-shunt-console-ai-governance-and-finops.md) | `shunt-console`: AI Gateway Governance, Virtual Keys & FinOps Ledger | Draft | `shunt-ai`, `console/` |
+| [0026](./0026-shunt-console-mcp-governance-and-approvals.md) | `shunt-console`: MCP Governance, Tool ACLs & Human-in-the-Loop Approvals | Draft | `shunt-mcp`, `shunt-plugin-sdk`, `console/` |
+| [0027](./0027-shunt-console-observability-and-audit.md) | `shunt-console`: Unified Fleet Observability, Trace Explorer & Audit Center | Draft | `shunt-config`, `console/` |
 
 ## Status Definitions
 
