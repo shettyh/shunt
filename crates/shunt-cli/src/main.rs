@@ -591,7 +591,8 @@ async fn run_server(
 
     let mut gw = GatewayServer::new(bundle.snapshot)
         .with_drain_timeout(Duration::from_millis(bundle.config.server.drain_timeout_ms))
-        .with_trace_enabled(dev_mode || ui_enabled);
+        .with_trace_enabled(dev_mode || ui_enabled)
+        .with_listener_config(bundle.config.server.to_listener_config());
 
     if let Some(certs) = bundle.cert_store {
         let resolver = Arc::new(DynamicCertResolver::new(certs));
@@ -631,6 +632,7 @@ async fn run_server(
         let mcp_metrics_status = Arc::clone(&mcp_metrics);
         let runtime_status = Arc::clone(&runtime);
         let runtime_mcp_status = Arc::clone(&runtime);
+        let listener_info_status = server_handle.listener_info().clone();
         let mut admin = AdminServer::new(
             Arc::clone(&controller),
             Arc::new(move || {
@@ -694,6 +696,17 @@ async fn run_server(
                     runtime_mcp_status.clock().as_ref(),
                 )
             }),
+        )
+        .with_status_provider(
+            "listener",
+            Arc::new(move || {
+                serde_json::json!({
+                    "local_addr": listener_info_status.local_addr.to_string(),
+                    "reuseport": listener_info_status.reuseport,
+                    "accept_shards": listener_info_status.accept_shards,
+                    "backlog": listener_info_status.backlog,
+                })
+            }),
         );
         if let Some(store) = trace_store {
             admin = admin.with_trace_store(store);
@@ -727,10 +740,13 @@ async fn run_server(
     let k8s_sync_handle =
         k8s_api_provider.map(|api_prov| start_k8s_sync_loop(api_prov, Arc::clone(&controller)));
 
+    let listener_info = server_handle.listener_info();
     if dev_mode {
         eprintln!(
-            "shunt dev listening on {} (admin: {})",
+            "shunt dev listening on {} (shards: {}, reuseport: {}, admin: {})",
             server_handle.local_addr(),
+            listener_info.accept_shards,
+            listener_info.reuseport,
             admin_handle
                 .as_ref()
                 .map(|a| a.local_addr().to_string())
@@ -747,6 +763,9 @@ async fn run_server(
     } else {
         info!(
             listen = %server_handle.local_addr(),
+            reuseport = listener_info.reuseport,
+            accept_shards = listener_info.accept_shards,
+            backlog = listener_info.backlog,
             admin = %admin_handle
                 .as_ref()
                 .map(|a| a.local_addr().to_string())

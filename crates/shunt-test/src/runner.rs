@@ -491,6 +491,7 @@ async fn run_case(
     let gw_handle = match GatewayServer::new(bundle.snapshot)
         .with_drain_timeout(Duration::from_secs(2))
         .with_trace_enabled(ui_enabled)
+        .with_listener_config(bundle.config.server.to_listener_config())
         .bind("127.0.0.1:0".parse().unwrap())
         .await
     {

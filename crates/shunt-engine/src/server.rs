@@ -18,6 +18,7 @@ use tracing::{debug, info, warn};
 use crate::error::CoreError;
 use crate::pipeline::execute_request;
 use crate::probe::ProbeSupervisor;
+use crate::reuseport::{BoundListeners, ListenerConfig, ListenerInfo, bind_listeners};
 use crate::snapshot::GatewaySnapshot;
 use crate::tls::{
     CertStore, ClientAuthConfig, DynamicCertResolver, TlsListenerConfig,
@@ -30,6 +31,7 @@ pub struct GatewayServer {
     tls: Option<TlsListenerConfig>,
     drain_timeout: Duration,
     trace_enabled: Arc<AtomicBool>,
+    listener_config: ListenerConfig,
 }
 
 impl GatewayServer {
@@ -39,6 +41,7 @@ impl GatewayServer {
             tls: None,
             drain_timeout: Duration::from_secs(30),
             trace_enabled: Arc::new(AtomicBool::new(false)),
+            listener_config: ListenerConfig::default(),
         }
     }
 
@@ -57,17 +60,26 @@ impl GatewayServer {
         self
     }
 
+    /// Configures listener socket options including per-core `SO_REUSEPORT` sharding and backlog.
+    pub fn with_listener_config(mut self, config: ListenerConfig) -> Self {
+        self.listener_config = config;
+        self
+    }
+
+    /// Convenience toggle to enable or disable per-core `SO_REUSEPORT` sharding.
+    pub fn with_reuseport(mut self, enabled: bool) -> Self {
+        self.listener_config.reuseport = enabled;
+        self
+    }
+
     /// Binds to `addr` (supports port `0` for OS-assigned ephemeral ports) and starts
     /// accepting connections on the Tokio runtime.
     pub async fn bind(self, addr: SocketAddr) -> Result<ServerHandle, CoreError> {
-        let socket = match addr {
-            SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
-            SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
-        };
-        let _ = socket.set_reuseaddr(true);
-        socket.bind(addr)?;
-        let listener = socket.listen(4096)?;
-        let local_addr = listener.local_addr()?;
+        let BoundListeners {
+            listeners,
+            info: listener_info,
+        } = bind_listeners(addr, &self.listener_config)?;
+        let local_addr = listener_info.local_addr;
 
         let (tls_acceptor, tls_resolver, tls_alpn) = match self.tls {
             Some(tls_cfg) => {
@@ -90,102 +102,116 @@ impl GatewayServer {
         let probes = Arc::new(ProbeSupervisor::new());
         probes.reconcile(&self.snapshot.load());
 
-        let snapshot_ref = Arc::clone(&self.snapshot);
-        let tls_acceptor_loop = tls_acceptor.clone();
-        let active_conns_loop = Arc::clone(&active_conns);
-        let drain_notify_loop = Arc::clone(&drain_notify);
-        let trace_enabled_loop = Arc::clone(&self.trace_enabled);
-        let mut accept_shutdown_rx = shutdown_rx.clone();
+        info!(
+            %local_addr,
+            tls = tls_acceptor.is_some(),
+            reuseport = listener_info.reuseport,
+            accept_shards = listener_info.accept_shards,
+            backlog = listener_info.backlog,
+            "shunt gateway listening"
+        );
 
-        info!(%local_addr, tls = tls_acceptor.is_some(), "shunt gateway listening");
+        let mut accept_tasks = Vec::with_capacity(listeners.len());
+        for (shard_idx, listener) in listeners.into_iter().enumerate() {
+            let snapshot_ref = Arc::clone(&self.snapshot);
+            let tls_acceptor_loop = tls_acceptor.clone();
+            let active_conns_loop = Arc::clone(&active_conns);
+            let drain_notify_loop = Arc::clone(&drain_notify);
+            let next_req_id_loop = Arc::clone(&next_request_id);
+            let trace_enabled_loop = Arc::clone(&self.trace_enabled);
+            let mut accept_shutdown_rx = shutdown_rx.clone();
+            let conn_shutdown_template = shutdown_rx.clone();
 
-        let accept_task = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = accept_shutdown_rx.changed() => {
-                        if *accept_shutdown_rx.borrow() {
-                            debug!(%local_addr, "accept loop stopping for graceful shutdown");
-                            break;
-                        }
-                    }
-                    accept_res = listener.accept() => {
-                        let (tcp, peer_addr) = match accept_res {
-                            Ok(pair) => pair,
-                            Err(err) => {
-                                warn!(error = %err, "TCP accept error");
-                                continue;
+            let task = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = accept_shutdown_rx.changed() => {
+                            if *accept_shutdown_rx.borrow() {
+                                debug!(%local_addr, shard_idx, "accept loop stopping for graceful shutdown");
+                                break;
                             }
-                        };
-
-                        let _ = tcp.set_nodelay(true);
-
-                        let snapshot_conn = Arc::clone(&snapshot_ref);
-                        let tls_acceptor_conn = tls_acceptor_loop
-                            .as_ref()
-                            .map(|swap| swap.load_full());
-                        let active_conns_conn = Arc::clone(&active_conns_loop);
-                        let drain_notify_conn = Arc::clone(&drain_notify_loop);
-                        let next_req_id_conn = Arc::clone(&next_request_id);
-                        let trace_enabled_conn = Arc::clone(&trace_enabled_loop);
-                        let mut conn_shutdown_rx = shutdown_rx.clone();
-
-                        active_conns_conn.fetch_add(1, Ordering::SeqCst);
-
-                        tokio::spawn(async move {
-                            let _guard = ActiveConnGuard {
-                                counter: active_conns_conn,
-                                notify: drain_notify_conn,
+                        }
+                        accept_res = listener.accept() => {
+                            let (tcp, peer_addr) = match accept_res {
+                                Ok(pair) => pair,
+                                Err(err) => {
+                                    warn!(error = %err, shard_idx, "TCP accept error");
+                                    continue;
+                                }
                             };
 
-                            if let Some(acceptor) = tls_acceptor_conn {
-                                match acceptor.accept(tcp).await {
-                                    Ok(tls_stream) => {
-                                        let server_conn = tls_stream.get_ref().1;
-                                        let tls_sni =
-                                            server_conn.server_name().map(str::to_owned);
-                                        let client_cert = server_conn
-                                            .peer_certificates()
-                                            .and_then(|certs| certs.first())
-                                            .and_then(|leaf| parse_client_cert_info(leaf.as_ref()))
-                                            .map(Arc::new);
-                                        serve_connection(
-                                            TokioIo::new(tls_stream),
-                                            peer_addr,
-                                            tls_sni,
-                                            client_cert,
-                                            snapshot_conn,
-                                            next_req_id_conn,
-                                            trace_enabled_conn,
-                                            &mut conn_shutdown_rx,
-                                        )
-                                        .await;
+                            let _ = tcp.set_nodelay(true);
+
+                            let snapshot_conn = Arc::clone(&snapshot_ref);
+                            let tls_acceptor_conn = tls_acceptor_loop
+                                .as_ref()
+                                .map(|swap| swap.load_full());
+                            let active_conns_conn = Arc::clone(&active_conns_loop);
+                            let drain_notify_conn = Arc::clone(&drain_notify_loop);
+                            let next_req_id_conn = Arc::clone(&next_req_id_loop);
+                            let trace_enabled_conn = Arc::clone(&trace_enabled_loop);
+                            let mut conn_shutdown_rx = conn_shutdown_template.clone();
+
+                            active_conns_conn.fetch_add(1, Ordering::SeqCst);
+
+                            tokio::spawn(async move {
+                                let _guard = ActiveConnGuard {
+                                    counter: active_conns_conn,
+                                    notify: drain_notify_conn,
+                                };
+
+                                if let Some(acceptor) = tls_acceptor_conn {
+                                    match acceptor.accept(tcp).await {
+                                        Ok(tls_stream) => {
+                                            let server_conn = tls_stream.get_ref().1;
+                                            let tls_sni =
+                                                server_conn.server_name().map(str::to_owned);
+                                            let client_cert = server_conn
+                                                .peer_certificates()
+                                                .and_then(|certs| certs.first())
+                                                .and_then(|leaf| parse_client_cert_info(leaf.as_ref()))
+                                                .map(Arc::new);
+                                            serve_connection(
+                                                TokioIo::new(tls_stream),
+                                                peer_addr,
+                                                tls_sni,
+                                                client_cert,
+                                                snapshot_conn,
+                                                next_req_id_conn,
+                                                trace_enabled_conn,
+                                                &mut conn_shutdown_rx,
+                                            )
+                                            .await;
+                                        }
+                                        Err(err) => {
+                                            debug!(%peer_addr, error = %err, "TLS handshake failed");
+                                        }
                                     }
-                                    Err(err) => {
-                                        debug!(%peer_addr, error = %err, "TLS handshake failed");
-                                    }
+                                } else {
+                                    serve_connection(
+                                        TokioIo::new(tcp),
+                                        peer_addr,
+                                        None,
+                                        None,
+                                        snapshot_conn,
+                                        next_req_id_conn,
+                                        trace_enabled_conn,
+                                        &mut conn_shutdown_rx,
+                                    )
+                                    .await;
                                 }
-                            } else {
-                                serve_connection(
-                                    TokioIo::new(tcp),
-                                    peer_addr,
-                                    None,
-                                    None,
-                                    snapshot_conn,
-                                    next_req_id_conn,
-                                    trace_enabled_conn,
-                                    &mut conn_shutdown_rx,
-                                )
-                                .await;
-                            }
-                        });
+                            });
+                        }
                     }
                 }
-            }
-        });
+            });
+            accept_tasks.push(task);
+        }
 
         Ok(ServerHandle {
             local_addr,
+            listener_info,
             snapshot: self.snapshot,
             tls_resolver,
             tls_acceptor,
@@ -196,7 +222,7 @@ impl GatewayServer {
             active_conns,
             drain_notify,
             drain_timeout: self.drain_timeout,
-            accept_task: Some(accept_task),
+            accept_tasks,
         })
     }
 }
@@ -312,6 +338,7 @@ impl ServerReloader {
 /// Control handle for a running [`GatewayServer`].
 pub struct ServerHandle {
     local_addr: SocketAddr,
+    listener_info: ListenerInfo,
     snapshot: Arc<ArcSwap<GatewaySnapshot>>,
     tls_resolver: Option<Arc<DynamicCertResolver>>,
     tls_acceptor: Option<Arc<ArcSwap<TlsAcceptor>>>,
@@ -322,13 +349,18 @@ pub struct ServerHandle {
     active_conns: Arc<AtomicUsize>,
     drain_notify: Arc<Notify>,
     drain_timeout: Duration,
-    accept_task: Option<tokio::task::JoinHandle<()>>,
+    accept_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl ServerHandle {
     /// Returns the bound local socket address.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Returns runtime details about the bound listener shards.
+    pub fn listener_info(&self) -> &ListenerInfo {
+        &self.listener_info
     }
 
     /// Returns a cloneable reloader for atomic snapshot & TLS cert swaps.
@@ -396,7 +428,7 @@ impl ServerHandle {
     pub async fn shutdown(mut self) -> bool {
         self.probes.shutdown_all().await;
         let _ = self.shutdown_tx.send(true);
-        if let Some(task) = self.accept_task.take() {
+        for task in self.accept_tasks.drain(..) {
             let _ = task.await;
         }
 

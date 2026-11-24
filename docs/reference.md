@@ -56,6 +56,20 @@ Every first-party plugin depends strictly on `shunt-plugin-sdk`—never on `shun
 
 ---
 
+## Server Listener Tuning (`[server]`)
+
+Opt-in per-core `SO_REUSEPORT` accept sharding and configurable listen backlogs reduce single-socket accept contention under Linux connection storms and allow overlapping rolling restarts:
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `listen` | string | `"0.0.0.0:8080"` | Proxy listener bind address (`host:port`) |
+| `drain_timeout_ms` | integer | `30000` | Graceful connection drain timeout on `SIGTERM` / `SIGINT` |
+| `reuseport` | bool | `false` | Bind multiple `SO_REUSEPORT` listener shards sharing `listen` (Unix) |
+| `accept_shards` | integer (optional) | CPU core count | Explicit listener shard count (`1..=128`; requires `reuseport = true`) |
+| `backlog` | integer | `4096` | TCP listen backlog per listener socket |
+
+---
+
 ## Admin API
 
 The Admin API always binds to a separate listener (`127.0.0.1:9090` by default), isolated from the public proxy data plane.
@@ -66,7 +80,7 @@ The Admin API always binds to a separate listener (`127.0.0.1:9090` by default),
 | `GET /metrics` | Prometheus exposition metrics (HTTP gateway, upstream health, mirroring, OTLP, `shunt-ai`, and `shunt-mcp`) |
 | `GET /snapshot` | Active compiled routes, upstreams, and per-plugin `HookMask`s (secrets redacted) |
 | `GET /upstreams` | Live upstream pool endpoint weights, active probe status, and passive health |
-| `GET /api/status` | Snapshot status and pluggable runtime extensions (`ai` usage/cooldowns/latency/cache, `mcp` catalog/sessions/guardrails) |
+| `GET /api/status` | Snapshot status and pluggable runtime extensions (`listener` shards/reuseport/backlog, `ai` usage/cooldowns/latency/cache, `mcp` catalog/sessions/guardrails) |
 | `GET /` & `GET /ui` | Opt-in read-only Admin Inspector Web UI (`--ui` or `[admin] ui = true`, zero DB) |
 | `GET /api/traces` & `/api/traces/stream` | Opt-in bounded trace ring buffer & live SSE trace waterfall stream (`--ui` or `[admin] ui = true`) |
 | `POST /reload` | Synchronously revalidate and atomically swap the configuration snapshot |

@@ -13,7 +13,7 @@ The Admin API always binds to its own listener (`127.0.0.1:9090` by default unde
 | `GET /metrics` | Prometheus text exposition covering HTTP gateway, upstream health, mirroring, OTLP exporter, `shunt-ai`, and `shunt-mcp` |
 | `GET /snapshot` | Active compiled `route_groups`, routes (with `group` membership and `group:`/`route:` plugin scopes), upstreams, and per-plugin `HookMask` bitmasks (all secrets and private keys redacted) |
 | `GET /upstreams` | Live upstream pool endpoint weights, active HTTP/TCP probe status, and passive circuit health |
-| `GET /api/status` | Combined snapshot summary plus pluggable runtime status (`"ai"` usage/cooldowns/latency/cache and `"mcp"` catalog/sessions/guardrails) |
+| `GET /api/status` | Combined snapshot summary plus pluggable runtime status (`"listener"` shards/reuseport/backlog, `"ai"` usage/cooldowns/latency/cache, and `"mcp"` catalog/sessions/guardrails) |
 | `POST /reload` | Synchronously re-read, validate, compile, and atomically swap the configuration snapshot via `ArcSwap` |
 | `GET /` & `GET /ui` | Opt-in read-only Admin Inspector Web UI (enabled via `--ui` or `[admin] ui = true`) |
 | `GET /api/traces` | Opt-in JSON snapshot of the bounded in-memory request trace ring buffer (`--ui`) |

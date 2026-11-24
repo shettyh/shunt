@@ -1,0 +1,84 @@
+[spec]
+name = "reuseport-sharded-listener"
+config_inline = """
+[server]
+listen = "127.0.0.1:0"
+drain_timeout_ms = 2000
+reuseport = true
+accept_shards = 4
+backlog = 1024
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+[[upstreams]]
+name = "backend"
+endpoints = ["http://127.0.0.1:1"]
+
+[[routes]]
+id = "api"
+path_prefix = "/api"
+upstream = "backend"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+response_set = { "x-shard-mode" = "reuseport" }
+"""
+
+[[mocks]]
+upstream = "backend"
+name = "ok_backend"
+status = 200
+json = { ok = true, mode = "sharded" }
+
+[[cases]]
+name = "sharded SO_REUSEPORT listener serves requests and hot-reloads cleanly"
+use_mocks = ["ok_backend"]
+
+[[cases.steps]]
+name = "initial request succeeds across sharded listener"
+[cases.steps.request]
+method = "GET"
+path = "/api/items"
+[cases.steps.expect]
+status = 200
+headers = { "x-shard-mode" = "reuseport" }
+json_path = { "/ok" = true, "/mode" = "sharded" }
+
+[[cases.steps]]
+name = "atomic snapshot reload works with active sharded listener"
+reload_config_inline = """
+[server]
+listen = "127.0.0.1:0"
+drain_timeout_ms = 2000
+reuseport = true
+accept_shards = 4
+backlog = 1024
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+[[upstreams]]
+name = "backend"
+endpoints = ["http://127.0.0.1:1"]
+
+[[routes]]
+id = "api"
+path_prefix = "/api"
+upstream = "backend"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+response_set = { "x-shard-mode" = "reuseport-v2" }
+"""
+[cases.steps.request]
+method = "GET"
+path = "/api/items"
+[cases.steps.expect]
+status = 200
+headers = { "x-shard-mode" = "reuseport-v2" }
+json_path = { "/ok" = true }
