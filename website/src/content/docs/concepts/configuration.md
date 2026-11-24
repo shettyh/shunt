@@ -93,6 +93,9 @@ Controls the public proxy listener, graceful draining, SNI TLS, and mutual TLS (
 [server]
 listen = "0.0.0.0:8080"     # Default: "0.0.0.0:8080"
 drain_timeout_ms = 30000    # Default: 30000 (graceful shutdown / reload drain)
+reuseport = false           # Default: false (opt-in per-core SO_REUSEPORT accept sharding on Unix)
+# accept_shards = 4         # Optional when reuseport = true (default: CPU core count, max: 128)
+backlog = 4096              # Default: 4096 (TCP listen backlog per listener socket)
 
 [server.tls]
 cert = "certs/server.crt"           # Default PEM cert chain (relative paths resolve from config dir)

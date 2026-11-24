@@ -76,7 +76,8 @@ body_contains = '"ok":true'
 ## 4. Formal & Fuzz Verification (Repo Level)
 
 Shunt itself is verified with:
-- **19 TOML conformance suites** covering HTTP, route groups, path templates/regex, AI, and MCP specs (`specs/conformance/`)
-- **TLA+ models** (`specs/tla/`) verifying `AtomicReload`, `PassiveHealth`, and `RequestPipeline` invariants
+- **20 TOML conformance suites** covering HTTP, sharded `SO_REUSEPORT` listeners, route groups, path templates/regex, AI, and MCP specs (`specs/conformance/`)
+- **TLA+ models** (`specs/tla/`) verifying `AtomicReload`, `PassiveHealth`, `RequestPipeline`, and `ShardedListenerDrain` safety and liveness invariants
+- **Kani bounded proofs** (`#[cfg(kani)]`) across `shunt-plugin-sdk`, `shunt-engine`, and `shunt-plugins`
 - **18 `cargo-fuzz` targets** (`fuzz/fuzz_targets/`) covering untrusted parsers (SSE, AWS binary EventStream, Gemini SSE, JWT/JWKS, X.509 mTLS certs, RESP/Redis, MCP JSON-RPC, K8s manifests, guardrails, and config parsing)
-- **Property tests (`proptest`)** across routing, token accounting, and translation layers
+- **Property tests (`proptest`)** across routing, listener configuration, token accounting, and translation layers

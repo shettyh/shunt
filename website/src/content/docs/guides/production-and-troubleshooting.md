@@ -46,7 +46,19 @@ Give every stateful plugin an explicit `id = "..."` (e.g., `id = "api-v2-rl"`). 
 
 **Fail-safe guarantee:** If the new config has a syntax error, missing `env:VAR`, unreadable TLS certificate, or invalid plugin config, Shunt rejects the reload and **keeps serving traffic on the last valid snapshot** with zero dropped connections.
 
-For graceful shutdown on deploy/rollout, send `SIGTERM`—Shunt stops accepting new connections and waits up to `server.drain_timeout_ms` (default `30000`) for in-flight HTTP, SSE, and WebSocket streams to finish cleanly.
+For graceful shutdown on deploy/rollout, send `SIGTERM`—Shunt stops accepting new connections across every listener shard and waits up to `server.drain_timeout_ms` (default `30000`) for in-flight HTTP, SSE, and WebSocket streams to finish cleanly.
+
+For high connection-churn Linux deployments (bursty short-lived HTTP/1.1 or TLS handshakes, SSE/WebSocket reconnect storms, or overlapping VM/systemd binary restarts), enable per-core `SO_REUSEPORT` listener sharding under `[server]`:
+
+```toml
+[server]
+listen = "0.0.0.0:8080"
+reuseport = true         # Binds one SO_REUSEPORT accept shard per CPU core (1..=128)
+# accept_shards = 8      # Optional explicit shard count override
+backlog = 4096           # Per-shard TCP listen backlog
+```
+
+On Linux, each shard gets its own kernel accept queue and Tokio accept loop; on platforms without `SO_REUSEPORT` (such as Windows), Shunt logs a warning and falls back cleanly to a single listener socket. Live listener details are reported under `GET /api/status` (`"listener"`).
 
 ---
 
