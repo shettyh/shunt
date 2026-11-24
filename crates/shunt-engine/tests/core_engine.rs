@@ -107,7 +107,7 @@ fn self_signed_cert_pem(domains: Vec<String>) -> (Vec<u8>, Vec<u8>) {
     let ck = rcgen::generate_simple_self_signed(domains).unwrap();
     (
         ck.cert.pem().into_bytes(),
-        ck.key_pair.serialize_pem().into_bytes(),
+        ck.signing_key.serialize_pem().into_bytes(),
     )
 }
 
