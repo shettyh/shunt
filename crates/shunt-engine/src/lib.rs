@@ -12,6 +12,7 @@ pub mod pipeline;
 pub mod probe;
 pub mod redis;
 pub mod registry;
+pub mod route_index;
 pub mod server;
 pub mod snapshot;
 pub mod tls;
@@ -35,6 +36,7 @@ pub use redis::{
     encode_resp_command, encode_resp_value,
 };
 pub use registry::{BuildSession, RuntimeRegistry};
+pub use route_index::{ROUTE_INDEX_MIN_ROUTES, RouteIndex};
 pub use server::{GatewayServer, ServerHandle, ServerReloader};
 pub use snapshot::{
     CompiledMirror, CompiledRoute, DEFAULT_MAX_BODY_BYTES, GatewaySnapshot, RouteMatch, RouteSpec,

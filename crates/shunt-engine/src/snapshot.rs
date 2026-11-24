@@ -15,6 +15,7 @@ use crate::path_match::{
     CompiledPathRegex, CompiledPathTemplate, DEFAULT_PATH_REGEX_SIZE_LIMIT, PathMatch,
 };
 use crate::registry::RuntimeRegistry;
+use crate::route_index::{ROUTE_INDEX_MIN_ROUTES, RouteIndex};
 use crate::upstream::{EndpointHealthSnapshot, UpstreamConfig, UpstreamPool, UpstreamPoolKey};
 
 /// Default request body buffer limit (1 MiB) when `REQUEST_BODY_BUFFERED` is active
@@ -102,20 +103,27 @@ impl RouteMatch {
 
     /// Checks non-path match dimensions (`methods`, `hosts`, `headers`).
     pub fn matches_non_path<B>(&self, req: &Request<B>) -> bool {
+        let mut cached_host = None;
+        self.matches_non_path_cached(req, &mut cached_host)
+    }
+
+    /// Checks non-path match dimensions (`methods`, `hosts`, `headers`) with lazy request-host caching.
+    #[inline]
+    pub(crate) fn matches_non_path_cached<'a, B>(
+        &self,
+        req: &'a Request<B>,
+        cached_host: &mut Option<Option<&'a str>>,
+    ) -> bool {
         if !self.methods.is_empty() && !self.methods.contains(req.method()) {
             return false;
         }
 
         if !self.hosts.is_empty() {
-            let req_host = extract_request_host(req);
+            let req_host = *cached_host.get_or_insert_with(|| extract_request_host(req));
             let Some(host) = req_host else {
                 return false;
             };
-            if !self
-                .hosts
-                .iter()
-                .any(|pattern| host_matches(pattern, &host))
-            {
+            if !self.hosts.iter().any(|pattern| host_matches(pattern, host)) {
                 return false;
             }
         }
@@ -144,15 +152,10 @@ impl RouteMatch {
         // For regex routes, check cheap host filters before invoking the regex engine.
         if matches!(self.path, PathMatch::Regex(_)) {
             if !self.hosts.is_empty() {
-                let req_host = extract_request_host(req);
-                let Some(host) = req_host else {
+                let Some(host) = extract_request_host(req) else {
                     return false;
                 };
-                if !self
-                    .hosts
-                    .iter()
-                    .any(|pattern| host_matches(pattern, &host))
-                {
+                if !self.hosts.iter().any(|pattern| host_matches(pattern, host)) {
                     return false;
                 }
             }
@@ -164,15 +167,10 @@ impl RouteMatch {
                 return false;
             }
             if !self.hosts.is_empty() {
-                let req_host = extract_request_host(req);
-                let Some(host) = req_host else {
+                let Some(host) = extract_request_host(req) else {
                     return false;
                 };
-                if !self
-                    .hosts
-                    .iter()
-                    .any(|pattern| host_matches(pattern, &host))
-                {
+                if !self.hosts.iter().any(|pattern| host_matches(pattern, host)) {
                     return false;
                 }
             }
@@ -195,21 +193,21 @@ impl RouteMatch {
     }
 }
 
-fn extract_request_host<B>(req: &Request<B>) -> Option<String> {
+#[inline]
+fn extract_request_host<B>(req: &Request<B>) -> Option<&str> {
     if let Some(authority) = req.uri().authority() {
-        return Some(authority.host().to_ascii_lowercase());
+        return Some(authority.host());
     }
     req.headers()
         .get(http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(|h| {
             // Strip optional `:port` (handling IPv6 bracketed hosts too).
-            let without_port = if let Some(rest) = h.strip_prefix('[') {
+            if let Some(rest) = h.strip_prefix('[') {
                 rest.split_once(']').map(|(ip, _)| ip).unwrap_or(h)
             } else {
                 h.split_once(':').map(|(name, _)| name).unwrap_or(h)
-            };
-            without_port.to_ascii_lowercase()
+            }
         })
 }
 
@@ -371,9 +369,9 @@ impl RouteSpec {
 }
 
 /// Maximum combined memory budget for a snapshot's multi-pattern `RegexSet` accelerator (16 MiB).
-const MAX_REGEX_SET_SIZE_LIMIT: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_REGEX_SET_SIZE_LIMIT: usize = 16 * 1024 * 1024;
 
-/// Compiled multi-pattern `RegexSet` accelerator baked into a [`GatewaySnapshot`] when
+/// Compiled multi-pattern `RegexSet` accelerator baked into small [`GatewaySnapshot`]s when
 /// one or more routes use [`PathMatch::Regex`].
 struct CompiledRegexTable {
     set: RegexSet,
@@ -387,6 +385,17 @@ impl std::fmt::Debug for CompiledRegexTable {
             .field("min_route_idx", &self.min_route_idx)
             .finish()
     }
+}
+
+/// Internal route dispatch strategy selected at [`SnapshotBuilder::build`] time.
+#[derive(Debug)]
+enum RouteDispatch {
+    /// Small route tables with no regex routes: tight L1-cache linear scan.
+    Linear,
+    /// Small route tables with `>= 1` regex route: linear prefix scan + single-pass `RegexSet`.
+    LinearWithRegex(CompiledRegexTable),
+    /// Medium/large route tables (`>= ROUTE_INDEX_MIN_ROUTES`): Exact hash map + Segment Trie + `RegexSet`.
+    Indexed(Box<RouteIndex>),
 }
 
 /// Immutable compiled route baked into a [`GatewaySnapshot`].
@@ -428,7 +437,7 @@ pub struct GatewaySnapshot {
     pub version: u64,
     pub routes: Vec<Arc<CompiledRoute>>,
     pub upstreams: HashMap<String, Arc<UpstreamPool>>,
-    regex_table: Option<CompiledRegexTable>,
+    dispatch: RouteDispatch,
 }
 
 /// Live health report for a single compiled upstream pool.
@@ -441,16 +450,31 @@ pub struct UpstreamHealthReport {
 }
 
 impl GatewaySnapshot {
+    /// Returns `true` if this snapshot uses the internal [`RouteIndex`] accelerator.
+    #[inline]
+    pub fn is_indexed(&self) -> bool {
+        matches!(self.dispatch, RouteDispatch::Indexed(_))
+    }
+
     /// Finds the first matching compiled route for the incoming request.
     ///
-    /// Preserves strict first-match-wins declaration order while accelerating snapshots containing
-    /// [`PathMatch::Regex`] routes with a single-pass [`RegexSet`] scan (skipped entirely if an
-    /// earlier non-regex route matches).
+    /// Preserves strict first-match-wins declaration order while accelerating larger snapshots
+    /// with [`RouteIndex`] (Exact hash map + Segment Trie + single-pass `RegexSet`) and small
+    /// regex snapshots with a single-pass `RegexSet` scan.
+    #[inline]
     pub fn match_route<B>(&self, req: &Request<B>) -> Option<&Arc<CompiledRoute>> {
-        let Some(rt) = &self.regex_table else {
-            return self.routes.iter().find(|r| r.matcher.matches(req));
-        };
+        match &self.dispatch {
+            RouteDispatch::Linear => self.routes.iter().find(|r| r.matcher.matches(req)),
+            RouteDispatch::Indexed(index) => index.match_route(&self.routes, req),
+            RouteDispatch::LinearWithRegex(rt) => self.match_route_linear_with_regex(rt, req),
+        }
+    }
 
+    fn match_route_linear_with_regex<B>(
+        &self,
+        rt: &CompiledRegexTable,
+        req: &Request<B>,
+    ) -> Option<&Arc<CompiledRoute>> {
         // Fast-path: check all routes strictly preceding the first regex route.
         for route in &self.routes[..rt.min_route_idx] {
             if route.matcher.matches(req) {
@@ -460,9 +484,12 @@ impl GatewaySnapshot {
 
         // Single linear-time O(path_len) pass across all regex routes in this snapshot.
         let regex_matches = rt.set.matches(req.uri().path());
+        let mut cached_host = None;
         for route in &self.routes[rt.min_route_idx..] {
             if let Some(slot) = route.regex_set_slot {
-                if regex_matches.matched(slot) && route.matcher.matches_non_path(req) {
+                if regex_matches.matched(slot)
+                    && route.matcher.matches_non_path_cached(req, &mut cached_host)
+                {
                     return Some(route);
                 }
             } else if route.matcher.matches(req) {
@@ -681,6 +708,8 @@ impl SnapshotBuilder {
 
         let mut seen_route_ids = HashSet::with_capacity(self.routes.len());
         let mut compiled_routes = Vec::with_capacity(self.routes.len());
+        let will_index =
+            self.routes.len() >= ROUTE_INDEX_MIN_ROUTES && self.routes.len() < u32::MAX as usize;
         let mut regex_patterns: Vec<String> = Vec::new();
         let mut min_regex_route_idx: Option<usize> = None;
 
@@ -724,7 +753,7 @@ impl SnapshotBuilder {
                 .collect();
 
             let route_idx = compiled_routes.len();
-            let regex_set_slot = if let PathMatch::Regex(re) = &spec.matcher.path {
+            let regex_set_slot = if !will_index && let PathMatch::Regex(re) = &spec.matcher.path {
                 let slot = regex_patterns.len();
                 regex_patterns.push(re.anchored_pattern().to_owned());
                 if min_regex_route_idx.is_none() {
@@ -752,18 +781,26 @@ impl SnapshotBuilder {
             }));
         }
 
-        let regex_table = if let Some(min_route_idx) = min_regex_route_idx {
+        let dispatch = if compiled_routes.len() >= ROUTE_INDEX_MIN_ROUTES
+            && compiled_routes.len() < u32::MAX as usize
+        {
+            RouteDispatch::Indexed(Box::new(RouteIndex::build(&compiled_routes)))
+        } else if let Some(min_route_idx) = min_regex_route_idx {
             let budget = DEFAULT_PATH_REGEX_SIZE_LIMIT
                 .saturating_mul(regex_patterns.len().max(1))
                 .min(MAX_REGEX_SET_SIZE_LIMIT);
-            RegexSetBuilder::new(&regex_patterns)
+            match RegexSetBuilder::new(&regex_patterns)
                 .size_limit(budget)
                 .dfa_size_limit(budget)
                 .build()
-                .ok()
-                .map(|set| CompiledRegexTable { set, min_route_idx })
+            {
+                Ok(set) => {
+                    RouteDispatch::LinearWithRegex(CompiledRegexTable { set, min_route_idx })
+                }
+                Err(_) => RouteDispatch::Linear,
+            }
         } else {
-            None
+            RouteDispatch::Linear
         };
 
         // All validation & route compilation succeeded: atomically commit staged pools (+ GC).
@@ -781,7 +818,7 @@ impl SnapshotBuilder {
             version: self.version,
             routes: compiled_routes,
             upstreams: compiled_upstreams,
-            regex_table,
+            dispatch,
         }))
     }
 }
