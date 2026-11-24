@@ -22,7 +22,7 @@ Every first-party plugin depends strictly on `shunt-plugin-sdk`—never on `shun
 | `compression` | Streaming-safe, SSE-aware response compression (`zstd`, `br`, `gzip`, `deflate`) with `Vary` and RFC 9110 `ETag` weakening |
 | `redirect` | Configurable HTTP redirects (`301`/`302`/`307`/`308`, scheme/host/port/path rewrites) |
 | `rate-limit` | Token-bucket rate limiting backed by reload-persistent `StateStore` (or Redis/Valkey) |
-| `header-rewrite` | Set/append/remove request and response headers |
+| `header-rewrite` | Set/append/remove request, upstream, and response headers plus host/path rewrites with `{param}` interpolation |
 | `cors` | Configurable CORS preflight handling and response headers |
 | `otel-trace` | W3C `traceparent`/`tracestate` propagation and OpenTelemetry span emission via `[telemetry]` |
 | `metrics` | Prometheus request counters and latency histograms served via `GET /metrics` |
@@ -92,6 +92,7 @@ The Admin API always binds to a separate listener (`127.0.0.1:9090` by default),
 | [`examples/shunt.toml`](../examples/shunt.toml) | Minimal HTTP reverse proxy with `request-id`, `rate-limit`, and `metrics` |
 | [`examples/shunt-api-gateway.toml`](../examples/shunt-api-gateway.toml) | Modern HTTP API gateway (`jwt-auth`, `ip-filter`, `body-limit`, `compression`, `redirect`) |
 | [`examples/shunt-route-groups.toml`](../examples/shunt-route-groups.toml) | Reusable `[[route_groups]]` with inherited match/timeout defaults, shared `jwt-auth`/`rate-limit` instances, and `match_group` policies |
+| [`examples/shunt-path-templates-and-regex.toml`](../examples/shunt-path-templates-and-regex.toml) | Parameterized `path_template` (`/orders/{order_id}/status`, `/files/{*filepath}`), linear-time `path_regex`, route-group lowering, and `{param}` `header-rewrite` interpolation |
 | [`examples/k8s-gateway-api.yaml`](../examples/k8s-gateway-api.yaml) | Kubernetes Gateway API v1 (`GatewayClass`, `Gateway`, `HTTPRoute`) |
 | [`examples/shunt-inspector-ui.toml`](../examples/shunt-inspector-ui.toml) | Opt-in Admin Inspector Web UI and live trace waterfall (`--ui`) |
 | [`examples/shunt-ai.toml`](../examples/shunt-ai.toml) | Core AI gateway with model aliases, failover, SSE translation, and token accounting |

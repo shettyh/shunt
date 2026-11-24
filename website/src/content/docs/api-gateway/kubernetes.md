@@ -36,8 +36,8 @@ shunt run --k8s-gateway \
 | --- | --- |
 | `GatewayClass` | Filtered by `spec.controllerName` (default: `shunt.io/gateway-controller`) |
 | `Gateway` | Listeners (`HTTP`/`HTTPS`), `hostname` globs, `tls.certificateRefs` (`Secret` PEM certs with SNI), `allowedRoutes`, global plugin annotations |
-| `HTTPRoute` | `parentRefs`, `hostnames`, `PathPrefix`/`Exact` path matches, HTTP `method` & `headers` exact matches, `timeouts.backendRequest`, weighted `backendRefs` |
-| `HTTPRoute` Filters | `RequestHeaderModifier`, `ResponseHeaderModifier`, `RequestRedirect`, `URLRewrite` (`ReplaceFullPath`, `ReplacePrefixMatch`, `hostname`), `RequestMirror` |
+| `HTTPRoute` | `parentRefs`, `hostnames`, `Exact` / `PathPrefix` / `RegularExpression` path matches (Gateway API v1 precedence: `Exact > PathPrefix (longest) > RegularExpression`), HTTP `method` & `headers` exact matches, `timeouts.backendRequest`, weighted `backendRefs` |
+| `HTTPRoute` Filters | `RequestHeaderModifier`, `ResponseHeaderModifier`, `RequestRedirect`, `URLRewrite` (`ReplaceFullPath`, `ReplacePrefixMatch` for prefix/exact routes, `hostname`), `RequestMirror` |
 | `Service` & `Endpoints` | Resolves backend service ports and pod endpoint IPs into weighted Shunt upstream pools |
 | `Secret` | Inline PEM TLS certs & private keys (redacted in `/snapshot`) |
 

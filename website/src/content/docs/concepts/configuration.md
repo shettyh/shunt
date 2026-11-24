@@ -275,7 +275,8 @@ key = "client_ip"
 
 | Field | Lowering Behavior (`route` over `group`) |
 | --- | --- |
-| **`path_prefix` / `path_exact`** | Joined cleanly onto `group.path_prefix` (e.g. `/v2` + `/users` → `/v2/users`) |
+| **`path_prefix` / `path_exact` / `path_template`** | Joined cleanly onto `group.path_prefix` (e.g. `/v2` + `/orders/{order_id}/status` → `/v2/orders/{order_id}/status`) |
+| **`path_regex`** | Allowed on groups without `path_prefix`; combining `group.path_prefix` with `route.path_regex` is rejected during validation (use `path_template` or omit `group.path_prefix`) |
 | **`hosts`** | Inherited when omitted; if specified on route, every host must be subsumed by `group.hosts` |
 | **`methods`** | Inherited when omitted; if specified on route, every method must be allowed by `group.methods` |
 | **`headers`** | Merged (`group.headers` + `route.headers`); contradictory values for the same header are rejected |
@@ -298,8 +299,11 @@ Routes are matched top-to-bottom (exact paths and more specific matchers should 
 id = "api_v2_users"
 group = "api_v2"                    # Optional reference to a [[route_groups]] ID
 hosts = ["api.example.com"]         # Optional host filter (supports *.example.com)
-path_prefix = "/users"              # Joined onto group.path_prefix if grouped; or use `path_exact`
-# path_exact = "/health"
+# Specify at most one path matcher:
+path_prefix = "/users"              # Segment-boundary prefix (joined onto group.path_prefix if grouped)
+# path_exact = "/health"            # Exact path match
+# path_template = "/orders/{order_id}/status"  # Zero-alloc segment template ({param} & final {*wildcard})
+# path_regex = '/invoices/(?P<year>[0-9]{4})/(?P<id>[0-9]+)\.pdf' # Full-path linear-time regex (RegexSet-accelerated)
 methods = ["GET", "POST"]           # Empty = inherit group methods (or all HTTP methods)
 headers = { "x-track" = "canary" }  # Optional exact header matchers (all must match)
 upstream = "api_backend"            # Required unless inherited from `group.upstream`
@@ -323,6 +327,17 @@ name = "compression"
 [routes.plugins.config]
 encodings = ["zstd", "br", "gzip"]
 ```
+
+### Path Matcher Reference
+
+| Field | Semantics | Captured Params (`RequestCtx::path_params`) |
+| --- | --- | --- |
+| `path_exact` | Exact string match (`"/health"`). | None (zero-alloc) |
+| `path_prefix` | Segment-boundary prefix (`"/api"` matches `"/api"` and `"/api/v1"`, never `"/apiv2"`). | None (zero-alloc) |
+| `path_template` | Zero-alloc segment matcher supporting `{param}` (single non-empty segment) and final `{*wildcard}` (multi-segment tail). Joins cleanly with `route_groups.path_prefix`. | `{param}` and `{*wildcard}` extracted on demand when route plugins are active |
+| `path_regex` | Linear-time, ReDoS-safe full-path anchored regex (`\A(?:...)\z`), accelerated via a single-pass `RegexSet` across all regex routes in the snapshot. | Named capture groups `(?P<name>...)` extracted on demand when route plugins are active |
+
+Captured parameters can be read in custom Rust plugins via `ctx.path_param("order_id")` or interpolated directly in [`header-rewrite`](/shunt/plugins/http-plugins/#header-rewrite) headers and `path_replace_full` (e.g. `upstream_set = { "x-order-id" = "{order_id}" }`).
 
 ---
 

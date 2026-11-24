@@ -169,6 +169,8 @@ distributed = true # uses [state] Redis/Valkey when configured
 ```
 
 ### `header-rewrite`
+Supports static values as well as `{param}` interpolation from captured `path_template` parameters or named `path_regex` capture groups (`(?P<name>...)`) in `request_set`/`request_add`, `upstream_set`, `response_set`/`response_add`, and `path_replace_full` (zero overhead when no `{...}` placeholders are configured):
+
 ```toml
 [[routes.plugins]]
 name = "header-rewrite"
@@ -176,14 +178,14 @@ name = "header-rewrite"
 request_set = { "x-gateway" = "shunt" }
 request_add = {}
 request_remove = ["x-internal-debug"]
-upstream_set = {}
+upstream_set = { "x-order-id" = "{order_id}" }
 upstream_remove = []
 response_set = { "x-powered-by" = "shunt" }
 response_add = {}
 response_remove = ["server"]
 # Optional URL/Host rewrites:
 # upstream_host = "backend.internal"
-# path_replace_full = "/v2/target"
+# path_replace_full = "/internal/orders/{order_id}/state"
 # path_match_prefix = "/old"
 # path_replace_prefix = "/new"
 ```
