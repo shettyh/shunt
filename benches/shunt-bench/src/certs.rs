@@ -4,7 +4,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, SanType,
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    SanType,
 };
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::pem::PemObject;
@@ -35,6 +36,7 @@ pub fn generate_bench_certs(out_dir: &Path) -> Result<(), String> {
     let ca_cert = ca_params
         .self_signed(&ca_key)
         .map_err(|e| format!("CA self-sign failed: {e}"))?;
+    let ca_issuer = Issuer::new(ca_params, ca_key);
 
     // 2. Server cert (localhost + 127.0.0.1)
     let mut srv_params = CertificateParams::new(vec!["localhost".to_owned()])
@@ -52,7 +54,7 @@ pub fn generate_bench_certs(out_dir: &Path) -> Result<(), String> {
         .push(ExtendedKeyUsagePurpose::ServerAuth);
     let srv_key = KeyPair::generate().map_err(|e| format!("server keygen failed: {e}"))?;
     let srv_cert = srv_params
-        .signed_by(&srv_key, &ca_cert, &ca_key)
+        .signed_by(&srv_key, &ca_issuer)
         .map_err(|e| format!("server cert sign failed: {e}"))?;
 
     // 3. Client cert for mTLS
@@ -77,7 +79,7 @@ pub fn generate_bench_certs(out_dir: &Path) -> Result<(), String> {
         .push(ExtendedKeyUsagePurpose::ClientAuth);
     let cli_key = KeyPair::generate().map_err(|e| format!("client keygen failed: {e}"))?;
     let cli_cert = cli_params
-        .signed_by(&cli_key, &ca_cert, &ca_key)
+        .signed_by(&cli_key, &ca_issuer)
         .map_err(|e| format!("client cert sign failed: {e}"))?;
 
     fs::write(out_dir.join("ca.pem"), ca_cert.pem())

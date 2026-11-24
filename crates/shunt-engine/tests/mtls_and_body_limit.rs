@@ -11,7 +11,8 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, SanType,
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    SanType,
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -29,8 +30,7 @@ use tokio_rustls::TlsConnector;
 
 struct CertMaterial {
     ca_cert_pem: String,
-    ca_cert: rcgen::Certificate,
-    ca_key: KeyPair,
+    ca_issuer: Issuer<'static, KeyPair>,
 }
 
 fn generate_ca(cn: &str) -> CertMaterial {
@@ -39,10 +39,10 @@ fn generate_ca(cn: &str) -> CertMaterial {
     params.distinguished_name.push(DnType::CommonName, cn);
     let ca_key = KeyPair::generate().unwrap();
     let ca_cert = params.self_signed(&ca_key).unwrap();
+    let ca_issuer = Issuer::new(params, ca_key);
     CertMaterial {
         ca_cert_pem: ca_cert.pem(),
-        ca_cert,
-        ca_key,
+        ca_issuer,
     }
 }
 
@@ -53,7 +53,7 @@ fn issue_server_cert(ca: &CertMaterial, dns: &str) -> (String, String) {
         .extended_key_usages
         .push(ExtendedKeyUsagePurpose::ServerAuth);
     let key = KeyPair::generate().unwrap();
-    let cert = params.signed_by(&key, &ca.ca_cert, &ca.ca_key).unwrap();
+    let cert = params.signed_by(&key, &ca.ca_issuer).unwrap();
     (cert.pem(), key.serialize_pem())
 }
 
@@ -78,7 +78,7 @@ fn issue_client_cert(
         .extended_key_usages
         .push(ExtendedKeyUsagePurpose::ClientAuth);
     let key = KeyPair::generate().unwrap();
-    let cert = params.signed_by(&key, &ca.ca_cert, &ca.ca_key).unwrap();
+    let cert = params.signed_by(&key, &ca.ca_issuer).unwrap();
     (cert.pem(), key.serialize_pem(), cert.der().to_vec())
 }
 
