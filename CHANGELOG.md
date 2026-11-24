@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 (2026-11-24)
+
+## What's Changed
+* feat(routing): add path templates, regex routing, and captured path parameters (RFC 0022) by @shettyh in https://github.com/shettyh/shunt/pull/44
+* perf(routing): add internal RouteIndex (Exact map + Segment Trie + RegexSet) for RFC 0022 Stage 2 by @shettyh in https://github.com/shettyh/shunt/pull/46
+* ci(bench): pin nightly benchmarks to ubuntu-24.04-arm by @shettyh in https://github.com/shettyh/shunt/pull/47
+
+
+**Full Changelog**: https://github.com/shettyh/shunt/compare/v0.2.0...v0.3.0
+
 ## 0.2.0 (2026-11-23)
 
 ## What's Changed
