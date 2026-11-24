@@ -1,0 +1,247 @@
+[spec]
+name = "path-templates-and-regex-routing"
+config_inline = """
+[server]
+listen = "127.0.0.1:0"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:0"
+
+[[upstreams]]
+name = "order_status_svc"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "order_cancel_svc"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "files_svc"
+endpoints = ["http://127.0.0.1:1"]
+
+[[upstreams]]
+name = "billing_svc"
+endpoints = ["http://127.0.0.1:1"]
+
+[[route_groups]]
+id = "api_v2"
+path_prefix = "/v2"
+
+[[route_groups.plugins]]
+name = "header-rewrite"
+[route_groups.plugins.config]
+response_set = { "x-api-group" = "v2" }
+
+[[routes]]
+id = "order_vip_exact"
+path_exact = "/orders/vip/status"
+methods = ["GET"]
+upstream = "order_status_svc"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+response_set = { "x-matched-route" = "order_vip_exact" }
+
+[[routes]]
+id = "order_status_tpl"
+path_template = "/orders/{order_id}/status"
+methods = ["GET"]
+upstream = "order_status_svc"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+upstream_set = { "x-order-id" = "{order_id}" }
+response_set = { "x-matched-route" = "order_status_tpl", "x-order-id" = "{order_id}" }
+path_replace_full = "/internal/orders/{order_id}/state"
+
+[[routes]]
+id = "order_cancel_tpl"
+path_template = "/orders/{order_id}/cancel"
+methods = ["POST"]
+upstream = "order_cancel_svc"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+upstream_set = { "x-order-id" = "{order_id}" }
+response_set = { "x-matched-route" = "order_cancel_tpl" }
+
+[[routes]]
+id = "v2_order_status_tpl"
+group = "api_v2"
+path_template = "/orders/{order_id}/status"
+methods = ["GET"]
+upstream = "order_status_svc"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+upstream_set = { "x-order-id" = "{order_id}" }
+response_set = { "x-matched-route" = "v2_order_status_tpl" }
+
+[[routes]]
+id = "files_wildcard_tpl"
+path_template = "/files/{*filepath}"
+methods = ["GET"]
+upstream = "files_svc"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+upstream_set = { "x-filepath" = "{filepath}" }
+response_set = { "x-filepath" = "{filepath}" }
+
+[[routes]]
+id = "invoice_pdf_regex"
+path_regex = '/invoices/(?P<year>[0-9]{4})/(?P<invoice_id>[0-9]+)\\.pdf'
+methods = ["GET"]
+upstream = "billing_svc"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+upstream_set = { "x-invoice-year" = "{year}", "x-invoice-id" = "{invoice_id}" }
+response_set = { "x-matched-route" = "invoice_pdf_regex", "x-invoice-year" = "{year}" }
+"""
+
+[[mocks]]
+upstream = "order_status_svc"
+name = "status_ok"
+status = 200
+json = { service = "order_status" }
+
+[[mocks]]
+upstream = "order_cancel_svc"
+name = "cancel_ok"
+status = 200
+json = { service = "order_cancel" }
+
+[[mocks]]
+upstream = "files_svc"
+name = "files_ok"
+status = 200
+json = { service = "files" }
+
+[[mocks]]
+upstream = "billing_svc"
+name = "billing_ok"
+status = 200
+json = { service = "billing" }
+
+[[cases]]
+name = "path_template, wildcard, route-group lowering, path_regex, and param rewriting"
+use_mocks = ["status_ok", "cancel_ok", "files_ok", "billing_ok"]
+
+[[cases.steps]]
+name = "exact route wins over template route in first-match-wins order"
+[cases.steps.request]
+method = "GET"
+path = "/orders/vip/status"
+[cases.steps.expect]
+status = 200
+headers = { "x-matched-route" = "order_vip_exact" }
+json_path = { "/service" = "order_status" }
+
+[[cases.steps]]
+name = "path_template captures order_id, injects headers, and rewrites upstream path"
+[cases.steps.request]
+method = "GET"
+path = "/orders/ord_42/status?detail=full"
+[cases.steps.expect]
+status = 200
+headers = { "x-matched-route" = "order_status_tpl", "x-order-id" = "ord_42" }
+json_path = { "/service" = "order_status" }
+
+[[cases.steps.expect.upstream_calls]]
+upstream = "order_status_svc"
+count = 2
+method = "GET"
+path = "/internal/orders/ord_42/state?detail=full"
+headers = { "x-order-id" = "ord_42" }
+
+[[cases.steps]]
+name = "sibling template /orders/{order_id}/cancel routes to separate upstream on POST"
+[cases.steps.request]
+method = "POST"
+path = "/orders/ord_42/cancel"
+[cases.steps.expect]
+status = 200
+headers = { "x-matched-route" = "order_cancel_tpl" }
+json_path = { "/service" = "order_cancel" }
+
+[[cases.steps.expect.upstream_calls]]
+upstream = "order_cancel_svc"
+count = 1
+method = "POST"
+path = "/orders/ord_42/cancel"
+headers = { "x-order-id" = "ord_42" }
+
+[[cases.steps]]
+name = "grouped path_template joins with route_group.path_prefix (/v2/orders/{order_id}/status)"
+[cases.steps.request]
+method = "GET"
+path = "/v2/orders/99/status"
+[cases.steps.expect]
+status = 200
+headers = { "x-api-group" = "v2", "x-matched-route" = "v2_order_status_tpl" }
+json_path = { "/service" = "order_status" }
+
+[[cases.steps.expect.upstream_calls]]
+upstream = "order_status_svc"
+count = 3
+method = "GET"
+path = "/v2/orders/99/status"
+headers = { "x-order-id" = "99" }
+
+[[cases.steps]]
+name = "wildcard template /files/{*filepath} captures nested multi-segment path"
+[cases.steps.request]
+method = "GET"
+path = "/files/reports/2026/q4.csv"
+[cases.steps.expect]
+status = 200
+headers = { "x-filepath" = "reports/2026/q4.csv" }
+json_path = { "/service" = "files" }
+
+[[cases.steps.expect.upstream_calls]]
+upstream = "files_svc"
+count = 1
+method = "GET"
+path = "/files/reports/2026/q4.csv"
+headers = { "x-filepath" = "reports/2026/q4.csv" }
+
+[[cases.steps]]
+name = "wildcard template rejects empty tail /files/"
+[cases.steps.request]
+method = "GET"
+path = "/files/"
+[cases.steps.expect]
+status = 404
+
+[[cases.steps]]
+name = "path_regex matches constrained pattern and extracts named captures"
+[cases.steps.request]
+method = "GET"
+path = "/invoices/2026/1045.pdf"
+[cases.steps.expect]
+status = 200
+headers = { "x-matched-route" = "invoice_pdf_regex", "x-invoice-year" = "2026" }
+json_path = { "/service" = "billing" }
+
+[[cases.steps.expect.upstream_calls]]
+upstream = "billing_svc"
+count = 1
+method = "GET"
+path = "/invoices/2026/1045.pdf"
+headers = { "x-invoice-year" = "2026", "x-invoice-id" = "1045" }
+
+[[cases.steps]]
+name = "path_regex rejects non-matching pattern and extra suffixes (full-path anchored)"
+[cases.steps.request]
+method = "GET"
+path = "/invoices/2026/1045.pdf/extra"
+[cases.steps.expect]
+status = 404

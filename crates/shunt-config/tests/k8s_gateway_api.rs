@@ -521,3 +521,155 @@ async fn k8s_api_provider_live_sync_and_atomic_hot_reload() {
     v1_task.abort();
     v2_task.abort();
 }
+
+#[test]
+fn k8s_gateway_api_supports_regular_expression_paths_and_precedence() {
+    let yaml = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: shunt
+spec:
+  controllerName: shunt.io/gateway-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: edge
+  namespace: prod
+spec:
+  gatewayClassName: shunt
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-svc
+  namespace: prod
+spec:
+  ports:
+    - port: 80
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: orders-svc
+  namespace: prod
+subsets:
+  - addresses:
+      - ip: 10.0.2.1
+    ports:
+      - port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: orders
+  namespace: prod
+spec:
+  parentRefs:
+    - name: edge
+  rules:
+    - matches:
+        - path:
+            type: RegularExpression
+            value: /orders/[0-9]+/status
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /internal/order-status
+      backendRefs:
+        - name: orders-svc
+          port: 80
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /orders/special
+      backendRefs:
+        - name: orders-svc
+          port: 80
+    - matches:
+        - path:
+            type: Exact
+            value: /orders/0/status
+      backendRefs:
+        - name: orders-svc
+          port: 80
+"#;
+
+    let snap = K8sClusterSnapshot::from_yaml_str(yaml).unwrap();
+    let cfg = compile_k8s_gateway_snapshot(&snap, &K8sGatewayOptions::default()).unwrap();
+
+    // Gateway API v1 precedence: Exact (r2) > PathPrefix (r1) > RegularExpression (r0).
+    assert_eq!(cfg.routes.len(), 3);
+    assert_eq!(
+        cfg.routes[0].path_exact.as_deref(),
+        Some("/orders/0/status")
+    );
+    assert_eq!(
+        cfg.routes[1].path_prefix.as_deref(),
+        Some("/orders/special")
+    );
+    assert_eq!(
+        cfg.routes[2].path_regex.as_deref(),
+        Some("/orders/[0-9]+/status")
+    );
+
+    // Compile into an immutable GatewaySnapshot and verify live route dispatch.
+    let metrics = Arc::new(PrometheusMetrics::new());
+    let mut reg = PluginRegistry::new();
+    register_builtin_plugins(&mut reg, metrics);
+    let runtime = Arc::new(RuntimeRegistry::new());
+    let compiler = SnapshotCompiler::new(Arc::new(reg), runtime);
+    let loaded = shunt_config::LoadedConfig {
+        config: cfg,
+        digest: "k8s-regex-test".to_owned(),
+        source_name: "k8s".to_owned(),
+    };
+    let bundle = compiler.compile(&loaded).unwrap();
+
+    let req_exact = Request::builder().uri("/orders/0/status").body(()).unwrap();
+    assert_eq!(
+        bundle.snapshot.match_route(&req_exact).unwrap().id,
+        "k8s:prod/orders:r2:m0"
+    );
+
+    let req_regex = Request::builder()
+        .uri("/orders/9876/status")
+        .body(())
+        .unwrap();
+    assert_eq!(
+        bundle.snapshot.match_route(&req_regex).unwrap().id,
+        "k8s:prod/orders:r0:m0"
+    );
+
+    let req_non_numeric = Request::builder()
+        .uri("/orders/abc/status")
+        .body(())
+        .unwrap();
+    assert!(bundle.snapshot.match_route(&req_non_numeric).is_none());
+
+    // Invalid regex is rejected cleanly.
+    let bad_re_yaml = yaml.replace("/orders/[0-9]+/status", "/orders/[unclosed");
+    let bad_snap = K8sClusterSnapshot::from_yaml_str(&bad_re_yaml).unwrap();
+    let err = compile_k8s_gateway_snapshot(&bad_snap, &K8sGatewayOptions::default())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("RegularExpression"));
+
+    // ReplacePrefixMatch on a RegularExpression route is rejected per Gateway API v1.
+    let bad_rewrite_yaml = yaml.replace(
+        "type: ReplaceFullPath\n              replaceFullPath: /internal/order-status",
+        "type: ReplacePrefixMatch\n              replacePrefixMatch: /v2",
+    );
+    let bad_rw_snap = K8sClusterSnapshot::from_yaml_str(&bad_rewrite_yaml).unwrap();
+    let rw_err = compile_k8s_gateway_snapshot(&bad_rw_snap, &K8sGatewayOptions::default())
+        .unwrap_err()
+        .to_string();
+    assert!(rw_err.contains("ReplacePrefixMatch"));
+}

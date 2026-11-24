@@ -6,7 +6,9 @@ use http::{HeaderMap, Uri};
 use proptest::prelude::*;
 use shunt_engine::pipeline::{strip_hop_by_hop_headers, strip_uri_prefix};
 use shunt_engine::{
-    EndpointState, PathMatch, UpstreamConfig, UpstreamPool, host_matches, select_endpoint_index,
+    CompiledPathRegex, CompiledPathTemplate, EndpointState, PathMatch, RouteMatch, RouteSpec,
+    RuntimeRegistry, SnapshotBuilder, UpstreamConfig, UpstreamPool, host_matches,
+    select_endpoint_index,
 };
 use shunt_plugin_sdk::{Clock, ManualClock};
 
@@ -459,5 +461,110 @@ proptest! {
         if let Some(info) = shunt_engine::parse_client_cert_info(&raw) {
             prop_assert_eq!(info.sha256_fingerprint.len(), 64);
         }
+    }
+
+    #[test]
+    fn path_template_matches_and_extracts_exact_params(
+        tenant in "[a-z0-9_-]{1,10}",
+        order_id in "[a-zA-Z0-9_-]{1,12}",
+        tail_a in "[a-z0-9._-]{1,8}",
+        tail_b in "[a-z0-9._-]{1,8}",
+    ) {
+        let tpl = CompiledPathTemplate::parse("/{tenant}/orders/{order_id}/status").unwrap();
+        let good = format!("/{tenant}/orders/{order_id}/status");
+        prop_assert!(tpl.matches(&good));
+        let params = tpl.extract_params(&good);
+        prop_assert_eq!(params.get("tenant"), Some(tenant.as_str()));
+        prop_assert_eq!(params.get("order_id"), Some(order_id.as_str()));
+        prop_assert_eq!(params.len(), 2);
+
+        // Extra slash inside a single-segment param or trailing slash must never match.
+        let bad_nested = format!("/{tenant}/orders/{order_id}/extra/status");
+        let bad_trailing = format!("/{tenant}/orders/{order_id}/status/");
+        let bad_empty = format!("/{tenant}/orders//status");
+        prop_assert!(!tpl.matches(&bad_nested));
+        prop_assert!(!tpl.matches(&bad_trailing));
+        prop_assert!(!tpl.matches(&bad_empty));
+
+        // Catch-all wildcard captures multi-segment tails cleanly.
+        let wild = CompiledPathTemplate::parse("/files/{*filepath}").unwrap();
+        let tail = format!("{tail_a}/{tail_b}");
+        let wild_path = format!("/files/{tail}");
+        prop_assert!(wild.matches(&wild_path));
+        let wild_params = wild.extract_params(&wild_path);
+        prop_assert_eq!(wild_params.get("filepath"), Some(tail.as_str()));
+        prop_assert!(!wild.matches("/files"));
+        prop_assert!(!wild.matches("/files/"));
+    }
+
+    #[test]
+    fn snapshot_regex_set_match_route_is_equivalent_to_linear_scan(
+        route_kinds in prop::collection::vec((0u8..8, 0u8..3, 0u8..3), 1..12),
+        req_path in prop_oneof![
+            Just("/"),
+            Just("/orders/123/status"),
+            Just("/orders/abc/status"),
+            Just("/orders/123/cancel"),
+            Just("/invoices/2026/42.pdf"),
+            Just("/files/a/b/c.txt"),
+            Just("/api/v1/items"),
+            Just("/other"),
+        ],
+        req_host in prop_oneof![Just("api.example.com"), Just("other.org")],
+        req_method in prop_oneof![Just(http::Method::GET), Just(http::Method::POST)],
+    ) {
+        let reg = RuntimeRegistry::new();
+        let mut builder = SnapshotBuilder::new(1).upstream(UpstreamConfig::new(
+            "be",
+            vec!["http://127.0.0.1:8081".to_owned()],
+        ));
+
+        for (i, (kind, host_kind, method_kind)) in route_kinds.iter().enumerate() {
+            let path = match kind {
+                0 => PathMatch::Exact("/orders/123/status".to_owned()),
+                1 => PathMatch::Prefix("/orders".to_owned()),
+                2 => PathMatch::Template(
+                    CompiledPathTemplate::parse("/orders/{order_id}/status").unwrap(),
+                ),
+                3 => PathMatch::Template(
+                    CompiledPathTemplate::parse("/files/{*filepath}").unwrap(),
+                ),
+                4 => PathMatch::Regex(
+                    CompiledPathRegex::compile(r"/orders/(?P<id>[0-9]+)/status").unwrap(),
+                ),
+                5 => PathMatch::Regex(
+                    CompiledPathRegex::compile(r"/invoices/[0-9]{4}/[0-9]+\.pdf").unwrap(),
+                ),
+                6 => PathMatch::Regex(CompiledPathRegex::compile(r"/api/v[0-9]+/.*").unwrap()),
+                _ => PathMatch::Any,
+            };
+            let mut matcher = RouteMatch {
+                path,
+                ..RouteMatch::default()
+            };
+            match host_kind {
+                1 => matcher.hosts.push("api.example.com".to_owned()),
+                2 => matcher.hosts.push("other.org".to_owned()),
+                _ => {}
+            }
+            match method_kind {
+                1 => matcher.methods.push(http::Method::GET),
+                2 => matcher.methods.push(http::Method::POST),
+                _ => {}
+            }
+            builder = builder.route(RouteSpec::new(format!("r_{i}"), matcher, "be"));
+        }
+
+        let snap = builder.build(&reg, false).unwrap();
+        let req = http::Request::builder()
+            .method(req_method)
+            .uri(req_path)
+            .header(http::header::HOST, req_host)
+            .body(())
+            .unwrap();
+
+        let fast = snap.match_route(&req).map(|r| r.id.as_str());
+        let linear = snap.match_route_linear(&req).map(|r| r.id.as_str());
+        prop_assert_eq!(fast, linear);
     }
 }

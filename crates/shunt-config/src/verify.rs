@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use shunt_engine::{PathMatch, RouteMatch};
+use shunt_engine::{CompiledPathTemplate, PathMatch, RouteMatch, TemplateSegment};
 use shunt_plugin_sdk::HookMask;
 
 use crate::compiler::CompiledBundle;
@@ -755,7 +755,7 @@ fn path_subsumes(earlier: &PathMatch, later: &PathMatch) -> bool {
             }
             let e_trim = ep.trim_end_matches('/');
             match later {
-                PathMatch::Any => false,
+                PathMatch::Any | PathMatch::Regex(_) => false,
                 PathMatch::Exact(lp) => earlier.matches(lp),
                 PathMatch::Prefix(lp) => {
                     if lp == "/" || lp.trim_end_matches('/').is_empty() {
@@ -766,13 +766,103 @@ fn path_subsumes(earlier: &PathMatch, later: &PathMatch) -> bool {
                         || (l_trim.starts_with(e_trim)
                             && l_trim.as_bytes().get(e_trim.len()) == Some(&b'/'))
                 }
+                PathMatch::Template(lt) => {
+                    let e_segs: Vec<&str> = e_trim
+                        .trim_start_matches('/')
+                        .split('/')
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    let l_segs = lt.segments();
+                    l_segs.len() >= e_segs.len()
+                        && e_segs.iter().zip(l_segs.iter()).all(|(es, ls)| {
+                            matches!(ls, TemplateSegment::Literal(lit) if lit.as_ref() == *es)
+                        })
+                }
             }
         }
         PathMatch::Exact(ep) => match later {
             PathMatch::Exact(lp) => ep == lp,
-            PathMatch::Any | PathMatch::Prefix(_) => false,
+            PathMatch::Template(lt) => !lt.has_params() && ep == lt.raw(),
+            PathMatch::Any | PathMatch::Prefix(_) | PathMatch::Regex(_) => false,
+        },
+        PathMatch::Template(et) => match later {
+            PathMatch::Exact(lp) => et.matches(lp),
+            PathMatch::Template(lt) => template_subsumes(et, lt),
+            PathMatch::Prefix(lp) => template_subsumes_prefix(et, lp),
+            PathMatch::Any | PathMatch::Regex(_) => false,
+        },
+        PathMatch::Regex(er) => match later {
+            PathMatch::Exact(lp) => er.matches(lp),
+            PathMatch::Regex(lr) => er.raw() == lr.raw(),
+            PathMatch::Any | PathMatch::Prefix(_) | PathMatch::Template(_) => false,
         },
     }
+}
+
+fn template_subsumes(earlier: &CompiledPathTemplate, later: &CompiledPathTemplate) -> bool {
+    let e_segs = earlier.segments();
+    let l_segs = later.segments();
+
+    for (i, es) in e_segs.iter().enumerate() {
+        match es {
+            TemplateSegment::Wildcard(_) => {
+                // Wildcard is guaranteed final; `later` guarantees a non-empty remainder iff it
+                // has at least one segment starting at `i`.
+                return l_segs.len() > i;
+            }
+            TemplateSegment::Literal(elit) => {
+                let Some(ls) = l_segs.get(i) else {
+                    return false;
+                };
+                match ls {
+                    TemplateSegment::Literal(llit) if elit == llit => {}
+                    _ => return false,
+                }
+            }
+            TemplateSegment::Param(_) => {
+                let Some(ls) = l_segs.get(i) else {
+                    return false;
+                };
+                match ls {
+                    TemplateSegment::Literal(_) | TemplateSegment::Param(_) => {}
+                    TemplateSegment::Wildcard(_) => return false,
+                }
+            }
+        }
+    }
+
+    e_segs.len() == l_segs.len()
+}
+
+fn template_subsumes_prefix(earlier: &CompiledPathTemplate, later_prefix: &str) -> bool {
+    if !earlier.has_wildcard() {
+        return false;
+    }
+    let l_trim = later_prefix.trim_end_matches('/');
+    if l_trim.is_empty() {
+        // Root prefix `"/"` matches `"/"`, which no `{*wildcard}` template matches.
+        return false;
+    }
+    let l_segs: Vec<&str> = l_trim
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    let e_segs = earlier.segments();
+    let wildcard_idx = e_segs.len() - 1;
+    // `Prefix(lp)` matches `lp` itself (having `l_segs.len()` segments), so the wildcard must
+    // start strictly before `l_segs.len()` to guarantee a non-empty tail on `lp` as well.
+    if l_segs.len() <= wildcard_idx {
+        return false;
+    }
+    for (es, ls) in e_segs[..wildcard_idx].iter().zip(l_segs.iter()) {
+        match es {
+            TemplateSegment::Literal(lit) if lit.as_ref() == *ls => {}
+            TemplateSegment::Param(_) => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 struct AiTargetRef {
@@ -1066,5 +1156,133 @@ upstream = "be"
                 .iter()
                 .any(|d| d.rule == "telemetry.no_trace_plugin" && d.severity == Severity::Warning)
         );
+    }
+
+    #[test]
+    fn template_and_regex_route_shadowing_and_validation() {
+        let bundle = compile_inline(
+            r#"
+[server]
+listen = "127.0.0.1:0"
+[admin]
+enabled = false
+
+[[upstreams]]
+name = "be"
+endpoints = ["http://127.0.0.1:8081"]
+
+[[routes]]
+id = "orders_any_action"
+path_template = "/orders/{order_id}/{action}"
+upstream = "be"
+
+[[routes]]
+id = "orders_status_shadowed"
+path_template = "/orders/{order_id}/status"
+upstream = "be"
+
+[[routes]]
+id = "invoices_re_1"
+path_regex = "/invoices/[0-9]{4}/[0-9]+\\.pdf"
+upstream = "be"
+
+[[routes]]
+id = "invoices_re_dup"
+path_regex = "/invoices/[0-9]{4}/[0-9]+\\.pdf"
+upstream = "be"
+
+[[routes]]
+id = "invoices_exact_shadowed"
+path_exact = "/invoices/2026/42.pdf"
+upstream = "be"
+"#,
+        );
+
+        assert_eq!(
+            bundle.inspect.routes[0].path,
+            "tpl:/orders/{order_id}/{action}"
+        );
+        assert_eq!(
+            bundle.inspect.routes[2].path,
+            r"~/invoices/[0-9]{4}/[0-9]+\.pdf"
+        );
+
+        let report = verify_bundle(&bundle, None, false);
+        assert!(!report.passed);
+        let shadowed: Vec<&str> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.rule == "route.shadowed")
+            .filter_map(|d| d.subject.as_deref())
+            .collect();
+        assert!(shadowed.contains(&"orders_status_shadowed"));
+        assert!(shadowed.contains(&"invoices_re_dup"));
+        assert!(shadowed.contains(&"invoices_exact_shadowed"));
+
+        // Non-shadowed ordering: specific template before broader template and wildcard.
+        let ok_bundle = compile_inline(
+            r#"
+[server]
+listen = "127.0.0.1:0"
+[admin]
+enabled = false
+
+[[upstreams]]
+name = "be"
+endpoints = ["http://127.0.0.1:8081"]
+
+[[route_groups]]
+id = "api_v2"
+path_prefix = "/v2"
+upstream = "be"
+
+[[routes]]
+id = "orders_status"
+group = "api_v2"
+path_template = "/orders/{order_id}/status"
+
+[[routes]]
+id = "orders_any"
+group = "api_v2"
+path_template = "/orders/{order_id}/{action}"
+
+[[routes]]
+id = "orders_prefix"
+group = "api_v2"
+path_prefix = "/orders"
+"#,
+        );
+        assert_eq!(
+            ok_bundle.inspect.routes[0].path,
+            "tpl:/v2/orders/{order_id}/status"
+        );
+        let ok_report = verify_bundle(&ok_bundle, None, false);
+        assert!(ok_report.passed, "diagnostics: {:?}", ok_report.diagnostics);
+
+        // Combining group.path_prefix with route.path_regex is rejected upfront.
+        let bad_loaded = InlineConfigProvider::from_toml(
+            "bad-group-regex.toml",
+            r#"
+[server]
+listen = "127.0.0.1:0"
+[admin]
+enabled = false
+[[upstreams]]
+name = "be"
+endpoints = ["http://127.0.0.1:8081"]
+[[route_groups]]
+id = "api_v2"
+path_prefix = "/v2"
+upstream = "be"
+[[routes]]
+id = "bad_re"
+group = "api_v2"
+path_regex = "/orders/[0-9]+"
+"#,
+        )
+        .load()
+        .unwrap();
+        let err = bad_loaded.config.validate().unwrap_err().to_string();
+        assert!(err.contains("cannot combine `path_regex` with route group"));
     }
 }

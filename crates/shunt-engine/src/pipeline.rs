@@ -43,6 +43,9 @@ pub async fn execute_request(
     };
 
     ctx.route_id = Some(route.id.clone());
+    if !route.hook_mask.is_empty() && route.matcher.path.has_params() {
+        ctx.path_params = route.matcher.path.extract_params(req.uri().path());
+    }
     let plugins = Arc::clone(&route.plugins);
     let mask = route.hook_mask;
 

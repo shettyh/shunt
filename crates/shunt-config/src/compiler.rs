@@ -7,9 +7,9 @@ use http::Method;
 use serde::Serialize;
 use shunt_engine::{
     ActiveHealthCheckConfig, ActiveProbeKind, CertStore, ClientAuthConfig, ClientAuthMode,
-    GatewaySnapshot, OtlpExporterConfig, PathMatch, RedisStoreConfig, RouteMatch, RouteSpec,
-    RuntimeRegistry, SnapshotBuilder, TimeoutConfig, TrafficMirrorSpec, UpstreamConfig,
-    UpstreamEndpoint, UpstreamTlsConfig, load_certified_key_pem,
+    CompiledPathRegex, CompiledPathTemplate, GatewaySnapshot, OtlpExporterConfig, PathMatch,
+    RedisStoreConfig, RouteMatch, RouteSpec, RuntimeRegistry, SnapshotBuilder, TimeoutConfig,
+    TrafficMirrorSpec, UpstreamConfig, UpstreamEndpoint, UpstreamTlsConfig, load_certified_key_pem,
 };
 use shunt_plugin_sdk::{
     DistributedStore, HookMask, HttpPlugin, PluginConfig, PluginRegistry, TelemetrySink,
@@ -353,6 +353,8 @@ impl SnapshotCompiler {
                     PathMatch::Any => "*".to_owned(),
                     PathMatch::Exact(p) => format!("={p}"),
                     PathMatch::Prefix(p) => format!("{p}*"),
+                    PathMatch::Template(t) => format!("tpl:{}", t.raw()),
+                    PathMatch::Regex(re) => format!("~{}", re.raw()),
                 };
                 RouteInspect {
                     id: r.id.clone(),
@@ -561,6 +563,14 @@ fn compile_resolved_route(ir: &ResolvedRoute<'_>) -> Result<RouteSpec, ConfigErr
         PathMatch::Exact(exact.clone())
     } else if let Some(prefix) = &ir.path_prefix {
         PathMatch::Prefix(prefix.clone())
+    } else if let Some(tpl) = &ir.path_template {
+        let compiled = CompiledPathTemplate::parse(tpl)
+            .map_err(|e| ConfigError::Validation(vec![format!("routes.{}: {e}", ir.id)]))?;
+        PathMatch::Template(compiled)
+    } else if let Some(re) = &ir.path_regex {
+        let compiled = CompiledPathRegex::compile(re)
+            .map_err(|e| ConfigError::Validation(vec![format!("routes.{}: {e}", ir.id)]))?;
+        PathMatch::Regex(compiled)
     } else {
         PathMatch::Any
     };
