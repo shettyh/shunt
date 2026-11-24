@@ -15,7 +15,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use shunt_engine::{CoreHttpClient, CoreHttpClientConfig};
+use shunt_engine::{CompiledPathRegex, CoreHttpClient, CoreHttpClientConfig};
 use shunt_plugin_sdk::{HeaderValue, HttpClient, HttpRequest, Uri, header};
 use tokio::sync::watch;
 use tracing::{info, warn};
@@ -838,9 +838,11 @@ pub fn compile_k8s_gateway_snapshot(
                 .or(Some(30_000));
 
             for (match_idx, m) in matches.iter().enumerate() {
-                let (path_exact, path_prefix, path_kind_rank, path_len) =
-                    compile_path_match(m.path.as_ref())?;
-                let matched_prefix = path_prefix.as_deref().or(path_exact.as_deref());
+                let compiled_path = compile_path_match(m.path.as_ref())?;
+                let matched_prefix = compiled_path
+                    .path_prefix
+                    .as_deref()
+                    .or(compiled_path.path_exact.as_deref());
 
                 let mut headers = BTreeMap::new();
                 for hm in &m.headers {
@@ -872,8 +874,8 @@ pub fn compile_k8s_gateway_snapshot(
                 };
 
                 let prec = RoutePrecedenceKey {
-                    path_kind_rank,
-                    path_len,
+                    path_kind_rank: compiled_path.kind_rank,
+                    path_len: compiled_path.path_len,
                     header_count: headers.len(),
                     has_method: !methods.is_empty(),
                     host_specificity,
@@ -894,8 +896,10 @@ pub fn compile_k8s_gateway_snapshot(
                         id: route_id,
                         group: None,
                         hosts: hosts.clone(),
-                        path_prefix,
-                        path_exact,
+                        path_prefix: compiled_path.path_prefix,
+                        path_exact: compiled_path.path_exact,
+                        path_template: None,
+                        path_regex: compiled_path.path_regex,
                         methods,
                         headers,
                         upstream: Some(upstream_name.clone()),
@@ -961,7 +965,7 @@ pub fn compile_k8s_gateway_snapshot(
 
 #[derive(Debug, Clone)]
 struct RoutePrecedenceKey {
-    /// 2 = Exact, 1 = PathPrefix, 0 = Any
+    /// 3 = Exact, 2 = PathPrefix, 1 = RegularExpression, 0 = Any
     path_kind_rank: u8,
     path_len: usize,
     header_count: usize,
@@ -1262,25 +1266,65 @@ fn apply_shunt_annotations(
     Ok(())
 }
 
-fn compile_path_match(
-    pm: Option<&K8sHttpPathMatch>,
-) -> Result<(Option<String>, Option<String>, u8, usize), ConfigError> {
+struct CompiledK8sPathMatch {
+    path_exact: Option<String>,
+    path_prefix: Option<String>,
+    path_regex: Option<String>,
+    kind_rank: u8,
+    path_len: usize,
+}
+
+fn compile_path_match(pm: Option<&K8sHttpPathMatch>) -> Result<CompiledK8sPathMatch, ConfigError> {
     let Some(pm) = pm else {
-        return Ok((None, Some("/".to_owned()), 1, 1));
+        return Ok(CompiledK8sPathMatch {
+            path_exact: None,
+            path_prefix: Some("/".to_owned()),
+            path_regex: None,
+            kind_rank: 2,
+            path_len: 1,
+        });
     };
     let kind = pm.match_type.as_deref().unwrap_or("PathPrefix");
     let val = pm.value.clone().unwrap_or_else(|| "/".to_owned());
     match kind {
         "Exact" => {
             let len = val.len();
-            Ok((Some(val), None, 2, len))
+            Ok(CompiledK8sPathMatch {
+                path_exact: Some(val),
+                path_prefix: None,
+                path_regex: None,
+                kind_rank: 3,
+                path_len: len,
+            })
         }
         "PathPrefix" => {
             let len = val.len();
-            Ok((None, Some(val), 1, len))
+            Ok(CompiledK8sPathMatch {
+                path_exact: None,
+                path_prefix: Some(val),
+                path_regex: None,
+                kind_rank: 2,
+                path_len: len,
+            })
+        }
+        "RegularExpression" => {
+            CompiledPathRegex::compile(&val).map_err(|e| {
+                ConfigError::K8s(format!(
+                    "invalid HTTPRoute RegularExpression path `{val}`: {e}"
+                ))
+            })?;
+            Ok(CompiledK8sPathMatch {
+                path_exact: None,
+                path_prefix: None,
+                path_regex: Some(val),
+                kind_rank: 1,
+                // Per Gateway API v1 precedence, RegularExpression tie-breaking uses headers/method/
+                // creationTimestamp/name rather than regex string length.
+                path_len: 0,
+            })
         }
         other => Err(ConfigError::K8s(format!(
-            "unsupported HTTPRoute path match type `{other}` (supported: `Exact`, `PathPrefix`)"
+            "unsupported HTTPRoute path match type `{other}` (supported: `Exact`, `PathPrefix`, `RegularExpression`)"
         ))),
     }
 }
@@ -1339,6 +1383,11 @@ fn compile_rule_filters(
                                 path_replace_full = pm.replace_full_path.clone();
                             }
                             "ReplacePrefixMatch" => {
+                                if matched_prefix.is_none() {
+                                    return Err(ConfigError::K8s(
+                                        "URLRewrite `ReplacePrefixMatch` is not compatible with `RegularExpression` path matches; use `ReplaceFullPath`".to_owned(),
+                                    ));
+                                }
                                 path_replace_prefix = pm.replace_prefix_match.clone();
                             }
                             other => {
@@ -1377,12 +1426,15 @@ fn compile_rule_filters(
                             }
                             "ReplacePrefixMatch" => {
                                 if let Some(p) = &pm.replace_prefix_match {
-                                    if let Some(mp) = matched_prefix {
-                                        cfg.insert(
-                                            "path_match_prefix".to_owned(),
-                                            JsonValue::String(mp.to_owned()),
-                                        );
-                                    }
+                                    let Some(mp) = matched_prefix else {
+                                        return Err(ConfigError::K8s(
+                                            "RequestRedirect `ReplacePrefixMatch` is not compatible with `RegularExpression` path matches; use `ReplaceFullPath`".to_owned(),
+                                        ));
+                                    };
+                                    cfg.insert(
+                                        "path_match_prefix".to_owned(),
+                                        JsonValue::String(mp.to_owned()),
+                                    );
                                     cfg.insert(
                                         "path_replace_prefix".to_owned(),
                                         JsonValue::String(p.clone()),

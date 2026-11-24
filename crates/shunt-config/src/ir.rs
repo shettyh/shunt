@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use http::Method;
 use http::header::{HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
-use shunt_engine::{RedisStoreConfig, host_matches};
+use shunt_engine::{CompiledPathRegex, CompiledPathTemplate, RedisStoreConfig, host_matches};
 use shunt_plugin_sdk::FailurePolicy;
 
 use crate::error::ConfigError;
@@ -473,6 +473,12 @@ pub struct RouteIr {
     pub hosts: Vec<String>,
     pub path_prefix: Option<String>,
     pub path_exact: Option<String>,
+    /// Optional parameterized path template (e.g. `"/orders/{order_id}/status"`, `"/files/{*rest}"`).
+    #[serde(default)]
+    pub path_template: Option<String>,
+    /// Optional full-path linear-time regular expression (e.g. `"/orders/(?P<order_id>[0-9]+)/status"`).
+    #[serde(default)]
+    pub path_regex: Option<String>,
     #[serde(default)]
     pub methods: Vec<String>,
     /// Optional exact HTTP header matchers (all must match).
@@ -506,6 +512,8 @@ pub struct ResolvedRoute<'a> {
     pub hosts: Vec<String>,
     pub path_prefix: Option<String>,
     pub path_exact: Option<String>,
+    pub path_template: Option<String>,
+    pub path_regex: Option<String>,
     pub methods: Vec<String>,
     pub headers: BTreeMap<String, String>,
     pub upstream: String,
@@ -577,18 +585,29 @@ impl GatewayConfig {
             .or_else(|| group.and_then(|g| g.upstream.as_ref()))?
             .clone();
 
-        let (path_prefix, path_exact) = match group.and_then(|g| g.path_prefix.as_deref()) {
-            Some(gp) => {
-                if let Some(re) = &route.path_exact {
-                    (None, Some(join_route_paths(gp, re)))
-                } else if let Some(rp) = &route.path_prefix {
-                    (Some(join_route_paths(gp, rp)), None)
-                } else {
-                    (Some(join_route_paths(gp, "/")), None)
+        let (path_prefix, path_exact, path_template, path_regex) =
+            match group.and_then(|g| g.path_prefix.as_deref()) {
+                Some(gp) => {
+                    if let Some(re) = &route.path_exact {
+                        (None, Some(join_route_paths(gp, re)), None, None)
+                    } else if let Some(tpl) = &route.path_template {
+                        (None, None, Some(join_route_paths(gp, tpl)), None)
+                    } else if let Some(rp) = &route.path_prefix {
+                        (Some(join_route_paths(gp, rp)), None, None, None)
+                    } else if route.path_regex.is_some() {
+                        // Rejected upfront by `GatewayConfig::validate`.
+                        return None;
+                    } else {
+                        (Some(join_route_paths(gp, "/")), None, None, None)
+                    }
                 }
-            }
-            None => (route.path_prefix.clone(), route.path_exact.clone()),
-        };
+                None => (
+                    route.path_prefix.clone(),
+                    route.path_exact.clone(),
+                    route.path_template.clone(),
+                    route.path_regex.clone(),
+                ),
+            };
 
         let hosts = if !route.hosts.is_empty() {
             route.hosts.clone()
@@ -647,6 +666,8 @@ impl GatewayConfig {
             hosts,
             path_prefix,
             path_exact,
+            path_template,
+            path_regex,
             methods,
             headers,
             upstream,
@@ -1084,13 +1105,27 @@ impl GatewayConfig {
                 },
                 None => None,
             };
-            if route.path_prefix.is_some() && route.path_exact.is_some() {
+            let path_matcher_count = usize::from(route.path_prefix.is_some())
+                + usize::from(route.path_exact.is_some())
+                + usize::from(route.path_template.is_some())
+                + usize::from(route.path_regex.is_some());
+            if path_matcher_count > 1 {
                 errors.push(format!(
-                    "routes.{}: cannot specify both `path_prefix` and `path_exact`",
+                    "routes.{}: specify at most one of `path_prefix`, `path_exact`, `path_template`, or `path_regex`",
                     route.id
                 ));
             }
-            if group_ref.and_then(|g| g.path_prefix.as_ref()).is_some() {
+            if let Some(tpl) = &route.path_template
+                && let Err(e) = CompiledPathTemplate::parse(tpl)
+            {
+                errors.push(format!("routes.{}: {e}", route.id));
+            }
+            if let Some(re) = &route.path_regex
+                && let Err(e) = CompiledPathRegex::compile(re)
+            {
+                errors.push(format!("routes.{}: {e}", route.id));
+            }
+            if let Some(gp) = group_ref.and_then(|g| g.path_prefix.as_deref()) {
                 if let Some(p) = &route.path_prefix
                     && !p.starts_with('/')
                 {
@@ -1105,6 +1140,23 @@ impl GatewayConfig {
                     errors.push(format!(
                         "routes.{}: `path_exact` (`{p}`) must start with `/`",
                         route.id
+                    ));
+                }
+                if let Some(tpl) = &route.path_template {
+                    let joined = join_route_paths(gp, tpl);
+                    if let Err(e) = CompiledPathTemplate::parse(&joined) {
+                        errors.push(format!(
+                            "routes.{}: lowered template `{joined}` is invalid: {e}",
+                            route.id
+                        ));
+                    }
+                }
+                if route.path_regex.is_some()
+                    && let Some(g) = group_ref
+                {
+                    errors.push(format!(
+                        "routes.{}: cannot combine `path_regex` with route group `{}` `path_prefix` (`{gp}`); omit `path_prefix` on the group or use `path_template`",
+                        route.id, g.id
                     ));
                 }
             }

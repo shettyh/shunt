@@ -9,7 +9,10 @@ use shunt_config::{
     SnapshotCompiler, TraceRingBuffer, UpstreamEndpointIr, UpstreamIr, host_pattern_subsumes,
     join_route_paths, redact_secrets, route_subsumes,
 };
-use shunt_engine::{PathMatch, RouteMatch, RuntimeRegistry, UpstreamConfig, UpstreamPoolKey};
+use shunt_engine::{
+    CompiledPathRegex, CompiledPathTemplate, PathMatch, RouteMatch, RuntimeRegistry,
+    UpstreamConfig, UpstreamPoolKey,
+};
 use shunt_plugin_sdk::{
     BuildContext, HookMask, HttpPlugin, PluginBuildError, PluginConfig, PluginFactory,
     PluginRegistry,
@@ -326,6 +329,7 @@ fn arb_path_match() -> impl Strategy<Value = PathMatch> {
             Just("/api/v1".to_owned()),
             Just("/apiv2".to_owned()),
             Just("/v1/chat".to_owned()),
+            Just("/orders".to_owned()),
         ]
         .prop_map(PathMatch::Prefix),
         prop_oneof![
@@ -334,8 +338,25 @@ fn arb_path_match() -> impl Strategy<Value = PathMatch> {
             Just("/api/v1".to_owned()),
             Just("/apiv2".to_owned()),
             Just("/v1/chat".to_owned()),
+            Just("/orders/123/status".to_owned()),
         ]
         .prop_map(PathMatch::Exact),
+        prop_oneof![
+            Just("/api/{ver}"),
+            Just("/api/{ver}/{res}"),
+            Just("/api/{*rest}"),
+            Just("/orders/{id}/status"),
+            Just("/orders/{id}/{op}"),
+            Just("/orders/{*rest}"),
+            Just("/{*all}"),
+        ]
+        .prop_map(|s| PathMatch::Template(CompiledPathTemplate::parse(s).unwrap())),
+        prop_oneof![
+            Just(r"/orders/[0-9]+/status"),
+            Just(r"/api/v[0-9]+/.*"),
+            Just(r"/v1/chat"),
+        ]
+        .prop_map(|s| PathMatch::Regex(CompiledPathRegex::compile(s).unwrap())),
     ]
 }
 
@@ -399,6 +420,10 @@ proptest! {
             Just("/apiv2"),
             Just("/apiv2/foo"),
             Just("/v1/chat"),
+            Just("/orders"),
+            Just("/orders/123/status"),
+            Just("/orders/abc/status"),
+            Just("/orders/123/cancel"),
             Just("/other"),
         ],
         req_method in prop_oneof![
@@ -537,10 +562,12 @@ proptest! {
             Just(Some("/api/v2".to_owned())),
         ],
         r_path in prop_oneof![
-            Just((None, None)),
-            Just((Some("/".to_owned()), None)),
-            Just((Some("/users".to_owned()), None)),
-            Just((None, Some("/health".to_owned()))),
+            Just((None, None, None, None)),
+            Just((Some("/".to_owned()), None, None, None)),
+            Just((Some("/users".to_owned()), None, None, None)),
+            Just((None, Some("/health".to_owned()), None, None)),
+            Just((None, None, Some("/orders/{order_id}/status".to_owned()), None)),
+            Just((None, None, None, Some(r"/orders/[0-9]+/status".to_owned()))),
         ],
         g_methods in prop::collection::vec(prop_oneof![Just("GET"), Just("POST"), Just("DELETE")], 0..3),
         r_methods in prop::collection::vec(prop_oneof![Just("GET"), Just("POST"), Just("DELETE")], 0..3),
@@ -554,11 +581,14 @@ proptest! {
             Just("/"),
             Just("/api"),
             Just("/api/users"),
+            Just("/api/orders/42/status"),
             Just("/api/v2"),
             Just("/api/v2/users"),
             Just("/api/v2/health"),
+            Just("/api/v2/orders/42/status"),
             Just("/users"),
             Just("/health"),
+            Just("/orders/42/status"),
         ],
         req_method in prop_oneof![
             Just(http::Method::GET),
@@ -593,6 +623,8 @@ proptest! {
                 hosts: r_hosts.clone(),
                 path_prefix: r_path.0,
                 path_exact: r_path.1,
+                path_template: r_path.2,
+                path_regex: r_path.3,
                 methods: r_methods.iter().map(|s| (*s).to_owned()).collect(),
                 headers: BTreeMap::new(),
                 upstream: None,
@@ -625,6 +657,10 @@ proptest! {
                     PathMatch::Exact(exact)
                 } else if let Some(prefix) = resolved.path_prefix {
                     PathMatch::Prefix(prefix)
+                } else if let Some(tpl) = resolved.path_template {
+                    PathMatch::Template(CompiledPathTemplate::parse(&tpl).unwrap())
+                } else if let Some(re) = resolved.path_regex {
+                    PathMatch::Regex(CompiledPathRegex::compile(&re).unwrap())
                 } else {
                     PathMatch::Any
                 },

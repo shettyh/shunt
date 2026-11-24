@@ -7,6 +7,7 @@ pub mod catch;
 pub mod error;
 pub mod http_client;
 pub mod otlp;
+pub mod path_match;
 pub mod pipeline;
 pub mod probe;
 pub mod redis;
@@ -24,6 +25,10 @@ pub use http_client::{
     DEFAULT_HTTP_CLIENT_MAX_RESPONSE_BYTES, DEFAULT_HTTP_CLIENT_TIMEOUT,
 };
 pub use otlp::{OtlpExporterConfig, OtlpExporterStats, OtlpHttpExporter, encode_otlp_traces_json};
+pub use path_match::{
+    CompiledPathRegex, CompiledPathTemplate, DEFAULT_PATH_REGEX_SIZE_LIMIT, PathMatch,
+    TemplateSegment,
+};
 pub use probe::ProbeSupervisor;
 pub use redis::{
     RedisStateStore, RedisStoreConfig, RespError, RespValue, decode_resp_frame,
@@ -32,9 +37,8 @@ pub use redis::{
 pub use registry::{BuildSession, RuntimeRegistry};
 pub use server::{GatewayServer, ServerHandle, ServerReloader};
 pub use snapshot::{
-    CompiledMirror, CompiledRoute, DEFAULT_MAX_BODY_BYTES, GatewaySnapshot, PathMatch, RouteMatch,
-    RouteSpec, SnapshotBuilder, TimeoutConfig, TrafficMirrorSpec, UpstreamHealthReport,
-    host_matches,
+    CompiledMirror, CompiledRoute, DEFAULT_MAX_BODY_BYTES, GatewaySnapshot, RouteMatch, RouteSpec,
+    SnapshotBuilder, TimeoutConfig, TrafficMirrorSpec, UpstreamHealthReport, host_matches,
 };
 pub use tls::{
     CertStore, ClientAuthConfig, ClientAuthMode, DynamicCertResolver, TlsListenerConfig,

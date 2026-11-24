@@ -1230,6 +1230,7 @@ dependencies = [
  "pin-project-lite",
  "proptest",
  "rcgen",
+ "regex",
  "ring",
  "rustls",
  "serde",

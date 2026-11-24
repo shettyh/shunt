@@ -32,6 +32,69 @@ pub struct ClientCertInfo {
     pub sha256_fingerprint: String,
 }
 
+type PathParamEntry = (Arc<str>, String);
+
+/// Captured path parameters extracted from a matched `path_template` or named-capture `path_regex`
+/// route.
+///
+/// Uses an `Option<Box<[(Arc<str>, String)]>>` representation so static routes (`Exact`, `Prefix`,
+/// `Any`) and `HookMask::EMPTY` routes incur zero heap allocation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PathParams {
+    entries: Option<Box<[PathParamEntry]>>,
+}
+
+impl PathParams {
+    /// Creates an empty parameter set with zero heap allocation.
+    #[inline]
+    pub const fn empty() -> Self {
+        Self { entries: None }
+    }
+
+    /// Creates a parameter set from pre-extracted `(name, value)` pairs.
+    #[inline]
+    pub fn from_pairs(pairs: Vec<(Arc<str>, String)>) -> Self {
+        if pairs.is_empty() {
+            Self { entries: None }
+        } else {
+            Self {
+                entries: Some(pairs.into_boxed_slice()),
+            }
+        }
+    }
+
+    /// Looks up a captured path parameter by name.
+    #[inline]
+    pub fn get(&self, name: &str) -> Option<&str> {
+        let entries = self.entries.as_deref()?;
+        entries
+            .iter()
+            .find_map(|(k, v)| (k.as_ref() == name).then_some(v.as_str()))
+    }
+
+    /// Returns `true` if no path parameters were captured.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.entries.as_deref().is_none_or(<[_]>::is_empty)
+    }
+
+    /// Returns the number of captured path parameters.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.entries.as_deref().map_or(0, <[_]>::len)
+    }
+
+    /// Iterates over captured `(name, value)` pairs in match order.
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.entries
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|(k, v)| (k.as_ref(), v.as_str()))
+    }
+}
+
 /// Per-request context threaded through every lifecycle hook.
 ///
 /// Plugins communicate across hooks (and across plugins) via typed values stored
@@ -44,6 +107,8 @@ pub struct RequestCtx {
     /// Verified peer client certificate metadata when presented over an mTLS listener.
     pub client_cert: Option<Arc<ClientCertInfo>>,
     pub route_id: Option<String>,
+    /// Captured path parameters from a matched `path_template` or named-capture `path_regex` route.
+    pub path_params: PathParams,
     pub attempt: usize,
     pub started_at: Instant,
     pub extensions: Extensions,
@@ -61,6 +126,7 @@ impl RequestCtx {
             tls_sni,
             client_cert: None,
             route_id: None,
+            path_params: PathParams::empty(),
             attempt: 0,
             started_at: Instant::now(),
             extensions: Extensions::new(),
@@ -69,6 +135,12 @@ impl RequestCtx {
             last_upstream_error: None,
             last_upstream_status: None,
         }
+    }
+
+    /// Returns the value of a captured path parameter by name (e.g., `"order_id"`).
+    #[inline]
+    pub fn path_param(&self, name: &str) -> Option<&str> {
+        self.path_params.get(name)
     }
 
     /// Attaches verified peer client TLS certificate metadata to this request context.

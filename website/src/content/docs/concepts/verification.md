@@ -18,7 +18,7 @@ shunt check --k8s-manifest examples/k8s-gateway-api.yaml
 
 Runs deep static analysis over the compiled `GatewaySnapshot` to catch subtle production bugs before deployment:
 
-- **Route shadowing** (e.g., a broad `path_prefix = "/"` placed before `/api`, including across paths lowered from `[[route_groups]]`)
+- **Route shadowing** (e.g., a broad `path_prefix = "/"` placed before `/api`, or `/orders/{id}/{action}` placed before `/orders/{id}/status`, including across paths lowered from `[[route_groups]]`, `path_template`, and `path_regex`)
 - **Unused route groups** (`route_group.unused` warnings when a declared `[[route_groups]]` entry has no routes attached)
 - **Plugin ordering bugs** across the effective `group + route` chain (e.g., `ai-provider-adapter` placed before `ai-model-router`, or `ai-cache` placed after `ai-budget`)
 - **Missing upstream or provider definitions** referenced by model aliases
@@ -76,7 +76,7 @@ body_contains = '"ok":true'
 ## 4. Formal & Fuzz Verification (Repo Level)
 
 Shunt itself is verified with:
-- **18 TOML conformance suites** covering HTTP, route groups, AI, and MCP specs (`specs/conformance/`)
+- **19 TOML conformance suites** covering HTTP, route groups, path templates/regex, AI, and MCP specs (`specs/conformance/`)
 - **TLA+ models** (`specs/tla/`) verifying `AtomicReload`, `PassiveHealth`, and `RequestPipeline` invariants
 - **18 `cargo-fuzz` targets** (`fuzz/fuzz_targets/`) covering untrusted parsers (SSE, AWS binary EventStream, Gemini SSE, JWT/JWKS, X.509 mTLS certs, RESP/Redis, MCP JSON-RPC, K8s manifests, guardrails, and config parsing)
 - **Property tests (`proptest`)** across routing, token accounting, and translation layers

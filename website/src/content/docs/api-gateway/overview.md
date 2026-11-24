@@ -7,7 +7,7 @@ Shunt's HTTP API Gateway combines the lean `shunt-engine` data plane with **15 c
 
 ## Core Routing & Load Balancing
 
-Routes are evaluated top-to-bottom and can match on any combination of **hostnames** (including wildcards like `*.example.com`), **exact or prefix paths**, **HTTP methods**, and **exact request headers**:
+Routes are evaluated top-to-bottom and can match on any combination of **hostnames** (including wildcards like `*.example.com`), **exact, prefix, parameterized template (`path_template`), or linear-time regex (`path_regex`) paths**, **HTTP methods**, and **exact request headers**:
 
 ```toml
 [[upstreams]]
@@ -47,6 +47,43 @@ max_attempts = 2
 response_headers_timeout_ms = 10000
 idle_chunk_timeout_ms = 30000
 ```
+
+## Path Templates, Regex & Parameter Rewriting
+
+Use `path_template` for zero-allocation REST path parameters (`{param}`) and catch-all wildcards (`{*filepath}`), or `path_regex` for constrained full-path patterns (accelerated via a single-pass `RegexSet` with ReDoS-safe linear-time guarantees):
+
+```toml
+[[routes]]
+id = "order_status"
+path_template = "/orders/{order_id}/status"
+methods = ["GET"]
+upstream = "orders_status_svc"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+upstream_set = { "x-order-id" = "{order_id}" }
+path_replace_full = "/internal/orders/{order_id}/state"
+
+[[routes]]
+id = "static_assets"
+path_template = "/files/{*filepath}"
+methods = ["GET"]
+upstream = "assets_svc"
+
+[[routes]]
+id = "invoice_pdf"
+path_regex = '/invoices/(?P<year>[0-9]{4})/(?P<invoice_id>[0-9]+)\.pdf'
+methods = ["GET"]
+upstream = "billing_svc"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+upstream_set = { "x-invoice-year" = "{year}", "x-invoice-id" = "{invoice_id}" }
+```
+
+Captured parameters are extracted strictly on demand (zero heap allocation on static or `HookMask::EMPTY` routes) and work seamlessly with `[[route_groups]]` (`group.path_prefix` + `route.path_template`) and `shunt verify` route-shadowing checks. See [`examples/shunt-path-templates-and-regex.toml`](https://github.com/shettyh/shunt/blob/main/examples/shunt-path-templates-and-regex.toml).
 
 ## Route Groups & Shared Plugin Chains
 

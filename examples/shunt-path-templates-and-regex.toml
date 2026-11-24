@@ -1,0 +1,84 @@
+# Shunt Example: Parameterized Path Templates & Regex Routing (RFC 0022)
+#
+# Run:
+#   shunt check -c examples/shunt-path-templates-and-regex.toml
+#   shunt verify -c examples/shunt-path-templates-and-regex.toml
+
+[server]
+listen = "0.0.0.0:8080"
+
+[admin]
+enabled = true
+listen = "127.0.0.1:9090"
+
+[[plugins]]
+name = "request-id"
+
+[[upstreams]]
+name = "orders_status_svc"
+endpoints = ["http://127.0.0.1:8081"]
+
+[[upstreams]]
+name = "orders_mutations_svc"
+endpoints = ["http://127.0.0.1:8082"]
+
+[[upstreams]]
+name = "assets_svc"
+endpoints = ["http://127.0.0.1:8083"]
+
+[[upstreams]]
+name = "billing_svc"
+endpoints = ["http://127.0.0.1:8084"]
+
+[[route_groups]]
+id = "api_v2"
+path_prefix = "/v2"
+
+[[route_groups.plugins]]
+name = "rate-limit"
+id = "api-v2-rl"
+[route_groups.plugins.config]
+requests_per_second = 100.0
+burst = 200
+key = "client_ip"
+
+# Parameterized REST endpoint lowered to `/v2/orders/{order_id}/status`.
+[[routes]]
+id = "order_status"
+group = "api_v2"
+path_template = "/orders/{order_id}/status"
+methods = ["GET"]
+upstream = "orders_status_svc"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+upstream_set = { "x-order-id" = "{order_id}" }
+path_replace_full = "/internal/orders/{order_id}/state"
+
+# Separate upstream & method for `/v2/orders/{order_id}/cancel`.
+[[routes]]
+id = "order_cancel"
+group = "api_v2"
+path_template = "/orders/{order_id}/cancel"
+methods = ["POST"]
+upstream = "orders_mutations_svc"
+
+# Final catch-all wildcard template capturing nested file paths.
+[[routes]]
+id = "static_assets"
+path_template = "/files/{*filepath}"
+methods = ["GET"]
+upstream = "assets_svc"
+
+# Linear-time, full-path anchored regex with named captures (accelerated via RegexSet).
+[[routes]]
+id = "invoice_pdf"
+path_regex = "/invoices/(?P<year>[0-9]{4})/(?P<invoice_id>[0-9]+)\\.pdf"
+methods = ["GET"]
+upstream = "billing_svc"
+
+[[routes.plugins]]
+name = "header-rewrite"
+[routes.plugins.config]
+upstream_set = { "x-invoice-year" = "{year}", "x-invoice-id" = "{invoice_id}" }

@@ -80,6 +80,7 @@ impl PluginFactory for PoweredByFactory {
 ## 3. SDK Capabilities Available to Plugins
 
 - **Typed `RequestCtx::extensions`:** Share typed state between plugins on the same request (e.g., auth principal from `jwt-auth` consumed by `mcp-auth` or custom plugins).
+- **Captured Path Parameters (`ctx.path_param("order_id")` / `ctx.path_params`):** Read matched parameters from `path_template` (`{param}`, `{*wildcard}`) or named `path_regex` capture groups (`(?P<name>...)`), extracted on demand with zero heap allocation on static routes.
 - **Reload-Persistent `StateStore` (`ctx.state_store()`):** Store counters, rate-limit buckets, or caches keyed by plugin `id`—automatically backed by either in-process memory or Redis/Valkey.
 - **Outbound `HttpClient` (`ctx.http_client()`):** Make pooled async HTTP/HTTPS calls (for JWKS refresh, OPA webhooks, external guardrails, or Cloud IAM) without adding another HTTP client crate.
 - **Dynamic Routing & Retries:** Set `ctx.set_upstream_override(...)` and return `Flow::RetryUpstream` from `on_response_headers` or `on_upstream_error` to drive custom failover loops.
