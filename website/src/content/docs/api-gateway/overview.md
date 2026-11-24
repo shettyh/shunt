@@ -83,7 +83,7 @@ name = "header-rewrite"
 upstream_set = { "x-invoice-year" = "{year}", "x-invoice-id" = "{invoice_id}" }
 ```
 
-Captured parameters are extracted strictly on demand (zero heap allocation on static or `HookMask::EMPTY` routes) and work seamlessly with `[[route_groups]]` (`group.path_prefix` + `route.path_template`) and `shunt verify` route-shadowing checks. See [`examples/shunt-path-templates-and-regex.toml`](https://github.com/shettyh/shunt/blob/main/examples/shunt-path-templates-and-regex.toml).
+Captured parameters are extracted strictly on demand (zero heap allocation on static or `HookMask::EMPTY` routes) and work seamlessly with `[[route_groups]]` (`group.path_prefix` + `route.path_template`) and `shunt verify` route-shadowing checks. Once a snapshot reaches 16+ routes, `shunt-engine` automatically activates its internal `RouteIndex` (`O(1)` exact hash map, `O(segments)` Segment Trie, and single-pass `RegexSet` pruned by declaration index) to keep lookup times flat (~35–55 ns even at 5,000 routes and on 404 traffic) while preserving strict first-match-wins order. See [`examples/shunt-path-templates-and-regex.toml`](https://github.com/shettyh/shunt/blob/main/examples/shunt-path-templates-and-regex.toml).
 
 ## Route Groups & Shared Plugin Chains
 

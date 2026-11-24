@@ -6,8 +6,8 @@ use http::{HeaderMap, Uri};
 use proptest::prelude::*;
 use shunt_engine::pipeline::{strip_hop_by_hop_headers, strip_uri_prefix};
 use shunt_engine::{
-    CompiledPathRegex, CompiledPathTemplate, EndpointState, PathMatch, RouteMatch, RouteSpec,
-    RuntimeRegistry, SnapshotBuilder, UpstreamConfig, UpstreamPool, host_matches,
+    CompiledPathRegex, CompiledPathTemplate, EndpointState, PathMatch, RouteIndex, RouteMatch,
+    RouteSpec, RuntimeRegistry, SnapshotBuilder, UpstreamConfig, UpstreamPool, host_matches,
     select_endpoint_index,
 };
 use shunt_plugin_sdk::{Clock, ManualClock};
@@ -498,44 +498,80 @@ proptest! {
     }
 
     #[test]
-    fn snapshot_regex_set_match_route_is_equivalent_to_linear_scan(
-        route_kinds in prop::collection::vec((0u8..8, 0u8..3, 0u8..3), 1..12),
+    fn snapshot_and_route_index_match_route_is_equivalent_to_linear_scan(
+        route_kinds in prop::collection::vec((0u8..16, 0u8..4, 0u8..4, 0u8..3), 1..48),
         req_path in prop_oneof![
             Just("/"),
+            Just("//"),
+            Just("/orders"),
+            Just("/orders/"),
+            Just("/orders//status"),
             Just("/orders/123/status"),
+            Just("/orders/123/status/"),
             Just("/orders/abc/status"),
+            Just("/orders/status"),
             Just("/orders/123/cancel"),
             Just("/invoices/2026/42.pdf"),
+            Just("/files"),
+            Just("/files/"),
+            Just("/files//a"),
             Just("/files/a/b/c.txt"),
             Just("/api/v1/items"),
+            Just("/a//b/c"),
             Just("/other"),
         ],
-        req_host in prop_oneof![Just("api.example.com"), Just("other.org")],
-        req_method in prop_oneof![Just(http::Method::GET), Just(http::Method::POST)],
+        req_host in prop_oneof![
+            Just("api.example.com"),
+            Just("sub.example.com"),
+            Just("other.org"),
+        ],
+        req_method in prop_oneof![
+            Just(http::Method::GET),
+            Just(http::Method::POST),
+            Just(http::Method::DELETE),
+        ],
+        req_canary in any::<bool>(),
     ) {
         let reg = RuntimeRegistry::new();
         let mut builder = SnapshotBuilder::new(1).upstream(UpstreamConfig::new(
             "be",
             vec!["http://127.0.0.1:8081".to_owned()],
         ));
+        let canary_hdr = HeaderName::from_static("x-canary");
 
-        for (i, (kind, host_kind, method_kind)) in route_kinds.iter().enumerate() {
+        for (i, (kind, host_kind, method_kind, hdr_kind)) in route_kinds.iter().enumerate() {
             let path = match kind {
                 0 => PathMatch::Exact("/orders/123/status".to_owned()),
-                1 => PathMatch::Prefix("/orders".to_owned()),
-                2 => PathMatch::Template(
+                1 => PathMatch::Exact("/".to_owned()),
+                2 => PathMatch::Prefix("/orders".to_owned()),
+                3 => PathMatch::Prefix("/orders/".to_owned()),
+                4 => PathMatch::Prefix("/".to_owned()),
+                5 => PathMatch::Prefix("/a//b".to_owned()),
+                6 => PathMatch::Template(
                     CompiledPathTemplate::parse("/orders/{order_id}/status").unwrap(),
                 ),
-                3 => PathMatch::Template(
+                7 => PathMatch::Template(
+                    CompiledPathTemplate::parse("/{tenant}/status").unwrap(),
+                ),
+                8 => PathMatch::Template(
                     CompiledPathTemplate::parse("/files/{*filepath}").unwrap(),
                 ),
-                4 => PathMatch::Regex(
+                9 => PathMatch::Template(
+                    CompiledPathTemplate::parse("/{*all}").unwrap(),
+                ),
+                10 => PathMatch::Template(
+                    CompiledPathTemplate::parse("/orders/123/status").unwrap(),
+                ),
+                11 => PathMatch::Template(
+                    CompiledPathTemplate::parse("/").unwrap(),
+                ),
+                12 => PathMatch::Regex(
                     CompiledPathRegex::compile(r"/orders/(?P<id>[0-9]+)/status").unwrap(),
                 ),
-                5 => PathMatch::Regex(
+                13 => PathMatch::Regex(
                     CompiledPathRegex::compile(r"/invoices/[0-9]{4}/[0-9]+\.pdf").unwrap(),
                 ),
-                6 => PathMatch::Regex(CompiledPathRegex::compile(r"/api/v[0-9]+/.*").unwrap()),
+                14 => PathMatch::Regex(CompiledPathRegex::compile(r"/api/v[0-9]+/.*").unwrap()),
                 _ => PathMatch::Any,
             };
             let mut matcher = RouteMatch {
@@ -544,27 +580,40 @@ proptest! {
             };
             match host_kind {
                 1 => matcher.hosts.push("api.example.com".to_owned()),
-                2 => matcher.hosts.push("other.org".to_owned()),
+                2 => matcher.hosts.push("*.example.com".to_owned()),
+                3 => matcher.hosts.push("other.org".to_owned()),
                 _ => {}
             }
             match method_kind {
                 1 => matcher.methods.push(http::Method::GET),
                 2 => matcher.methods.push(http::Method::POST),
+                3 => matcher.methods.push(http::Method::DELETE),
+                _ => {}
+            }
+            match hdr_kind {
+                1 => matcher.headers.push((canary_hdr.clone(), "true".to_owned())),
+                2 => matcher.headers.push((canary_hdr.clone(), "false".to_owned())),
                 _ => {}
             }
             builder = builder.route(RouteSpec::new(format!("r_{i}"), matcher, "be"));
         }
 
         let snap = builder.build(&reg, false).unwrap();
-        let req = http::Request::builder()
+        let index = RouteIndex::build(&snap.routes);
+
+        let mut req_builder = http::Request::builder()
             .method(req_method)
             .uri(req_path)
-            .header(http::header::HOST, req_host)
-            .body(())
-            .unwrap();
+            .header(http::header::HOST, req_host);
+        if req_canary {
+            req_builder = req_builder.header("x-canary", "true");
+        }
+        let req = req_builder.body(()).unwrap();
 
-        let fast = snap.match_route(&req).map(|r| r.id.as_str());
         let linear = snap.match_route_linear(&req).map(|r| r.id.as_str());
+        let fast = snap.match_route(&req).map(|r| r.id.as_str());
+        let indexed = index.match_route(&snap.routes, &req).map(|r| r.id.as_str());
         prop_assert_eq!(fast, linear);
+        prop_assert_eq!(indexed, linear);
     }
 }
