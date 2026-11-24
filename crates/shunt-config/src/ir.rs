@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use http::Method;
 use http::header::{HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
-use shunt_engine::{CompiledPathRegex, CompiledPathTemplate, RedisStoreConfig, host_matches};
+use shunt_engine::{
+    CompiledPathRegex, CompiledPathTemplate, DEFAULT_LISTEN_BACKLOG, ListenerConfig,
+    MAX_REUSEPORT_SHARDS, RedisStoreConfig, host_matches,
+};
 use shunt_plugin_sdk::FailurePolicy;
 
 use crate::error::ConfigError;
@@ -146,6 +149,14 @@ impl Default for StateConfig {
 pub struct ServerConfig {
     pub listen: String,
     pub drain_timeout_ms: u64,
+    /// Enable per-core `SO_REUSEPORT` multi-shard listeners (default: `false`).
+    pub reuseport: bool,
+    /// Explicit listener shard count when `reuseport = true` (default: available CPU cores,
+    /// clamped to `1..=128`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accept_shards: Option<usize>,
+    /// TCP listen backlog per listener socket (default: `4096`).
+    pub backlog: u32,
     pub tls: Option<ServerTlsConfig>,
 }
 
@@ -154,7 +165,21 @@ impl Default for ServerConfig {
         Self {
             listen: "0.0.0.0:8080".to_owned(),
             drain_timeout_ms: 30_000,
+            reuseport: false,
+            accept_shards: None,
+            backlog: DEFAULT_LISTEN_BACKLOG,
             tls: None,
+        }
+    }
+}
+
+impl ServerConfig {
+    /// Converts `[server]` listener fields into an engine [`ListenerConfig`].
+    pub fn to_listener_config(&self) -> ListenerConfig {
+        ListenerConfig {
+            reuseport: self.reuseport,
+            accept_shards: self.accept_shards,
+            backlog: self.backlog,
         }
     }
 }
@@ -758,6 +783,19 @@ impl GatewayConfig {
                 "server.listen: `{}` is not a valid socket address (expected host:port)",
                 self.server.listen
             ));
+        }
+
+        if self.server.backlog == 0 {
+            errors.push("server.backlog: must be >= 1".into());
+        }
+        if let Some(shards) = self.server.accept_shards {
+            if !self.server.reuseport {
+                errors.push("server.accept_shards: requires `server.reuseport = true`".into());
+            } else if shards == 0 || shards > MAX_REUSEPORT_SHARDS {
+                errors.push(format!(
+                    "server.accept_shards: must be between 1 and {MAX_REUSEPORT_SHARDS}"
+                ));
+            }
         }
 
         let admin_addr = if self.admin.enabled {

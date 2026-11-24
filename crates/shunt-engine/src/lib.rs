@@ -12,6 +12,7 @@ pub mod pipeline;
 pub mod probe;
 pub mod redis;
 pub mod registry;
+pub mod reuseport;
 pub mod route_index;
 pub mod server;
 pub mod snapshot;
@@ -36,6 +37,7 @@ pub use redis::{
     encode_resp_command, encode_resp_value,
 };
 pub use registry::{BuildSession, RuntimeRegistry};
+pub use reuseport::{DEFAULT_LISTEN_BACKLOG, ListenerConfig, ListenerInfo, MAX_REUSEPORT_SHARDS};
 pub use route_index::{ROUTE_INDEX_MIN_ROUTES, RouteIndex};
 pub use server::{GatewayServer, ServerHandle, ServerReloader};
 pub use snapshot::{

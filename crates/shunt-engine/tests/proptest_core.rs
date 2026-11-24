@@ -6,9 +6,9 @@ use http::{HeaderMap, Uri};
 use proptest::prelude::*;
 use shunt_engine::pipeline::{strip_hop_by_hop_headers, strip_uri_prefix};
 use shunt_engine::{
-    CompiledPathRegex, CompiledPathTemplate, EndpointState, PathMatch, RouteIndex, RouteMatch,
-    RouteSpec, RuntimeRegistry, SnapshotBuilder, UpstreamConfig, UpstreamPool, host_matches,
-    select_endpoint_index,
+    CompiledPathRegex, CompiledPathTemplate, EndpointState, ListenerConfig, MAX_REUSEPORT_SHARDS,
+    PathMatch, RouteIndex, RouteMatch, RouteSpec, RuntimeRegistry, SnapshotBuilder, UpstreamConfig,
+    UpstreamPool, host_matches, select_endpoint_index,
 };
 use shunt_plugin_sdk::{Clock, ManualClock};
 
@@ -615,5 +615,48 @@ proptest! {
         let indexed = index.match_route(&snap.routes, &req).map(|r| r.id.as_str());
         prop_assert_eq!(fast, linear);
         prop_assert_eq!(indexed, linear);
+    }
+
+    #[test]
+    fn listener_config_resolution_invariants(
+        reuseport in any::<bool>(),
+        accept_shards in prop::option::of(0usize..512),
+        parallelism in 0usize..512,
+        backlog in any::<u32>(),
+        a in 0usize..512,
+        b in 0usize..512,
+    ) {
+        let cfg = ListenerConfig {
+            reuseport,
+            accept_shards,
+            backlog,
+        };
+        let resolved = cfg.resolved_shards_with_parallelism(parallelism);
+        prop_assert!((1..=MAX_REUSEPORT_SHARDS).contains(&resolved));
+        if !reuseport {
+            prop_assert_eq!(resolved, 1);
+        }
+
+        let resolved_backlog = cfg.resolved_backlog();
+        prop_assert!(resolved_backlog >= 1);
+        if backlog >= 1 {
+            prop_assert_eq!(resolved_backlog, backlog);
+        }
+
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        let cfg_lo = ListenerConfig {
+            reuseport: true,
+            accept_shards: Some(lo),
+            backlog: 1,
+        };
+        let cfg_hi = ListenerConfig {
+            reuseport: true,
+            accept_shards: Some(hi),
+            backlog: 1,
+        };
+        prop_assert!(
+            cfg_lo.resolved_shards_with_parallelism(1)
+                <= cfg_hi.resolved_shards_with_parallelism(1)
+        );
     }
 }

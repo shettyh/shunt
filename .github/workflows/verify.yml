@@ -85,7 +85,7 @@ jobs:
             https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
       - name: Model check Shunt TLA+ specs
         run: |
-          for spec in AtomicReload RequestPipeline PassiveHealth; do
+          for spec in AtomicReload RequestPipeline PassiveHealth ShardedListenerDrain; do
             echo "==> TLC checking specs/tla/${spec}.tla"
             java -XX:+UseParallelGC -cp /tmp/tla2tools.jar tlc2.TLC \
               -workers auto -deadlock \
