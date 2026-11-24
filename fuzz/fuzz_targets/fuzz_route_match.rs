@@ -4,7 +4,8 @@ use http::{Method, Request, Uri, header};
 use libfuzzer_sys::fuzz_target;
 use shunt_engine::pipeline::strip_uri_prefix;
 use shunt_engine::{
-    CompiledPathRegex, CompiledPathTemplate, PathMatch, RouteMatch, host_matches,
+    CompiledPathRegex, CompiledPathTemplate, PathMatch, RouteIndex, RouteMatch, RouteSpec,
+    RuntimeRegistry, SnapshotBuilder, UpstreamConfig, host_matches,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -51,11 +52,32 @@ fuzz_target!(|data: &[u8]| {
         {
             let rm = RouteMatch::prefix(prefix).with_host(pattern);
             let _ = rm.matches(&req);
+
+            let reg = RuntimeRegistry::new();
+            let mut builder = SnapshotBuilder::new(1)
+                .upstream(UpstreamConfig::new(
+                    "be",
+                    vec!["http://127.0.0.1:8081".to_owned()],
+                ))
+                .route(RouteSpec::new("exact", RouteMatch::exact(prefix), "be"))
+                .route(RouteSpec::new("prefix", rm, "be"));
             if let Ok(tpl_rm) = RouteMatch::template(pattern) {
-                let _ = tpl_rm.with_host(host).matches(&req);
+                let tpl_rm = tpl_rm.with_host(host);
+                let _ = tpl_rm.matches(&req);
+                builder = builder.route(RouteSpec::new("tpl", tpl_rm, "be"));
             }
             if let Ok(re_rm) = RouteMatch::regex(pattern) {
-                let _ = re_rm.with_host(host).matches(&req);
+                let re_rm = re_rm.with_host(host);
+                let _ = re_rm.matches(&req);
+                builder = builder.route(RouteSpec::new("re", re_rm, "be"));
+            }
+            builder = builder.route(RouteSpec::new("any", RouteMatch::any(), "be"));
+            if let Ok(snap) = builder.build(&reg, false) {
+                let index = RouteIndex::build(&snap.routes);
+                assert_eq!(
+                    index.match_route(&snap.routes, &req).map(|r| r.id.as_str()),
+                    snap.match_route_linear(&req).map(|r| r.id.as_str()),
+                );
             }
         }
     }

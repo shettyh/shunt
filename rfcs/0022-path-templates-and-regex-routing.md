@@ -1,6 +1,6 @@
 # RFC 0022: Path Templates, Regex Routing & Captured Path Parameters
 
-- **Status:** Implemented (Stage 1)
+- **Status:** Implemented
 - **Crates:** `shunt-plugin-sdk`, `shunt-engine`, `shunt-plugins`, `shunt-config`, `specs/`, `examples/`, `fuzz/`
 
 ## 1. Summary
@@ -146,6 +146,30 @@ upstream = "billing_svc"
   - `0` = `Any`
 - `URLRewrite` / `RequestRedirect` with `ReplacePrefixMatch` is rejected on `RegularExpression` routes per Gateway API v1 rules (`ReplaceFullPath` remains supported).
 
+### 4.5 Internal `RouteIndex` Candidate Index (`shunt-engine::route_index`, Stage 2)
+
+To scale seamlessly from 10 routes to 5,000+ routes and stay immune to worst-case `O(N)` 404 traffic without changing Shunt's user-facing first-match-wins semantics or adding external router crates, `GatewaySnapshot` selects an internal `RouteDispatch` strategy at `SnapshotBuilder::build()` time:
+
+- **`routes.len() < ROUTE_INDEX_MIN_ROUTES` (16):** Keeps the L1-cache-hot flat `Linear` / `LinearWithRegex` scan with zero indexing overhead.
+- **`routes.len() >= ROUTE_INDEX_MIN_ROUTES` (16):** Builds an immutable, zero-allocation-lookup `RouteIndex`:
+  1. **`Exact` hash map** (`HashMap<Box<str>, Box<[u32]>, FastBuildHasher>`): `O(1)` lookup for `PathMatch::Exact` and parameterless `PathMatch::Template` routes, using a per-snapshot randomly seeded 64-bit fast hasher.
+  2. **Contiguous-arena Segment Trie** (`Box<[TrieNode]>`): Indexes canonical `PathMatch::Prefix`, `{param}`, and final `{*wildcard}` templates in a single `O(segments)` walk. Nodes with `<= 8` literal children use a tiny inline slice (zero hashing); high-fanout nodes automatically upgrade to a per-snapshot fast hash map. Each node tracks `min_subtree_idx` and explores `literal_child` vs `param_child` in ascending `min_subtree_idx` order.
+  3. **`Any` list** (`PathMatch::Any` and `PathMatch::Prefix("/")`) and **`fallback_routes`** (empty for all `shunt-config` inputs; handles non-canonical programmatic prefixes like `"//"` or `"/a//b"`).
+  4. **Single-pass `RegexSet` bucket** (with 16 MiB combined budget fallback): Checked last via `SetMatches::iter()` in ascending declaration order, and skipped completely whenever any earlier route already matched.
+
+**First-match-wins pruning & host caching:**
+- Every candidate bucket stores route declaration indices (`u32`) in ascending order.
+- Dispatch tracks `best_idx` (initialized to `u32::MAX`) and prunes any bucket, route list, or trie subtree whose `min_*_idx >= best_idx`.
+- Request host extraction (`extract_request_host`) returns `Option<&str>` with zero heap allocation and is lazily cached once per request across candidate routes.
+- Exact behavioral equivalence (`indexed_match(req) == linear_match(req)`) is verified by property tests (`proptest_core.rs`) and `fuzz_route_match` across arbitrary route tables, overlapping matchers, and adversarial slash/empty-segment paths.
+
+**Measured `--release` latency (`route_index_perf_matrix`):**
+- `N = 10` (linear fast path): `~26–43 ns` (zero degradation).
+- `N = 16` (activation threshold): `1.2x–2.1x` faster than linear scan (`35–51 ns`).
+- `N = 200`: `12.7x–24.3x` faster (`35–54 ns` vs `454–918 ns`).
+- `N = 1,000`: `57x–119x` faster (`37–55 ns` vs `2.3–4.6 µs`).
+- `N = 5,000`: `276x–680x` faster (`35–55 ns` vs `11.5–24.7 µs`).
+
 ## 5. Alternatives Considered & Rejected
 
 1. **Adopting a third-party radix router (`matchit`) as the primary dispatcher:**
@@ -155,7 +179,6 @@ upstream = "billing_svc"
 3. **Unanchored `path_regex` matching:**
    - *Why rejected:* Unanchored regexes (e.g., `/orders/[0-9]+`) silently match unintended prefixes/suffixes (`/evil/orders/123/admin`), creating security surprises. Full-path anchoring (`\A(?:...)\z`) matches Envoy's `safe_regex` semantics and still allows prefix/suffix wildcards explicitly via `.*`.
 
-## 6. Future Work (Stage 2)
+## 6. Future Work
 
-- **Internal `Exact` hash map + Segment Trie candidate index inside `GatewaySnapshot`:** If future benchmarks target 1,000–10,000+ routes, add an internal candidate index returning route indices pruned by `best_idx`—preserving the exact same `PathMatch` API, `shunt.toml` schema, and first-match-wins equivalence.
 - **Low-cardinality `http.route` metric/trace option:** Optionally expose the matched template pattern (e.g. `"/orders/{order_id}/status"`) to `otel-trace` and `metrics` plugins alongside `route_id`.
