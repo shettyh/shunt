@@ -985,7 +985,11 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     CPU_MODEL="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
     CPU_CORES="$(sysctl -n hw.ncpu 2>/dev/null || echo unknown)"
 else
-    CPU_MODEL="$(awk -F: '/model name/{gsub(/^[ \t]+/, "", $2); print $2; exit}' /proc/cpuinfo 2>/dev/null || echo unknown)"
+    CPU_MODEL="$(LC_ALL=C lscpu 2>/dev/null | awk -F: '/^Model name:/{gsub(/^[ \t]+/, "", $2); print $2; exit}' || true)"
+    if [[ -z "$CPU_MODEL" || "$CPU_MODEL" == "-" ]]; then
+        CPU_MODEL="$(awk -F: '/model name/{gsub(/^[ \t]+/, "", $2); print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
+    fi
+    CPU_MODEL="${CPU_MODEL:-unknown}"
     CPU_CORES="$(nproc 2>/dev/null || echo unknown)"
 fi
 
