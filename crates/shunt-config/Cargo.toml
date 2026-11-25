@@ -23,6 +23,7 @@ http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 notify.workspace = true
+ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -37,7 +38,6 @@ brotli.workspace = true
 flate2.workspace = true
 proptest.workspace = true
 rcgen.workspace = true
-ring.workspace = true
 shunt-plugins.workspace = true
 zstd.workspace = true
 

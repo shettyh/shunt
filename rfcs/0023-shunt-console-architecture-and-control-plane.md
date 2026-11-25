@@ -1,7 +1,7 @@
 # RFC 0023: `shunt-console` — Core Architecture, Control-Plane Protocol & Dynamic State Sync
 
-- **Status:** Draft
-- **Crates / Directories:** `shunt-plugin-sdk`, `shunt-config`, `shunt-cli`, `console/` (`shunt-console-core`, `shunt-console-server`, `console/web`)
+- **Status:** Implemented
+- **Crates / Directories:** `shunt-plugin-sdk`, `shunt-engine`, `shunt-config`, `shunt-cli`, `console/` (`shunt-console-core`, `shunt-console-api`, `shunt-console-bin`, `console/web`)
 
 ## 1. Summary
 

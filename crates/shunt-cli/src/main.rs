@@ -4,18 +4,19 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use shunt_ai::{AiMetrics, inspect_ai_runtime, register_ai_plugins};
 use shunt_config::{
-    AdminServer, ConfigProvider, DEFAULT_K8S_CONTROLLER_NAME, FileConfigProvider,
-    InspectorCapturePlugin, K8sApiConfigProvider, K8sClientConfig, K8sGatewayOptions,
-    K8sManifestConfigProvider, ReloadController, Severity, SnapshotCompiler, SnapshotInspect,
-    TraceRingBuffer, load_policy_file, start_file_watcher, start_k8s_sync_loop,
+    AdminServer, ConfigProvider, ControlPlaneClientConfig, ControlPlaneConfigProvider,
+    DEFAULT_K8S_CONTROLLER_NAME, FileConfigProvider, InspectorCapturePlugin, K8sApiConfigProvider,
+    K8sClientConfig, K8sGatewayOptions, K8sManifestConfigProvider, ReloadController, Severity,
+    SnapshotCompiler, SnapshotInspect, TraceRingBuffer, load_policy_file, parse_cache_key_32,
+    parse_node_labels, start_control_plane_sync, start_file_watcher, start_k8s_sync_loop,
     ui_feature_compiled, verify_bundle,
 };
 use shunt_engine::{DynamicCertResolver, GatewayServer, RuntimeRegistry, TlsListenerConfig};
 use shunt_mcp::{McpMetrics, inspect_mcp_runtime, register_mcp_plugins};
-use shunt_plugin_sdk::PluginRegistry;
+use shunt_plugin_sdk::{PluginRegistry, SyncedTableRegistry};
 use shunt_plugins::{DevWaterfallPlugin, PrometheusMetrics, register_builtin_plugins};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -35,6 +36,46 @@ enum OutputFormat {
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Args, Debug, Clone)]
+struct ControlPlaneCliArgs {
+    /// Connect outbound to a `shunt-console` control plane URL (e.g. `https://console.internal:8443`).
+    #[arg(long = "control-plane")]
+    control_plane: Option<String>,
+    /// Target cluster slug in `shunt-console` (required when `--control-plane` is set).
+    #[arg(long = "cluster", default_value = "default")]
+    cluster: String,
+    /// Environment variable containing the cluster bootstrap token or node token.
+    #[arg(long = "token-env", default_value = "SHUNT_NODE_TOKEN")]
+    token_env: String,
+    /// Explicit bootstrap/node token (prefer `--token-env` in production).
+    #[arg(long = "token")]
+    token: Option<String>,
+    /// Optional local directory for last-known-good topology (`topology.lkg`) and state caches.
+    #[arg(long = "cache-dir")]
+    cache_dir: Option<PathBuf>,
+    /// Optional env var holding a 32-byte hex/base64 AES-256-GCM key to encrypt `--cache-dir` files.
+    #[arg(long = "cache-key-env")]
+    cache_key_env: Option<String>,
+    /// Comma-separated node labels for canary ring targeting (e.g. `ring=stable,region=us-east-1`).
+    #[arg(long = "node-labels")]
+    node_labels: Option<String>,
+    /// Optional human-readable node name displayed in `shunt-console`.
+    #[arg(long = "node-name")]
+    node_name: Option<String>,
+    /// Optional base64 Ed25519 public key pinning `shunt-console` topology bundle signatures.
+    #[arg(long = "control-plane-public-key")]
+    public_key: Option<String>,
+    /// Skip TLS certificate verification when connecting to `shunt-console` (local dev only).
+    #[arg(long = "control-plane-insecure")]
+    insecure: bool,
+    /// Comma-separated Channel 2 state namespaces to synchronize.
+    #[arg(
+        long = "control-plane-namespaces",
+        default_value = "ai.virtual_keys,ai.budgets,ai.pricing,mcp.agent_acls,mcp.kill_switch,mcp.approvals"
+    )]
+    namespaces: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -122,9 +163,11 @@ enum Commands {
         /// Poll interval in milliseconds for live `--k8s-gateway` sync (default: 5000).
         #[arg(long = "k8s-poll-interval-ms", default_value_t = 5_000)]
         k8s_poll_interval_ms: u64,
-        /// Gateway listener address override when using `--k8s-manifest` or `--k8s-gateway`.
+        /// Gateway listener address override when using `--k8s-manifest`, `--k8s-gateway`, or `--control-plane` standby.
         #[arg(long = "listen", default_value = "0.0.0.0:8080")]
         listen: String,
+        #[command(flatten)]
+        cp: ControlPlaneCliArgs,
     },
     /// Run in developer mode with auto file-watch reload and live per-hook µs trace waterfalls.
     Dev {
@@ -143,6 +186,11 @@ enum Commands {
         /// Optional Kubernetes namespace filter.
         #[arg(long = "k8s-namespace")]
         k8s_namespace: Option<String>,
+        /// Gateway listener address override when using `--control-plane` standby.
+        #[arg(long = "listen", default_value = "0.0.0.0:8080")]
+        listen: String,
+        #[command(flatten)]
+        cp: ControlPlaneCliArgs,
     },
 }
 
@@ -157,6 +205,7 @@ enum ServerSource {
         poll_interval_ms: u64,
         options: K8sGatewayOptions,
     },
+    ControlPlane(Box<ControlPlaneClientConfig>),
 }
 
 #[tokio::main]
@@ -222,9 +271,18 @@ async fn main() -> ExitCode {
             k8s_controller_name,
             k8s_poll_interval_ms,
             listen,
+            cp,
         } => {
             init_tracing("info");
-            let source = if k8s_gateway {
+            let source = if let Some(base_url) = cp.control_plane.clone() {
+                match build_control_plane_config(base_url, &cp, listen, ui) {
+                    Ok(cfg) => ServerSource::ControlPlane(Box::new(cfg)),
+                    Err(msg) => {
+                        eprintln!("error: {msg}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else if k8s_gateway {
                 ServerSource::K8sApi {
                     api_server: k8s_api_server,
                     poll_interval_ms: k8s_poll_interval_ms,
@@ -258,23 +316,90 @@ async fn main() -> ExitCode {
             k8s_manifest,
             k8s_controller_name,
             k8s_namespace,
+            listen,
+            cp,
         } => {
             init_tracing("warn,shunt_cli=info,shunt_config=info");
-            let source = match k8s_manifest {
-                Some(path) => ServerSource::K8sManifest {
-                    path,
-                    options: K8sGatewayOptions {
-                        controller_name: k8s_controller_name,
-                        namespace: k8s_namespace,
-                        admin_ui: ui,
-                        ..K8sGatewayOptions::default()
+            let source = if let Some(base_url) = cp.control_plane.clone() {
+                match build_control_plane_config(base_url, &cp, listen, ui) {
+                    Ok(cfg) => ServerSource::ControlPlane(Box::new(cfg)),
+                    Err(msg) => {
+                        eprintln!("error: {msg}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                match k8s_manifest {
+                    Some(path) => ServerSource::K8sManifest {
+                        path,
+                        options: K8sGatewayOptions {
+                            controller_name: k8s_controller_name,
+                            namespace: k8s_namespace,
+                            admin_ui: ui,
+                            ..K8sGatewayOptions::default()
+                        },
                     },
-                },
-                None => ServerSource::File(config),
+                    None => ServerSource::File(config),
+                }
             };
             run_server(source, true, true, ui).await
         }
     }
+}
+
+fn build_control_plane_config(
+    base_url: String,
+    args: &ControlPlaneCliArgs,
+    standby_listen: String,
+    standby_admin_ui: bool,
+) -> Result<ControlPlaneClientConfig, String> {
+    let token = match &args.token {
+        Some(t) if !t.is_empty() => t.clone(),
+        _ => std::env::var(&args.token_env).unwrap_or_default(),
+    };
+    if token.is_empty() && args.cache_dir.is_none() {
+        return Err(format!(
+            "missing control-plane token: set env var `{}` or pass `--token <TOKEN>` (or provide `--cache-dir` with persisted node credentials)",
+            args.token_env
+        ));
+    }
+    let labels = match &args.node_labels {
+        Some(raw) => parse_node_labels(raw).map_err(|e| e.to_string())?,
+        None => Default::default(),
+    };
+    let cache_key = match &args.cache_key_env {
+        Some(env_name) => {
+            let raw = std::env::var(env_name).map_err(|_| {
+                format!("--cache-key-env `{env_name}` is not set in the environment")
+            })?;
+            Some(parse_cache_key_32(&raw).map_err(|e| e.to_string())?)
+        }
+        None => None,
+    };
+    let namespaces: Vec<String> = args
+        .namespaces
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    Ok(ControlPlaneClientConfig {
+        base_url,
+        cluster: args.cluster.clone(),
+        token,
+        node_name: args.node_name.clone(),
+        shunt_version: env!("CARGO_PKG_VERSION").to_owned(),
+        labels,
+        cache_dir: args.cache_dir.clone(),
+        cache_key,
+        public_key_b64: args.public_key.clone(),
+        insecure_skip_verify: args.insecure,
+        standby_listen,
+        standby_admin_ui,
+        namespaces,
+        ..ControlPlaneClientConfig::default()
+    })
 }
 
 fn init_tracing(default_filter: &str) {
@@ -294,7 +419,7 @@ struct GatewayRegistries {
     mcp_metrics: Arc<McpMetrics>,
 }
 
-fn build_registries() -> GatewayRegistries {
+fn build_registries(synced_tables: Option<Arc<SyncedTableRegistry>>) -> GatewayRegistries {
     let metrics = Arc::new(PrometheusMetrics::new());
     let ai_metrics = Arc::new(AiMetrics::new());
     let mcp_metrics = Arc::new(McpMetrics::new());
@@ -302,10 +427,13 @@ fn build_registries() -> GatewayRegistries {
     register_builtin_plugins(&mut plugin_registry, Arc::clone(&metrics));
     register_ai_plugins(&mut plugin_registry, Arc::clone(&ai_metrics));
     register_mcp_plugins(&mut plugin_registry, Arc::clone(&mcp_metrics));
-    let runtime = Arc::new(RuntimeRegistry::new());
+    let mut runtime = RuntimeRegistry::new();
+    if let Some(st) = synced_tables {
+        runtime = runtime.with_synced_tables(st);
+    }
     GatewayRegistries {
         plugins: Arc::new(plugin_registry),
-        runtime,
+        runtime: Arc::new(runtime),
         metrics,
         ai_metrics,
         mcp_metrics,
@@ -321,7 +449,7 @@ fn run_check(provider: &dyn ConfigProvider) -> ExitCode {
         }
     };
 
-    let regs = build_registries();
+    let regs = build_registries(None);
     let compiler = SnapshotCompiler::new(regs.plugins, regs.runtime);
     match compiler.compile(&loaded) {
         Ok(bundle) => {
@@ -361,7 +489,7 @@ fn run_verify(
         None => None,
     };
 
-    let regs = build_registries();
+    let regs = build_registries(None);
     let compiler = SnapshotCompiler::new(regs.plugins, regs.runtime);
     let bundle = match compiler.compile(&loaded) {
         Ok(b) => b,
@@ -473,6 +601,8 @@ async fn run_server(
 ) -> ExitCode {
     let mut watched_root: Option<PathBuf> = None;
     let mut k8s_api_provider: Option<Arc<K8sApiConfigProvider>> = None;
+    let mut cp_provider: Option<Arc<ControlPlaneConfigProvider>> = None;
+    let mut synced_tables: Option<Arc<SyncedTableRegistry>> = None;
 
     let provider: Arc<dyn ConfigProvider> = match source {
         ServerSource::File(path) => {
@@ -527,6 +657,23 @@ async fn run_server(
             k8s_api_provider = Some(Arc::clone(&api_prov));
             api_prov
         }
+        ServerSource::ControlPlane(cp_cfg) => {
+            let st = Arc::new(SyncedTableRegistry::new());
+            let prov = match ControlPlaneConfigProvider::new(*cp_cfg, Arc::clone(&st)) {
+                Ok(p) => Arc::new(p),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Err(err) = prov.bootstrap().await {
+                eprintln!("error: control-plane bootstrap failed: {err}");
+                return ExitCode::FAILURE;
+            }
+            synced_tables = Some(st);
+            cp_provider = Some(Arc::clone(&prov));
+            prov
+        }
     };
 
     let source_label = provider.source_name();
@@ -558,7 +705,7 @@ async fn run_server(
         metrics,
         ai_metrics,
         mcp_metrics,
-    } = build_registries();
+    } = build_registries(synced_tables);
     let mut compiler = SnapshotCompiler::new(plugins, Arc::clone(&runtime));
     if dev_mode {
         compiler = compiler.with_extra_global_plugin(Arc::new(DevWaterfallPlugin::stderr()));
@@ -695,6 +842,21 @@ async fn run_server(
                 )
             }),
         );
+        if let Some(cp_prov) = &cp_provider {
+            let cp_status = Arc::clone(cp_prov);
+            admin = admin.with_status_provider(
+                "control_plane",
+                Arc::new(move || {
+                    serde_json::json!({
+                        "node_id": cp_status.node_id(),
+                        "active_revision": cp_status.active_revision(),
+                        "active_digest": cp_status.active_digest(),
+                        "last_reload_error": cp_status.last_reload_error(),
+                        "synced_seqs": cp_status.synced_tables().cursors(),
+                    })
+                }),
+            );
+        }
         if let Some(store) = trace_store {
             admin = admin.with_trace_store(store);
         }
@@ -726,6 +888,19 @@ async fn run_server(
 
     let k8s_sync_handle =
         k8s_api_provider.map(|api_prov| start_k8s_sync_loop(api_prov, Arc::clone(&controller)));
+
+    let cp_sync_handle = cp_provider.map(|prov| {
+        let ai_m = Arc::clone(&ai_metrics);
+        let mcp_m = Arc::clone(&mcp_metrics);
+        let rt = Arc::clone(&runtime);
+        let status_cb = Arc::new(move || {
+            serde_json::json!({
+                "ai": inspect_ai_runtime(&ai_m, rt.state_store(), rt.clock().as_ref()),
+                "mcp": inspect_mcp_runtime(&mcp_m, rt.state_store(), rt.clock().as_ref()),
+            })
+        });
+        start_control_plane_sync(prov, Arc::clone(&controller), Some(status_cb))
+    });
 
     if dev_mode {
         eprintln!(
@@ -768,6 +943,9 @@ async fn run_server(
     wait_for_signals(Arc::clone(&controller)).await;
 
     info!("shutdown signal received; draining in-flight connections");
+    if let Some(cp_sync) = cp_sync_handle {
+        cp_sync.stop();
+    }
     if let Some(k8s_sync) = k8s_sync_handle {
         k8s_sync.stop();
     }

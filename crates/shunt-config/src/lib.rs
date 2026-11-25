@@ -3,6 +3,7 @@
 
 pub mod admin;
 pub mod compiler;
+pub mod control_plane;
 pub mod error;
 pub mod inspector;
 pub mod ir;
@@ -17,6 +18,13 @@ pub use admin::{AdminHandle, AdminServer, MetricsRenderer, StatusProvider, ui_fe
 pub use compiler::{
     CompiledBundle, PluginInspect, RouteGroupInspect, RouteInspect, RoutePluginInspect,
     SnapshotCompiler, SnapshotInspect, UpstreamInspect,
+};
+pub use control_plane::{
+    ControlPlaneClientConfig, ControlPlaneConfigProvider, ControlPlaneSyncHandle,
+    HeartbeatStatusProvider, NodeHeartbeatRequest, NodeRegisterRequest, NodeRegisterResponse,
+    SseFrame, SseParser, StateDeltaEvent, StateFullSyncEvent, TopologyBundleResponse,
+    TopologyRevisionEvent, parse_cache_key_32, parse_node_labels, start_control_plane_sync,
+    verify_bundle_integrity,
 };
 pub use error::ConfigError;
 pub use inspector::{

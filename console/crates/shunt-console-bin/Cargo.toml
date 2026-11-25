@@ -1,0 +1,23 @@
+[package]
+name = "shunt-console-bin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Single-binary companion Admin Console and Control Plane for Shunt"
+
+[[bin]]
+name = "shunt-console"
+path = "src/main.rs"
+
+[dependencies]
+shunt-console-api.workspace = true
+shunt-console-core.workspace = true
+
+axum.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

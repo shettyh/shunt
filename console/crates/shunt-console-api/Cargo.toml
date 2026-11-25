@@ -1,0 +1,38 @@
+[package]
+name = "shunt-console-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Axum REST/OpenAPI 3.1 API, Control-Plane Channels 1 & 2 SSE server, and embedded SPA for shunt-console"
+
+[dependencies]
+shunt-config.workspace = true
+shunt-console-core.workspace = true
+shunt-engine.workspace = true
+shunt-plugin-sdk.workspace = true
+
+axum.workspace = true
+axum-extra.workspace = true
+base64.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+http.workspace = true
+mime_guess.workspace = true
+ring.workspace = true
+rust-embed.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+utoipa.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+shunt-plugins.workspace = true
+tempfile.workspace = true

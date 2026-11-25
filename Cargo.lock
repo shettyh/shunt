@@ -1402,8 +1402,10 @@ dependencies = [
 name = "shunt-plugin-sdk"
 version = "0.3.0"
 dependencies = [
+ "arc-swap",
  "bytes",
  "http",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror",

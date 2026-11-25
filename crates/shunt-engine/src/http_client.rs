@@ -83,6 +83,41 @@ impl CoreHttpClient {
     pub fn new_default() -> Result<Self, CoreError> {
         Self::new(CoreHttpClientConfig::default())
     }
+
+    /// Sends an HTTP/HTTPS request and returns the raw streaming response without buffering the
+    /// body, suitable for long-lived Server-Sent Events (SSE) streams.
+    ///
+    /// `request.timeout` bounds only receiving the response head (headers), not stream lifetime.
+    pub async fn send_streaming(
+        &self,
+        request: HttpRequest,
+    ) -> Result<http::Response<hyper::body::Incoming>, HttpClientError> {
+        let scheme = request.uri.scheme_str().unwrap_or("");
+        if (scheme != "http" && scheme != "https") || request.uri.authority().is_none() {
+            return Err(HttpClientError::InvalidUri(format!(
+                "URI `{}` must be an absolute http:// or https:// URL",
+                request.uri
+            )));
+        }
+
+        let head_timeout = request
+            .timeout
+            .unwrap_or(self.config.default_timeout)
+            .max(Duration::from_millis(1));
+
+        let mut builder = Request::builder().method(request.method).uri(request.uri);
+        if let Some(headers) = builder.headers_mut() {
+            *headers = request.headers;
+        }
+        let hyper_req = builder
+            .body(Full::new(request.body))
+            .map_err(|e| HttpClientError::InvalidUri(e.to_string()))?;
+
+        tokio::time::timeout(head_timeout, self.client.request(hyper_req))
+            .await
+            .map_err(|_| HttpClientError::Timeout(head_timeout))?
+            .map_err(|e| HttpClientError::Transport(e.to_string()))
+    }
 }
 
 impl HttpClient for CoreHttpClient {

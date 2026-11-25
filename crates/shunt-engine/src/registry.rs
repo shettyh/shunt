@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use shunt_plugin_sdk::state::StagedStateMap;
 use shunt_plugin_sdk::{
-    BuildContext, Clock, DistributedStore, HttpClient, StateStore, SystemClock, TelemetrySink,
+    BuildContext, Clock, DistributedStore, HttpClient, StateStore, SyncedTableRegistry,
+    SystemClock, TelemetrySink,
 };
 
 use crate::error::CoreError;
@@ -29,6 +30,7 @@ pub struct RuntimeRegistry {
     redis_stores: RwLock<HashMap<RedisStoreConfig, Arc<RedisStateStore>>>,
     otlp_exporters: RwLock<HashMap<OtlpExporterConfig, Arc<OtlpHttpExporter>>>,
     http_client: OnceLock<Arc<dyn HttpClient>>,
+    synced_tables: OnceLock<Arc<SyncedTableRegistry>>,
     state_store: Arc<StateStore>,
     clock: Arc<dyn Clock>,
 }
@@ -53,6 +55,7 @@ impl RuntimeRegistry {
             redis_stores: RwLock::new(HashMap::new()),
             otlp_exporters: RwLock::new(HashMap::new()),
             http_client: OnceLock::new(),
+            synced_tables: OnceLock::new(),
             state_store: Arc::new(StateStore::new()),
             clock,
         }
@@ -62,6 +65,17 @@ impl RuntimeRegistry {
     pub fn with_http_client(self, client: Arc<dyn HttpClient>) -> Self {
         let _ = self.http_client.set(client);
         self
+    }
+
+    /// Attaches an optional [`SyncedTableRegistry`] for Channel 2 dynamic state tables.
+    pub fn with_synced_tables(self, synced_tables: Arc<SyncedTableRegistry>) -> Self {
+        let _ = self.synced_tables.set(synced_tables);
+        self
+    }
+
+    /// Returns the attached [`SyncedTableRegistry`], if enabled.
+    pub fn synced_tables(&self) -> Option<Arc<SyncedTableRegistry>> {
+        self.synced_tables.get().map(Arc::clone)
     }
 
     /// Returns the shared, reload-persistent outbound [`HttpClient`], lazily initializing
@@ -325,6 +339,7 @@ impl RuntimeRegistry {
             distributed_store,
             telemetry_sink,
             http_client: self.http_client(),
+            synced_tables: self.synced_tables(),
         }
     }
 }
@@ -341,6 +356,7 @@ pub struct BuildSession {
     distributed_store: Option<Arc<dyn DistributedStore>>,
     telemetry_sink: Option<Arc<dyn TelemetrySink>>,
     http_client: Arc<dyn HttpClient>,
+    synced_tables: Option<Arc<SyncedTableRegistry>>,
 }
 
 impl BuildSession {
@@ -355,6 +371,7 @@ impl BuildSession {
         .with_distributed_store(self.distributed_store.as_ref().map(Arc::clone))
         .with_telemetry_sink(self.telemetry_sink.as_ref().map(Arc::clone))
         .with_http_client(Some(Arc::clone(&self.http_client)))
+        .with_synced_tables(self.synced_tables.as_ref().map(Arc::clone))
     }
 
     /// Atomically commits all newly staged state entries into [`StateStore`] and

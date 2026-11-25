@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["console"]
 members = [
     "crates/shunt-plugin-sdk",
     "crates/shunt-engine",

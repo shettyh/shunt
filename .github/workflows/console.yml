@@ -1,0 +1,83 @@
+name: Shunt Console CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'console/**'
+      - 'crates/shunt-plugin-sdk/**'
+      - 'crates/shunt-engine/**'
+      - 'crates/shunt-config/**'
+      - 'crates/shunt-cli/**'
+      - '.github/workflows/console.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'console/**'
+      - 'crates/shunt-plugin-sdk/**'
+      - 'crates/shunt-engine/**'
+      - 'crates/shunt-config/**'
+      - 'crates/shunt-cli/**'
+      - '.github/workflows/console.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  isolation:
+    name: Architectural Isolation Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify root shunt workspace has zero edges on console, sqlx, or axum
+        run: |
+          TREE=$(cargo tree --workspace --locked)
+          if echo "$TREE" | grep -E '\b(shunt-console-|sqlx|axum)\b'; then
+            echo "ERROR: Root shunt workspace must NEVER depend on console/, sqlx, or axum!"
+            exit 1
+          fi
+          echo "Isolation verified: zero control-plane/DB/web dependencies in core shunt workspace."
+
+  console:
+    name: Build & Test shunt-console (Web SPA + Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: console/web/package-lock.json
+      - name: Typecheck & build console/web SPA
+        working-directory: console/web
+        run: |
+          npm ci
+          npm run build
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: console
+      - name: Format check
+        run: cargo fmt --manifest-path console/Cargo.toml --all -- --check
+      - name: Clippy
+        run: cargo clippy --manifest-path console/Cargo.toml --workspace --all-targets --locked -- -D warnings
+      - name: Unit & E2E integration tests
+        run: cargo test --manifest-path console/Cargo.toml --workspace --locked
+      - name: Binary smoke check
+        run: |
+          cargo build --manifest-path console/Cargo.toml --locked -p shunt-console-bin --bin shunt-console
+          ./console/target/debug/shunt-console --version
+          ./console/target/debug/shunt-console --help
