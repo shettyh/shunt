@@ -3,17 +3,17 @@ import {
   AlertTriangle,
   CheckCircle2,
   ChevronDown,
-  Columns2,
   Download,
-  Edit3,
   FileCode2,
   GitBranch,
   History,
   Plus,
   Rocket,
   RotateCcw,
+  Save,
   Search,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
   Upload,
 } from 'lucide-react';
@@ -237,24 +237,27 @@ export function TopologyPage({
 }) {
   const toast = useToast();
   const [tab, setTab] = useState<'draft' | 'revisions' | 'toml'>('draft');
+  const [inspectorTab, setInspectorTab] = useState<'editor' | 'toml'>('editor');
   const [kindFilter, setKindFilter] = useState<KindFilter>('all');
   const [search, setSearch] = useState('');
-  const [splitToml, setSplitToml] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const addMenuRef = useRef<HTMLDivElement>(null);
+  const inspectorRef = useRef<HTMLDivElement>(null);
 
   const [resources, setResources] = useState<TopologyResource[]>([]);
   const [validation, setValidation] = useState<ValidateDraftResult | null>(null);
   const [revisions, setRevisions] = useState<TopologyRevision[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Resource Editor Drawer
-  const [editorOpen, setEditorOpen] = useState(false);
+  // Docked Inspector / Editor state
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [creatingNew, setCreatingNew] = useState(false);
   const [editKind, setEditKind] = useState<TopologyResourceKind>('route');
   const [editSlug, setEditSlug] = useState('');
   const [editEtag, setEditEtag] = useState<string | undefined>(undefined);
   const [editJson, setEditJson] = useState('');
+  const [initialJson, setInitialJson] = useState('');
   const [editError, setEditError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -269,7 +272,7 @@ export function TopologyPage({
   const [pubNotes, setPubNotes] = useState('');
   const [publishing, setPublishing] = useState(false);
 
-  // Inspect Release TOML Drawer
+  // Inspect Historical Release TOML Drawer
   const [inspectRev, setInspectRev] = useState<TopologyRevision | null>(null);
 
   useEffect(() => {
@@ -290,7 +293,29 @@ export function TopologyPage({
     };
   }, [addMenuOpen]);
 
-  const load = async () => {
+  const sortedResources = useMemo(() => {
+    return [...resources].sort(
+      (a, b) =>
+        (KIND_ORDER[a.kind] ?? 99) - (KIND_ORDER[b.kind] ?? 99) ||
+        a.sort_order - b.sort_order ||
+        a.slug.localeCompare(b.slug)
+    );
+  }, [resources]);
+
+  const selectResource = (r: TopologyResource) => {
+    const formatted = JSON.stringify(r.spec, null, 2);
+    setCreatingNew(false);
+    setSelectedId(r.id);
+    setEditKind(r.kind);
+    setEditSlug(r.slug);
+    setEditEtag(r.etag);
+    setEditJson(formatted);
+    setInitialJson(formatted);
+    setEditError(null);
+    setInspectorTab('editor');
+  };
+
+  const load = async (preferKindSlug?: { kind: TopologyResourceKind; slug: string }) => {
     setLoading(true);
     try {
       const [res, val, revs] = await Promise.all([
@@ -304,6 +329,21 @@ export function TopologyPage({
       if (val && (!val.valid || val.diagnostics.length > 0)) {
         setShowDiagnostics(true);
       }
+      const sorted = [...res].sort(
+        (a, b) =>
+          (KIND_ORDER[a.kind] ?? 99) - (KIND_ORDER[b.kind] ?? 99) ||
+          a.sort_order - b.sort_order ||
+          a.slug.localeCompare(b.slug)
+      );
+      const preferred = preferKindSlug
+        ? sorted.find((r) => r.kind === preferKindSlug.kind && r.slug === preferKindSlug.slug)
+        : sorted.find((r) => r.id === selectedId);
+      const next = preferred || sorted[0];
+      if (next) {
+        selectResource(next);
+      } else {
+        setSelectedId(null);
+      }
     } catch (err) {
       toast.push(err instanceof ApiProblemError ? err.message : 'Failed to load config', 'error');
     } finally {
@@ -312,17 +352,10 @@ export function TopologyPage({
   };
 
   useEffect(() => {
+    setSelectedId(null);
+    setCreatingNew(false);
     load();
   }, [cluster.slug]);
-
-  const sortedResources = useMemo(() => {
-    return [...resources].sort(
-      (a, b) =>
-        (KIND_ORDER[a.kind] ?? 99) - (KIND_ORDER[b.kind] ?? 99) ||
-        a.sort_order - b.sort_order ||
-        a.slug.localeCompare(b.slug)
-    );
-  }, [resources]);
 
   const filteredResources = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -350,23 +383,29 @@ export function TopologyPage({
     return c;
   }, [resources]);
 
+  const selectedResource = useMemo(
+    () => resources.find((r) => r.id === selectedId) || null,
+    [resources, selectedId]
+  );
+
+  const isDirty = creatingNew || editJson !== initialJson;
+
   const openNewResource = (kind: TopologyResourceKind) => {
     setAddMenuOpen(false);
+    const defaultSlug =
+      kind === 'upstream' ? 'new-upstream' : kind === 'route' ? 'new-route' : 'default';
+    const formatted = JSON.stringify(RESOURCE_TEMPLATES[kind], null, 2);
+    setCreatingNew(true);
+    setSelectedId(null);
     setEditKind(kind);
-    setEditSlug(kind === 'upstream' ? 'new-upstream' : kind === 'route' ? 'new-route' : 'default');
+    setEditSlug(defaultSlug);
     setEditEtag(undefined);
-    setEditJson(JSON.stringify(RESOURCE_TEMPLATES[kind], null, 2));
+    setEditJson(formatted);
+    setInitialJson(formatted);
     setEditError(null);
-    setEditorOpen(true);
-  };
-
-  const openEditResource = (r: TopologyResource) => {
-    setEditKind(r.kind);
-    setEditSlug(r.slug);
-    setEditEtag(r.etag);
-    setEditJson(JSON.stringify(r.spec, null, 2));
-    setEditError(null);
-    setEditorOpen(true);
+    setTab('draft');
+    setInspectorTab('editor');
+    inspectorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   };
 
   const handleSaveResource = async (e: React.FormEvent) => {
@@ -379,17 +418,21 @@ export function TopologyPage({
       setEditError(`Invalid JSON: ${String(err)}`);
       return;
     }
+    const cleanSlug = slugify(editSlug);
+    if (!cleanSlug) {
+      setEditError('Please enter a valid slug (letters, numbers, hyphens).');
+      return;
+    }
     setSaving(true);
     try {
-      await api.upsertResource(cluster.slug, editKind, slugify(editSlug), parsed, {
+      await api.upsertResource(cluster.slug, editKind, cleanSlug, parsed, {
         etag: editEtag,
       });
-      toast.push(`Saved ${editKind}/${slugify(editSlug)} to draft`);
-      setEditorOpen(false);
-      await load();
+      toast.push(`Saved ${KIND_META[editKind].label} "${cleanSlug}" to draft`);
+      await load({ kind: editKind, slug: cleanSlug });
     } catch (err) {
       if (err instanceof ApiProblemError && err.status === 412) {
-        setEditError('ETag conflict (412): This resource was updated by someone else. Close, refresh, and retry.');
+        setEditError('Conflict (412): This resource was updated by someone else. Refresh and retry.');
       } else {
         setEditError(err instanceof ApiProblemError ? err.message : String(err));
       }
@@ -399,11 +442,11 @@ export function TopologyPage({
   };
 
   const handleDeleteResource = async (r: TopologyResource) => {
-    if (!window.confirm(`Delete ${r.kind}/${r.slug} from draft?`)) return;
+    if (!window.confirm(`Delete ${KIND_META[r.kind].label} "${r.slug}" from draft?`)) return;
     try {
       await api.deleteResource(cluster.slug, r.kind, r.slug, r.etag);
-      toast.push(`Deleted ${r.kind}/${r.slug}`);
-      load();
+      toast.push(`Deleted ${KIND_META[r.kind].label} "${r.slug}"`);
+      await load();
     } catch (err) {
       toast.push(err instanceof ApiProblemError ? err.message : String(err), 'error');
     }
@@ -477,7 +520,7 @@ export function TopologyPage({
 
   return (
     <div className="space-y-5">
-      {/* Clear, Friendly Page Header */}
+      {/* Full-Width Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2.5">
@@ -492,7 +535,7 @@ export function TopologyPage({
                 {validation.valid ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
                 <span>
                   {validation.valid
-                    ? `Ready · ${validation.upstream_count} upstream, ${validation.route_count} route${validation.warnings ? ` · ${validation.warnings} warning` : ''}`
+                    ? `Valid · ${validation.upstream_count} upstream, ${validation.route_count} route${validation.warnings ? ` · ${validation.warnings} warning` : ''}`
                     : `${validation.errors} error${validation.errors === 1 ? '' : 's'} in draft`}
                 </span>
               </button>
@@ -554,53 +597,34 @@ export function TopologyPage({
       )}
 
       {/* Clean Single Tab Row */}
-      <div className="flex flex-wrap items-center justify-between gap-3" style={{ borderBottom: '1px solid var(--border)' }}>
-        <div className="flex items-center gap-1">
-          {[
-            { id: 'draft' as const, label: `Draft Config (${resources.length})`, icon: <GitBranch size={15} /> },
-            { id: 'revisions' as const, label: `Releases & Rollback (${revisions.length})`, icon: <History size={15} /> },
-            { id: 'toml' as const, label: 'Compiled shunt.toml', icon: <FileCode2 size={15} /> },
-          ].map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => setTab(t.id)}
-              className="flex items-center gap-2 px-3.5 py-2.5 text-sm font-medium bg-transparent border-0 cursor-pointer transition-colors"
-              style={{
-                color: tab === t.id ? 'var(--text-primary)' : 'var(--text-muted)',
-                borderBottom: `2px solid ${tab === t.id ? 'var(--accent)' : 'transparent'}`,
-                marginBottom: -1,
-              }}
-            >
-              {t.icon}
-              <span>{t.label}</span>
-            </button>
-          ))}
-        </div>
-
-        {tab === 'draft' && (
+      <div className="flex items-center gap-1" style={{ borderBottom: '1px solid var(--border)' }}>
+        {[
+          { id: 'draft' as const, label: `Draft Config (${resources.length})`, icon: <GitBranch size={15} /> },
+          { id: 'revisions' as const, label: `Releases & Rollback (${revisions.length})`, icon: <History size={15} /> },
+          { id: 'toml' as const, label: 'Compiled shunt.toml', icon: <FileCode2 size={15} /> },
+        ].map((t) => (
           <button
+            key={t.id}
             type="button"
-            className="btn btn-sm mb-2 hidden xl:inline-flex"
+            onClick={() => setTab(t.id)}
+            className="flex items-center gap-2 px-3.5 py-2.5 text-sm font-medium bg-transparent border-0 cursor-pointer transition-colors"
             style={{
-              background: splitToml ? 'var(--accent-soft)' : undefined,
-              borderColor: splitToml ? 'var(--accent-border)' : undefined,
-              color: splitToml ? 'var(--accent)' : undefined,
+              color: tab === t.id ? 'var(--text-primary)' : 'var(--text-muted)',
+              borderBottom: `2px solid ${tab === t.id ? 'var(--accent)' : 'transparent'}`,
+              marginBottom: -1,
             }}
-            onClick={() => setSplitToml((v) => !v)}
           >
-            <Columns2 size={14} />
-            <span>{splitToml ? 'Hide TOML Preview' : 'Preview TOML'}</span>
+            {t.icon}
+            <span>{t.label}</span>
           </button>
-        )}
+        ))}
       </div>
 
-      {/* Tab 1: Draft Config (+ Optional Split Compiled TOML) */}
+      {/* Tab 1: Full-Width Master-Detail Draft Workspace */}
       {tab === 'draft' && (
-        <div className={splitToml ? 'grid grid-cols-1 xl:grid-cols-12 gap-5 items-start' : ''}>
-          {/* Resource Table Card */}
-          <div className={splitToml ? 'surface xl:col-span-7' : 'surface'}>
-            {/* Clean Filter + Search + Single Add Menu Bar */}
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
+          {/* Left: Draft Resources List */}
+          <div className="surface xl:col-span-7">
             <div
               className="px-4 py-3 flex flex-wrap items-center justify-between gap-3"
               style={{ borderBottom: '1px solid var(--border)' }}
@@ -635,9 +659,8 @@ export function TopologyPage({
               </div>
 
               <div className="flex items-center gap-2.5">
-                {/* Flex Search Input (icon never overlaps placeholder) */}
                 <div
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg w-52"
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg w-48"
                   style={{ background: 'var(--bg)', border: '1px solid var(--border)' }}
                 >
                   <Search size={14} style={{ color: 'var(--text-muted)' }} className="shrink-0" />
@@ -650,7 +673,7 @@ export function TopologyPage({
                   />
                 </div>
 
-                {/* Single Friendly Add Resource Dropdown */}
+                {/* Single Friendly Add Resource Menu */}
                 <div className="relative" ref={addMenuRef}>
                   <button
                     type="button"
@@ -706,26 +729,30 @@ export function TopologyPage({
                       <th>Type</th>
                       <th>Name</th>
                       <th>Summary</th>
-                      <th>Version</th>
+                      <th>Ver</th>
                       <th>Updated</th>
-                      <th className="text-right">Actions</th>
+                      <th className="text-right">Action</th>
                     </tr>
                   </thead>
                   <tbody>
                     {filteredResources.map((r) => {
                       const meta = KIND_META[r.kind];
+                      const isSelected = !creatingNew && r.id === selectedId;
                       return (
                         <tr
                           key={r.id}
                           className="cursor-pointer"
-                          onClick={() => openEditResource(r)}
+                          onClick={() => selectResource(r)}
+                          style={{
+                            background: isSelected ? 'var(--accent-soft)' : undefined,
+                          }}
                         >
                           <td className="whitespace-nowrap">
                             <span className={meta.badgeCls}>{meta.label}</span>
                           </td>
                           <td className="mono font-semibold whitespace-nowrap">{r.slug}</td>
                           <td
-                            className="mono text-[13px] max-w-lg truncate"
+                            className="mono text-[13px] max-w-md truncate"
                             style={{ color: 'var(--text-secondary)' }}
                             title={JSON.stringify(r.spec)}
                           >
@@ -745,25 +772,15 @@ export function TopologyPage({
                             className="text-right whitespace-nowrap"
                             onClick={(e) => e.stopPropagation()}
                           >
-                            <div className="inline-flex items-center gap-1.5">
-                              <button
-                                type="button"
-                                className="btn btn-sm"
-                                onClick={() => openEditResource(r)}
-                              >
-                                <Edit3 size={13} />
-                                <span>Edit</span>
-                              </button>
-                              <button
-                                type="button"
-                                className="btn-ghost p-1.5 rounded-md cursor-pointer border-0"
-                                style={{ color: 'var(--danger)' }}
-                                title={`Delete ${r.kind}/${r.slug}`}
-                                onClick={() => handleDeleteResource(r)}
-                              >
-                                <Trash2 size={15} />
-                              </button>
-                            </div>
+                            <button
+                              type="button"
+                              className="btn-ghost p-1.5 rounded-md cursor-pointer border-0"
+                              style={{ color: 'var(--danger)' }}
+                              title={`Delete ${meta.label} "${r.slug}"`}
+                              onClick={() => handleDeleteResource(r)}
+                            >
+                              <Trash2 size={15} />
+                            </button>
                           </td>
                         </tr>
                       );
@@ -774,28 +791,205 @@ export function TopologyPage({
             )}
           </div>
 
-          {/* Optional Live Compiled shunt.toml Split Pane */}
-          {splitToml && (
-            <div className="surface overflow-hidden xl:col-span-5 xl:sticky xl:top-20">
-              <div
-                className="px-4 py-3 flex items-center justify-between gap-2"
-                style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-canvas)' }}
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <FileCode2 size={15} style={{ color: 'var(--text-muted)' }} />
-                  <span className="text-sm font-semibold truncate">Compiled shunt.toml</span>
-                  <span className="badge mono">redacted</span>
-                </div>
-                <CopyButton text={validation?.compiled_toml || ''} label="Copy" />
+          {/* Right: Docked Resource Inspector / Live Editor Panel */}
+          <div ref={inspectorRef} className="surface overflow-hidden xl:col-span-5 xl:sticky xl:top-20">
+            {/* Inspector Header + Switcher */}
+            <div
+              className="px-4 py-3 flex items-center justify-between gap-3"
+              style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-canvas)' }}
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                {inspectorTab === 'editor' ? (
+                  <>
+                    <SlidersHorizontal size={15} style={{ color: 'var(--accent)' }} className="shrink-0" />
+                    <span className="text-sm font-semibold truncate">
+                      {creatingNew
+                        ? `New ${KIND_META[editKind].label}`
+                        : selectedResource
+                          ? `${KIND_META[selectedResource.kind].label} · ${selectedResource.slug}`
+                          : 'Resource Editor'}
+                    </span>
+                    {isDirty && <span className="badge badge-warn">Unsaved</span>}
+                  </>
+                ) : (
+                  <>
+                    <FileCode2 size={15} style={{ color: 'var(--accent)' }} className="shrink-0" />
+                    <span className="text-sm font-semibold truncate">Compiled shunt.toml</span>
+                  </>
+                )}
               </div>
-              <pre
-                className="mono m-0 p-4 text-[13px] leading-relaxed overflow-auto max-h-[calc(100vh-13rem)]"
-                style={{ background: 'var(--bg-code)', color: 'var(--text-primary)' }}
+
+              <div
+                className="inline-flex rounded-lg p-0.5 text-xs shrink-0"
+                style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}
               >
-                {validation?.compiled_toml || '# No compiled config yet'}
-              </pre>
+                <button
+                  type="button"
+                  onClick={() => setInspectorTab('editor')}
+                  className="px-2.5 py-1 rounded-md border-0 cursor-pointer font-medium transition-colors"
+                  style={{
+                    background: inspectorTab === 'editor' ? 'var(--bg-elevated)' : 'transparent',
+                    color: inspectorTab === 'editor' ? 'var(--text-primary)' : 'var(--text-muted)',
+                  }}
+                >
+                  Editor
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setInspectorTab('toml')}
+                  className="px-2.5 py-1 rounded-md border-0 cursor-pointer font-medium transition-colors"
+                  style={{
+                    background: inspectorTab === 'toml' ? 'var(--bg-elevated)' : 'transparent',
+                    color: inspectorTab === 'toml' ? 'var(--text-primary)' : 'var(--text-muted)',
+                  }}
+                >
+                  TOML
+                </button>
+              </div>
             </div>
-          )}
+
+            {inspectorTab === 'editor' ? (
+              !creatingNew && !selectedResource ? (
+                <div className="p-10 text-center space-y-2 text-sm" style={{ color: 'var(--text-muted)' }}>
+                  <div>Select any resource on the left to inspect or edit it, or click <strong>Add Resource</strong>.</div>
+                </div>
+              ) : (
+                <form onSubmit={handleSaveResource} className="p-5 space-y-4">
+                  {editError && (
+                    <div
+                      className="p-3.5 rounded-lg text-sm"
+                      style={{
+                        background: 'var(--danger-soft)',
+                        border: '1px solid var(--danger-border)',
+                        color: 'var(--danger)',
+                      }}
+                    >
+                      {editError}
+                    </div>
+                  )}
+
+                  {!creatingNew && selectedResource && (
+                    <div
+                      className="px-3.5 py-2.5 rounded-lg text-sm flex items-center justify-between gap-2"
+                      style={{ background: 'var(--bg-canvas)', border: '1px solid var(--border-light)' }}
+                    >
+                      <span className="mono text-[13px] truncate" style={{ color: 'var(--text-secondary)' }}>
+                        {summarizeResource(selectedResource)}
+                      </span>
+                      <span className="badge mono shrink-0">v{selectedResource.version}</span>
+                    </div>
+                  )}
+
+                  {creatingNew && QUICK_STARTER_SNIPPETS[editKind] && (
+                    <div className="space-y-1.5">
+                      <div className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>
+                        Start from an example:
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {QUICK_STARTER_SNIPPETS[editKind]!.map((tpl) => (
+                          <button
+                            key={tpl.label}
+                            type="button"
+                            className="btn btn-sm"
+                            onClick={() => {
+                              setEditSlug(tpl.slug);
+                              setEditJson(JSON.stringify(tpl.spec, null, 2));
+                            }}
+                          >
+                            {tpl.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-2 gap-3.5">
+                    <div>
+                      <label className="block text-sm font-medium mb-1.5">Resource Type</label>
+                      <input className="input-base" value={KIND_META[editKind].label} disabled />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1.5">Name / Slug</label>
+                      <input
+                        className="input-base mono"
+                        value={editSlug}
+                        disabled={!creatingNew}
+                        onChange={(e) => setEditSlug(e.target.value)}
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-sm font-medium">Configuration (JSON)</label>
+                      {!creatingNew && isDirty && (
+                        <button
+                          type="button"
+                          className="btn-ghost text-xs px-2 py-0.5 rounded border-0 cursor-pointer"
+                          onClick={() => {
+                            setEditJson(initialJson);
+                            setEditError(null);
+                          }}
+                        >
+                          Reset changes
+                        </button>
+                      )}
+                    </div>
+                    <textarea
+                      className="input-base mono text-[13px] min-h-[290px]"
+                      value={editJson}
+                      onChange={(e) => setEditJson(e.target.value)}
+                      spellCheck={false}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 pt-1">
+                    {creatingNew ? (
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => {
+                          setCreatingNew(false);
+                          if (sortedResources[0]) selectResource(sortedResources[0]);
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    ) : (
+                      <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                        Saved to draft until you publish
+                      </span>
+                    )}
+                    <button
+                      type="submit"
+                      className="btn btn-primary"
+                      disabled={saving || (!creatingNew && !isDirty)}
+                    >
+                      <Save size={15} />
+                      <span>{saving ? 'Saving…' : creatingNew ? 'Add to Draft' : 'Save to Draft'}</span>
+                    </button>
+                  </div>
+                </form>
+              )
+            ) : (
+              <div>
+                <div
+                  className="px-4 py-2.5 flex items-center justify-between gap-2 text-xs"
+                  style={{ borderBottom: '1px solid var(--border-light)', color: 'var(--text-muted)' }}
+                >
+                  <span>Secrets redacted · digest {shortDigest(validation?.digest || '')}</span>
+                  <CopyButton text={validation?.compiled_toml || ''} label="Copy TOML" />
+                </div>
+                <pre
+                  className="mono m-0 p-4 text-[13px] leading-relaxed overflow-auto max-h-[calc(100vh-16rem)]"
+                  style={{ background: 'var(--bg-code)', color: 'var(--text-primary)' }}
+                >
+                  {validation?.compiled_toml || '# No compiled config yet'}
+                </pre>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -935,85 +1129,6 @@ export function TopologyPage({
         </div>
       )}
 
-      {/* Right-Hand Resource Editor Drawer */}
-      <Drawer
-        open={editorOpen}
-        onClose={() => setEditorOpen(false)}
-        title={editEtag ? `Edit ${KIND_META[editKind].label} · ${editSlug}` : `Add ${KIND_META[editKind].label}`}
-        subtitle="Changes are saved to your cluster draft and verified before publishing."
-        widthClass="max-w-xl"
-      >
-        <form onSubmit={handleSaveResource} className="space-y-4">
-          {editError && (
-            <div
-              className="p-3.5 rounded-lg text-sm"
-              style={{
-                background: 'var(--danger-soft)',
-                border: '1px solid var(--danger-border)',
-                color: 'var(--danger)',
-              }}
-            >
-              {editError}
-            </div>
-          )}
-          {!editEtag && QUICK_STARTER_SNIPPETS[editKind] && (
-            <div className="space-y-1.5">
-              <div className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>
-                Start from an example:
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {QUICK_STARTER_SNIPPETS[editKind]!.map((tpl) => (
-                  <button
-                    key={tpl.label}
-                    type="button"
-                    className="btn btn-sm"
-                    onClick={() => {
-                      setEditSlug(tpl.slug);
-                      setEditJson(JSON.stringify(tpl.spec, null, 2));
-                    }}
-                  >
-                    {tpl.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-          <div className="grid grid-cols-2 gap-3.5">
-            <div>
-              <label className="block text-sm font-medium mb-1.5">Resource Type</label>
-              <input className="input-base" value={KIND_META[editKind].label} disabled />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1.5">Slug / Identifier</label>
-              <input
-                className="input-base mono"
-                value={editSlug}
-                disabled={Boolean(editEtag)}
-                onChange={(e) => setEditSlug(e.target.value)}
-                required
-              />
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-1.5">Configuration (JSON)</label>
-            <textarea
-              className="input-base mono text-[13px] min-h-[340px]"
-              value={editJson}
-              onChange={(e) => setEditJson(e.target.value)}
-              spellCheck={false}
-            />
-          </div>
-          <div className="flex justify-end gap-2.5 pt-2">
-            <button type="button" className="btn" onClick={() => setEditorOpen(false)}>
-              Cancel
-            </button>
-            <button type="submit" className="btn btn-primary" disabled={saving}>
-              {saving ? 'Saving…' : 'Save to Draft'}
-            </button>
-          </div>
-        </form>
-      </Drawer>
-
       {/* Import TOML Modal */}
       <Modal
         open={importOpen}
@@ -1092,7 +1207,7 @@ export function TopologyPage({
         </form>
       </Modal>
 
-      {/* Release TOML Inspector Drawer */}
+      {/* Historical Release TOML Drawer */}
       <Drawer
         open={Boolean(inspectRev)}
         onClose={() => setInspectRev(null)}

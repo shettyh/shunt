@@ -385,7 +385,7 @@ function ConsoleAppInner() {
       <div className="flex-1 min-w-0 flex flex-col">
         {/* Clean Sticky Top Bar */}
         <header
-          className="sticky top-0 z-20 h-14 px-5 lg:px-8 flex items-center justify-between gap-4 shrink-0"
+          className="sticky top-0 z-20 h-14 px-6 flex items-center justify-between gap-4 shrink-0"
           style={{ background: 'var(--bg-elevated)', borderBottom: '1px solid var(--border)' }}
         >
           <div className="flex items-center gap-2.5 min-w-0">
@@ -445,7 +445,7 @@ function ConsoleAppInner() {
           </div>
         </header>
 
-        <main className="flex-1 w-full max-w-[1440px] px-5 lg:px-8 py-6">
+        <main className="flex-1 w-full px-6 py-5">
           {!currentOrg || !currentCluster ? (
             <div className="surface p-10 text-center space-y-3">
               <div className="font-semibold">No clusters found</div>
