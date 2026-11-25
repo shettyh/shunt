@@ -59,16 +59,19 @@ See [`benches/README.md`](benches/README.md) for full tables, methodology, and r
 
 ## Quick Start
 
-Requires Rust **1.91+** (edition 2024), or grab prebuilt binaries / multi-arch Docker images (`ghcr.io/shettyh/shunt`) from [GitHub Releases](https://github.com/shettyh/shunt/releases).
+Install the single statically linked `shunt` binary (no Rust toolchain or runtime dependencies required), or grab prebuilt archives (including Windows) from [GitHub Releases](https://github.com/shettyh/shunt/releases):
 
 ```bash
-# Install from crates.io (installs the `shunt` binary)
+# macOS & Linux (quick install script — verifies SHA-256 checksum)
+curl -fsSL https://raw.githubusercontent.com/shettyh/shunt/main/install.sh | sh
+
+# Homebrew (macOS & Linux)
+brew install shettyh/tap/shunt
+
+# Cargo / crates.io (requires Rust 1.91+, edition 2024)
 cargo install shunt-cli
 
-# Or install from source
-cargo install --path crates/shunt-cli
-
-# Or run with Docker
+# Docker (multi-arch linux/amd64 & linux/arm64)
 docker run --rm -p 8080:8080 -p 9090:9090 \
   -v "$PWD/examples/shunt.toml:/etc/shunt/shunt.toml:ro" \
   ghcr.io/shettyh/shunt:latest
