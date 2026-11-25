@@ -13,20 +13,20 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0" # x-release-please-version
+version = "0.4.0" # x-release-please-version
 edition = "2024"
 rust-version = "1.91"
 license = "Apache-2.0"
 repository = "https://github.com/shettyh/shunt"
 
 [workspace.dependencies]
-shunt-plugin-sdk = { version = "0.3.0", path = "crates/shunt-plugin-sdk" } # x-release-please-version
-shunt-engine = { version = "0.3.0", path = "crates/shunt-engine" } # x-release-please-version
-shunt-plugins = { version = "0.3.0", path = "crates/shunt-plugins" } # x-release-please-version
-shunt-ai = { version = "0.3.0", path = "crates/shunt-ai" } # x-release-please-version
-shunt-mcp = { version = "0.3.0", path = "crates/shunt-mcp" } # x-release-please-version
-shunt-config = { version = "0.3.0", path = "crates/shunt-config" } # x-release-please-version
-shunt-test = { version = "0.3.0", path = "crates/shunt-test" } # x-release-please-version
+shunt-plugin-sdk = { version = "0.4.0", path = "crates/shunt-plugin-sdk" } # x-release-please-version
+shunt-engine = { version = "0.4.0", path = "crates/shunt-engine" } # x-release-please-version
+shunt-plugins = { version = "0.4.0", path = "crates/shunt-plugins" } # x-release-please-version
+shunt-ai = { version = "0.4.0", path = "crates/shunt-ai" } # x-release-please-version
+shunt-mcp = { version = "0.4.0", path = "crates/shunt-mcp" } # x-release-please-version
+shunt-config = { version = "0.4.0", path = "crates/shunt-config" } # x-release-please-version
+shunt-test = { version = "0.4.0", path = "crates/shunt-test" } # x-release-please-version
 
 arc-swap = "1"
 brotli = "9"

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0 (2026-11-25)
+
+## What's Changed
+* chore(ci): bump the github-actions group across 1 directory with 13 updates by @dependabot[bot] in https://github.com/shettyh/shunt/pull/48
+* chore(deps): bump the rust-dependencies group across 1 directory with 7 updates by @dependabot[bot] in https://github.com/shettyh/shunt/pull/43
+* docs(rfcs): add RFCs 0023–0027 for shunt-console admin console & control plane by @shettyh in https://github.com/shettyh/shunt/pull/50
+* docs: add comprehensive security and hardening audit report by @shettyh in https://github.com/shettyh/shunt/pull/53
+* feat(install): add curl installer, Homebrew tap automation, and updated docs by @shettyh in https://github.com/shettyh/shunt/pull/55
+
+## New Contributors
+* @dependabot[bot] made their first contribution in https://github.com/shettyh/shunt/pull/48
+
+**Full Changelog**: https://github.com/shettyh/shunt/compare/v0.3.0...v0.4.0
+
 ## 0.3.0 (2026-11-24)
 
 ## What's Changed
