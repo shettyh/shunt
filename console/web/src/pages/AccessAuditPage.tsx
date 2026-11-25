@@ -166,105 +166,142 @@ export function AccessAuditPage({
   };
 
   return (
-    <div className="space-y-5">
-      <div>
-        <h1 className="m-0 text-xl font-semibold tracking-tight">Access, Tokens &amp; Audit</h1>
-        <p className="m-0 mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
-          Role-based access control, CI/Terraform service API tokens, OIDC/SSO providers, and tamper-evident SHA-256 hash-chained admin audit history.
-        </p>
-      </div>
+    <div className="space-y-3.5">
+      {/* Compact Unified Toolbar (Segmented Tabs + Contextual Primary Action) */}
+      <div className="surface px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3">
+        <div
+          className="inline-flex rounded-md p-0.5 text-xs overflow-x-auto"
+          style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}
+        >
+          {[
+            { id: 'users' as const, label: `Users & RBAC (${users.length})`, icon: <Users size={13} /> },
+            { id: 'tokens' as const, label: `API Tokens (${tokens.length})`, icon: <Key size={13} /> },
+            { id: 'oidc' as const, label: `OIDC / SSO (${oidcProviders.length})`, icon: <Globe size={13} /> },
+            { id: 'audit' as const, label: `Audit Log (${audit.length})`, icon: <FileSearch size={13} /> },
+          ].map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setTab(t.id)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded border-0 cursor-pointer font-medium whitespace-nowrap transition-colors"
+              style={{
+                background: tab === t.id ? 'var(--bg-elevated)' : 'transparent',
+                color: tab === t.id ? 'var(--text-primary)' : 'var(--text-muted)',
+                boxShadow: tab === t.id ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
+              }}
+            >
+              {t.icon}
+              <span>{t.label}</span>
+            </button>
+          ))}
+        </div>
 
-      {/* Sub-tabs */}
-      <div className="flex items-center gap-1 overflow-x-auto" style={{ borderBottom: '1px solid var(--border)' }}>
-        {[
-          { id: 'users' as const, label: `Users & RBAC (${users.length})`, icon: <Users size={14} /> },
-          { id: 'tokens' as const, label: `Service API Tokens (${tokens.length})`, icon: <Key size={14} /> },
-          { id: 'oidc' as const, label: `OIDC / SSO (${oidcProviders.length})`, icon: <Globe size={14} /> },
-          { id: 'audit' as const, label: `Admin Audit Log (${audit.length})`, icon: <FileSearch size={14} /> },
-        ].map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTab(t.id)}
-            className="flex items-center gap-1.5 px-3.5 py-2.5 text-xs font-medium bg-transparent border-0 cursor-pointer whitespace-nowrap"
-            style={{
-              color: tab === t.id ? 'var(--text-primary)' : 'var(--text-muted)',
-              borderBottom: `2px solid ${tab === t.id ? 'var(--text-primary)' : 'transparent'}`,
-              marginBottom: -1,
-            }}
-          >
-            {t.icon}
-            <span>{t.label}</span>
-          </button>
-        ))}
-      </div>
-
-      {/* Tab 1: Users & RBAC */}
-      {tab === 'users' && (
-        <div className="space-y-5">
-          <div className="flex justify-end">
-            <button type="button" className="btn btn-primary" onClick={() => setUserModal(true)}>
-              <UserPlus size={14} />
+        <div className="flex items-center gap-2 shrink-0">
+          {tab === 'users' && (
+            <button type="button" className="btn btn-sm btn-primary" onClick={() => setUserModal(true)}>
+              <UserPlus size={13} />
               <span>Add User</span>
             </button>
-          </div>
+          )}
+          {tab === 'tokens' && (
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              onClick={() => {
+                setCreatedApiToken(null);
+                setTName('');
+                setTokenModal(true);
+              }}
+            >
+              <Plus size={13} />
+              <span>Create API Token</span>
+            </button>
+          )}
+          {tab === 'oidc' && (
+            <button type="button" className="btn btn-sm btn-primary" onClick={() => setOidcModal(true)}>
+              <Plus size={13} />
+              <span>Add OIDC Provider</span>
+            </button>
+          )}
+          {tab === 'audit' && (
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              onClick={handleVerifyAudit}
+              disabled={verifying}
+            >
+              <ShieldCheck size={13} />
+              <span>{verifying ? 'Verifying…' : 'Verify Hash Chain'}</span>
+            </button>
+          )}
+        </div>
+      </div>
 
-          <div className="surface overflow-hidden">
-            <table className="swiss-table text-xs">
-              <thead>
-                <tr>
-                  <th>User</th>
-                  <th>Auth</th>
-                  <th>Role Bindings</th>
-                  <th>Joined</th>
-                </tr>
-              </thead>
-              <tbody>
-                {users.map((u) => (
-                  <tr key={u.user.id}>
-                    <td>
-                      <div className="font-semibold text-sm">{u.user.display_name}</div>
-                      <div className="mono text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                        {u.user.email}
-                      </div>
-                    </td>
-                    <td>
-                      <span className="badge mono">{u.user.auth_provider}</span>
-                    </td>
-                    <td>
-                      <div className="flex flex-wrap gap-1.5">
-                        {u.bindings.map((b) => (
-                          <span key={b.id} className="badge badge-accent mono">
-                            {b.role}
-                            {b.cluster_id ? ` (${b.cluster_id.slice(-6)})` : ''}
-                          </span>
-                        ))}
-                      </div>
-                    </td>
-                    <td style={{ color: 'var(--text-muted)' }}>{formatRelativeTime(u.user.created_at)}</td>
+      {/* Tab 1: Users & RBAC (Side-by-Side Split on Desktop) */}
+      {tab === 'users' && (
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-3.5 items-start">
+          <div className="surface overflow-hidden xl:col-span-8">
+            <div className="overflow-x-auto">
+              <table className="swiss-table text-xs">
+                <thead>
+                  <tr>
+                    <th>User</th>
+                    <th>Auth</th>
+                    <th>Role Bindings</th>
+                    <th>Joined</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {users.map((u) => (
+                    <tr key={u.user.id}>
+                      <td className="whitespace-nowrap">
+                        <div className="font-semibold">{u.user.display_name}</div>
+                        <div className="mono text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                          {u.user.email}
+                        </div>
+                      </td>
+                      <td className="whitespace-nowrap">
+                        <span className="badge mono">{u.user.auth_provider}</span>
+                      </td>
+                      <td>
+                        <div className="flex flex-wrap gap-1">
+                          {u.bindings.map((b) => (
+                            <span key={b.id} className="badge badge-accent mono">
+                              {b.role}
+                              {b.cluster_id ? ` (${b.cluster_id.slice(-6)})` : ''}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                      <td className="whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                        {formatRelativeTime(u.user.created_at)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
 
-          {/* Built-in RBAC Roles Guide */}
-          <div className="surface p-5 space-y-3">
-            <h2 className="m-0 text-sm font-semibold flex items-center gap-2">
-              <Shield size={15} />
+          <div className="surface overflow-hidden xl:col-span-4">
+            <div
+              className="px-3.5 py-2 flex items-center gap-1.5 text-xs font-semibold"
+              style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-sidebar)' }}
+            >
+              <Shield size={13} style={{ color: 'var(--text-muted)' }} />
               <span>Built-In RBAC Roles</span>
-            </h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 text-xs">
+            </div>
+            <div className="p-2.5 space-y-1.5 text-xs">
               {me.roles_catalog.map((r) => (
                 <div
                   key={r.role}
-                  className="p-3 rounded-lg"
+                  className="px-2.5 py-2 rounded-md"
                   style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border-light)' }}
                 >
-                  <div className="mono font-semibold">{r.role}</div>
-                  <p className="m-0 mt-1" style={{ color: 'var(--text-muted)' }}>
+                  <div className="mono font-semibold text-[11.5px]">{r.role}</div>
+                  <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
                     {r.description}
-                  </p>
+                  </div>
                 </div>
               ))}
             </div>
@@ -274,31 +311,13 @@ export function AccessAuditPage({
 
       {/* Tab 2: Service API Tokens */}
       {tab === 'tokens' && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <p className="m-0 text-xs" style={{ color: 'var(--text-muted)' }}>
-              Scoped bearer tokens (<code>shunt_ct_…</code>) stored strictly as SHA-256 hashes for Terraform, CI/CD, and automation.
-            </p>
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => {
-                setCreatedApiToken(null);
-                setTName('');
-                setTokenModal(true);
-              }}
-            >
-              <Plus size={14} />
-              <span>Create API Token</span>
-            </button>
-          </div>
-
-          <div className="surface overflow-hidden">
-            {tokens.length === 0 ? (
-              <div className="p-10 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
-                No service API tokens minted yet.
-              </div>
-            ) : (
+        <div className="surface overflow-hidden">
+          {tokens.length === 0 ? (
+            <div className="p-10 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
+              No service API tokens minted yet. Create a scoped <code>shunt_ct_…</code> bearer token for Terraform or CI/CD.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
               <table className="swiss-table text-xs">
                 <thead>
                   <tr>
@@ -313,26 +332,26 @@ export function AccessAuditPage({
                 <tbody>
                   {tokens.map((t) => (
                     <tr key={t.id}>
-                      <td className="font-semibold">{t.name}</td>
-                      <td className="mono">{t.prefix}</td>
-                      <td>
+                      <td className="font-semibold whitespace-nowrap">{t.name}</td>
+                      <td className="mono whitespace-nowrap">{t.prefix}</td>
+                      <td className="whitespace-nowrap">
                         <span className="badge badge-accent mono">{t.role}</span>
                       </td>
-                      <td style={{ color: 'var(--text-muted)' }}>
+                      <td className="whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
                         {t.last_used_at ? formatRelativeTime(t.last_used_at) : 'never'}
                       </td>
-                      <td>
+                      <td className="whitespace-nowrap">
                         {t.revoked_at ? (
                           <span className="badge badge-danger">Revoked</span>
                         ) : (
                           <span className="badge badge-ok">Active</span>
                         )}
                       </td>
-                      <td className="text-right">
+                      <td className="text-right whitespace-nowrap">
                         {!t.revoked_at && (
                           <button
                             type="button"
-                            className="btn btn-danger text-xs py-1 px-2"
+                            className="btn btn-sm btn-danger"
                             onClick={() => handleRevokeApiToken(t.id)}
                           >
                             Revoke
@@ -343,30 +362,20 @@ export function AccessAuditPage({
                   ))}
                 </tbody>
               </table>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       )}
 
       {/* Tab 3: OIDC Providers */}
       {tab === 'oidc' && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <p className="m-0 text-xs" style={{ color: 'var(--text-muted)' }}>
-              Connect Okta, Google Workspace, Microsoft Entra ID, GitHub, or Keycloak using Authorization Code + PKCE.
-            </p>
-            <button type="button" className="btn btn-primary" onClick={() => setOidcModal(true)}>
-              <Plus size={14} />
-              <span>Add OIDC Provider</span>
-            </button>
-          </div>
-
-          <div className="surface overflow-hidden">
-            {oidcProviders.length === 0 ? (
-              <div className="p-10 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
-                No OIDC/SSO providers configured. Local email/password authentication is active.
-              </div>
-            ) : (
+        <div className="surface overflow-hidden">
+          {oidcProviders.length === 0 ? (
+            <div className="p-10 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
+              No OIDC/SSO providers configured (Okta, Google Workspace, Entra ID, GitHub, Keycloak). Local authentication is active.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
               <table className="swiss-table text-xs">
                 <thead>
                   <tr>
@@ -380,19 +389,19 @@ export function AccessAuditPage({
                 <tbody>
                   {oidcProviders.map((p) => (
                     <tr key={p.id}>
-                      <td>
+                      <td className="whitespace-nowrap">
                         <div className="font-semibold">{p.display_name}</div>
-                        <div className="mono text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                        <div className="mono text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
                           {p.slug}
                         </div>
                       </td>
                       <td className="mono text-[11px]">{p.issuer_url}</td>
                       <td className="mono text-[11px]">{p.client_id}</td>
-                      <td className="mono">{p.group_claim}</td>
-                      <td className="text-right">
+                      <td className="mono whitespace-nowrap">{p.group_claim}</td>
+                      <td className="text-right whitespace-nowrap">
                         <button
                           type="button"
-                          className="btn-ghost p-1.5 rounded cursor-pointer border-0"
+                          className="btn-ghost p-1 rounded cursor-pointer border-0"
                           style={{ color: 'var(--danger)' }}
                           onClick={async () => {
                             await api.deleteOidcProvider(org.slug, p.slug);
@@ -407,60 +416,34 @@ export function AccessAuditPage({
                   ))}
                 </tbody>
               </table>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       )}
 
       {/* Tab 4: Hash-Chained Admin Audit Log */}
       {tab === 'audit' && (
-        <div className="space-y-4">
-          <div className="surface p-4 flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5 text-xs">
-              {verification ? (
-                verification.valid ? (
-                  <>
-                    <CheckCircle2 size={18} style={{ color: 'var(--ok)' }} />
-                    <div>
-                      <div className="font-semibold" style={{ color: 'var(--ok)' }}>
-                        Cryptographic Hash Chain Intact
-                      </div>
-                      <div style={{ color: 'var(--text-muted)' }}>{verification.message}</div>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <AlertTriangle size={18} style={{ color: 'var(--danger)' }} />
-                    <div>
-                      <div className="font-semibold" style={{ color: 'var(--danger)' }}>
-                        Tampering Detected at seq #{verification.first_tampered_seq}
-                      </div>
-                      <div>{verification.message}</div>
-                    </div>
-                  </>
-                )
-              ) : (
-                <>
-                  <ShieldCheck size={18} style={{ color: 'var(--accent)' }} />
-                  <div>
-                    <div className="font-semibold">Tamper-Evident Admin Audit Chain</div>
-                    <div style={{ color: 'var(--text-muted)' }}>
-                      Every write operation links SHA-256(seq ‖ ts ‖ actor ‖ action ‖ diff ‖ prev_hash).
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={handleVerifyAudit}
-              disabled={verifying}
+        <div className="space-y-3">
+          {verification && (
+            <div
+              className="surface px-3.5 py-2.5 flex items-center gap-2.5 text-xs"
+              style={{
+                background: verification.valid ? 'var(--ok-soft)' : 'var(--danger-soft)',
+                borderColor: verification.valid ? 'var(--ok-border)' : 'var(--danger-border)',
+                color: verification.valid ? 'var(--ok)' : 'var(--danger)',
+              }}
             >
-              <ShieldCheck size={14} />
-              <span>{verifying ? 'Verifying…' : 'Verify Hash Chain'}</span>
-            </button>
-          </div>
+              {verification.valid ? <CheckCircle2 size={15} /> : <AlertTriangle size={15} />}
+              <span>
+                <strong>
+                  {verification.valid
+                    ? 'Cryptographic Hash Chain Intact'
+                    : `Tampering Detected at seq #${verification.first_tampered_seq}`}
+                </strong>
+                {verification.message ? ` — ${verification.message}` : ''}
+              </span>
+            </div>
+          )}
 
           <div className="surface overflow-hidden">
             <div className="overflow-x-auto">
@@ -478,20 +461,22 @@ export function AccessAuditPage({
                 <tbody>
                   {audit.map((a) => (
                     <tr key={a.seq}>
-                      <td className="mono font-semibold">#{a.seq}</td>
-                      <td>
+                      <td className="mono font-semibold whitespace-nowrap">#{a.seq}</td>
+                      <td className="whitespace-nowrap">
                         <span className="badge mono">{a.action}</span>
                       </td>
-                      <td className="mono">
+                      <td className="mono whitespace-nowrap">
                         {a.resource_type}/{a.resource_id}
                       </td>
-                      <td>
-                        <span style={{ color: 'var(--text-secondary)' }}>{a.actor_id}</span>
+                      <td className="whitespace-nowrap" style={{ color: 'var(--text-secondary)' }}>
+                        {a.actor_id}
                       </td>
-                      <td className="mono text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                      <td className="mono text-[11px] whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
                         {a.entry_hash.slice(0, 14)}…
                       </td>
-                      <td style={{ color: 'var(--text-muted)' }}>{formatRelativeTime(a.ts)}</td>
+                      <td className="whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                        {formatRelativeTime(a.ts)}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -617,7 +602,7 @@ export function AccessAuditPage({
         ) : (
           <div className="space-y-4">
             <div
-              className="p-3 rounded-lg text-xs"
+              className="p-3 rounded-md text-xs"
               style={{
                 background: 'var(--ok-soft)',
                 border: '1px solid var(--ok-border)',

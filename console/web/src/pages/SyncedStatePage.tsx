@@ -17,7 +17,7 @@ import {
   NamespaceStateResponse,
   NamespaceStateSummary,
 } from '../lib/api';
-import { Modal, useToast } from '../components/ui';
+import { Drawer, useToast } from '../components/ui';
 
 interface PolicyGroupMeta {
   title: string;
@@ -102,6 +102,47 @@ function getPolicyMeta(namespace: string): PolicyGroupMeta {
   );
 }
 
+function summarizePolicy(ns: string, payload: unknown): string {
+  const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
+  switch (ns) {
+    case 'ai.virtual_keys': {
+      const parts: string[] = [];
+      if (p.enabled === false) parts.push('disabled');
+      if (p.team) parts.push(`team:${String(p.team)}`);
+      if (Array.isArray(p.allowed_models) && p.allowed_models.length > 0) {
+        parts.push(`models:${p.allowed_models.slice(0, 2).join(',')}`);
+      }
+      if (typeof p.budget_usd === 'number') parts.push(`$${p.budget_usd}`);
+      if (typeof p.rpm === 'number') parts.push(`${p.rpm} rpm`);
+      return parts.length > 0 ? parts.join(' · ') : JSON.stringify(payload);
+    }
+    case 'ai.budgets': {
+      const limit = typeof p.limit_usd === 'number' ? `$${p.limit_usd}` : '';
+      const window = typeof p.window === 'string' ? `/${p.window}` : '';
+      const mode = typeof p.mode === 'string' ? ` (${p.mode})` : '';
+      return limit ? `${limit}${window}${mode}` : JSON.stringify(payload);
+    }
+    case 'ai.pricing': {
+      const inp = typeof p.input_usd_per_1m === 'number' ? `in $${p.input_usd_per_1m}` : '';
+      const out = typeof p.output_usd_per_1m === 'number' ? `out $${p.output_usd_per_1m}` : '';
+      return inp || out ? `${inp} · ${out} / 1M tok` : JSON.stringify(payload);
+    }
+    case 'mcp.agent_acls': {
+      const servers = Array.isArray(p.allowed_servers) ? p.allowed_servers.join(', ') : '';
+      const allow = Array.isArray(p.allowed_tools) ? `${p.allowed_tools.length} allow` : '';
+      const deny = Array.isArray(p.denied_tools) ? `${p.denied_tools.length} deny` : '';
+      return [servers && `servers: ${servers}`, allow, deny].filter(Boolean).join(' · ') || JSON.stringify(payload);
+    }
+    case 'mcp.kill_switch': {
+      const scope = p.scope ? `${String(p.scope)}=${String(p.target ?? '*')}` : '';
+      const reason = p.reason ? ` · ${String(p.reason)}` : '';
+      return scope ? `${scope}${reason}` : JSON.stringify(payload);
+    }
+    default:
+      return JSON.stringify(payload);
+  }
+}
+
 export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
   const toast = useToast();
   const [summaries, setSummaries] = useState<NamespaceStateSummary[]>([]);
@@ -109,8 +150,8 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
   const [detail, setDetail] = useState<NamespaceStateResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Upsert Modal
-  const [modalOpen, setModalOpen] = useState(false);
+  // Upsert Policy Drawer
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [itemKey, setItemKey] = useState('');
   const [itemJson, setItemJson] = useState('');
   const [editingExisting, setEditingExisting] = useState(false);
@@ -144,19 +185,19 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
     loadDetail(selectedNs);
   }, [cluster.slug, selectedNs]);
 
-  const openCreateModal = () => {
+  const openCreateDrawer = () => {
     const tpl = getPolicyMeta(selectedNs);
     setItemKey(tpl.key);
     setItemJson(JSON.stringify(tpl.value, null, 2));
     setEditingExisting(false);
-    setModalOpen(true);
+    setDrawerOpen(true);
   };
 
-  const openEditModal = (item: ControlStateItem) => {
+  const openEditDrawer = (item: ControlStateItem) => {
     setItemKey(item.item_key);
     setItemJson(JSON.stringify(item.payload, null, 2));
     setEditingExisting(true);
-    setModalOpen(true);
+    setDrawerOpen(true);
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -172,7 +213,7 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
     try {
       await api.upsertStateItem(cluster.slug, selectedNs, itemKey.trim(), parsed);
       toast.push(`Synced ${selectedMeta.title} policy "${itemKey.trim()}" across fleet`);
-      setModalOpen(false);
+      setDrawerOpen(false);
       await Promise.all([loadSummaries(), loadDetail(selectedNs)]);
     } catch (err) {
       toast.push(err instanceof ApiProblemError ? err.message : String(err), 'error');
@@ -199,110 +240,119 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2.5">
-            <h1 className="m-0 text-xl font-semibold tracking-tight">Live Policies</h1>
-            <span className="badge badge-ok">
-              <Zap size={11} />
-              <span>Instant Sync</span>
-            </span>
-          </div>
-          <p className="m-0 mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
-            High-velocity access &amp; safety controls applied to 100% of nodes in milliseconds—independent of config releases and never undone by rollbacks.
-          </p>
+    <div className="space-y-3.5">
+      {/* Compact Top Toolbar */}
+      <div className="surface px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2.5 min-w-0">
+          <span className="font-semibold text-sm">Live Policies</span>
+          <span className="badge badge-ok">
+            <Zap size={10} />
+            <span>Instant Sync</span>
+          </span>
+          <span className="text-xs hidden lg:inline" style={{ color: 'var(--text-muted)' }}>
+            Applied to 100% of nodes in milliseconds—independent of config releases and never undone by rollbacks
+          </span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
-            className="btn"
+            className="btn btn-sm"
             onClick={() => {
               loadSummaries();
               loadDetail(selectedNs);
             }}
           >
-            <RefreshCw size={14} />
+            <RefreshCw size={13} />
             <span>Refresh</span>
           </button>
-          <button type="button" className="btn btn-primary" onClick={openCreateModal}>
-            <Plus size={14} />
+          <button type="button" className="btn btn-sm btn-primary" onClick={openCreateDrawer}>
+            <Plus size={13} />
             <span>Add Policy</span>
           </button>
         </div>
       </div>
 
-      {/* Policy Group Selector Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 tabular">
-        {summaries.map((s) => {
-          const meta = getPolicyMeta(s.namespace);
-          const active = s.namespace === selectedNs;
-          const allConverged =
-            s.total_online_nodes > 0 && s.converged_nodes === s.total_online_nodes;
-          return (
-            <button
-              key={s.namespace}
-              type="button"
-              onClick={() => setSelectedNs(s.namespace)}
-              className="surface p-3.5 text-left cursor-pointer transition-colors"
-              style={{
-                background: active ? 'var(--accent-soft)' : 'var(--bg-elevated)',
-                borderColor: active ? 'var(--accent)' : 'var(--border)',
-              }}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-sm font-semibold">{meta.title}</span>
-                <span className={meta.pillar === 'MCP' ? 'badge badge-accent text-[10px]' : 'badge text-[10px]'}>
-                  {meta.pillar}
-                </span>
-              </div>
-              <div className="mono text-[11px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                {s.namespace}
-              </div>
-              <div className="mt-2.5 flex items-center justify-between text-xs" style={{ color: 'var(--text-muted)' }}>
-                <span>
-                  <strong style={{ color: 'var(--text-primary)' }}>{s.item_count}</strong> active{' '}
-                  {s.item_count === 1 ? 'policy' : 'policies'}
-                </span>
-                <span style={{ color: allConverged ? 'var(--ok)' : 'var(--text-muted)' }}>
-                  {s.total_online_nodes === 0
-                    ? '0 nodes online'
-                    : `${s.converged_nodes}/${s.total_online_nodes} nodes updated`}
-                </span>
-              </div>
-            </button>
-          );
-        })}
-      </div>
+      {/* 3-Column Master-Detail Operations Grid */}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-3.5 items-start">
+        {/* Left Rail: Policy Groups */}
+        <div className="surface overflow-hidden xl:col-span-3">
+          <div
+            className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wide"
+            style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-sidebar)', color: 'var(--text-muted)' }}
+          >
+            Policy Groups
+          </div>
+          <div className="divide-y tabular" style={{ borderColor: 'var(--border-light)' }}>
+            {summaries.map((s) => {
+              const meta = getPolicyMeta(s.namespace);
+              const active = s.namespace === selectedNs;
+              const allConverged =
+                s.total_online_nodes > 0 && s.converged_nodes === s.total_online_nodes;
+              return (
+                <button
+                  key={s.namespace}
+                  type="button"
+                  onClick={() => setSelectedNs(s.namespace)}
+                  className="w-full px-3 py-2.5 text-left cursor-pointer border-0 transition-colors block"
+                  style={{
+                    background: active ? 'var(--accent-soft)' : 'transparent',
+                    borderLeft: `2px solid ${active ? 'var(--accent)' : 'transparent'}`,
+                  }}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold truncate" style={{ color: 'var(--text-primary)' }}>
+                      {meta.title}
+                    </span>
+                    <span className={meta.pillar === 'MCP' ? 'badge badge-accent text-[10px]' : 'badge text-[10px]'}>
+                      {meta.pillar}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex items-center justify-between text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                    <span>
+                      <strong style={{ color: 'var(--text-primary)' }}>{s.item_count}</strong> active
+                    </span>
+                    <span style={{ color: allConverged ? 'var(--ok)' : 'var(--text-muted)' }}>
+                      {s.total_online_nodes === 0
+                        ? '0 online'
+                        : `${s.converged_nodes}/${s.total_online_nodes} synced`}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
-      {/* Active Policy Group Items */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <div className="surface p-5 lg:col-span-2 space-y-3">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <h2 className="m-0 text-sm font-semibold flex items-center gap-2">
-                <Layers size={15} />
-                <span>{selectedMeta.title}</span>
-                <span className="badge mono text-[11px]">{selectedNs}</span>
-              </h2>
-              <p className="m-0 mt-0.5 text-xs" style={{ color: 'var(--text-muted)' }}>
+        {/* Center: Active Policy Entries */}
+        <div className="surface overflow-hidden xl:col-span-6">
+          <div
+            className="px-3.5 py-2.5 flex items-center justify-between gap-3"
+            style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-sidebar)' }}
+          >
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <Layers size={13} style={{ color: 'var(--text-muted)' }} />
+                <span className="text-xs font-semibold truncate">{selectedMeta.title}</span>
+                <span className="badge mono text-[10px]">{selectedNs}</span>
+              </div>
+              <div className="text-[11px] truncate mt-0.5" style={{ color: 'var(--text-muted)' }}>
                 {selectedMeta.hint}
-              </p>
+              </div>
             </div>
-            <button type="button" className="btn text-xs py-1 px-2.5 shrink-0" onClick={openCreateModal}>
+            <button type="button" className="btn btn-sm shrink-0" onClick={openCreateDrawer}>
               <Zap size={12} />
-              <span>Add Policy</span>
+              <span>Add</span>
             </button>
           </div>
 
           {loading ? (
-            <div className="py-8 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
+            <div className="p-8 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
               Loading policies…
             </div>
           ) : !detail || detail.items.length === 0 ? (
-            <div className="py-10 text-center text-xs space-y-2" style={{ color: 'var(--text-muted)' }}>
+            <div className="p-10 text-center text-xs space-y-2.5" style={{ color: 'var(--text-muted)' }}>
               <div>No active policies in <strong>{selectedMeta.title}</strong> yet.</div>
-              <button type="button" className="btn text-xs" onClick={openCreateModal}>
+              <button type="button" className="btn btn-sm" onClick={openCreateDrawer}>
                 <Plus size={12} />
                 <span>Add first policy</span>
               </button>
@@ -313,7 +363,7 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
                 <thead>
                   <tr>
                     <th>Policy ID</th>
-                    <th>Configuration</th>
+                    <th>Summary</th>
                     <th>Updated</th>
                     <th className="text-right">Actions</th>
                   </tr>
@@ -321,23 +371,30 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
                 <tbody>
                   {detail.items.map((item) => (
                     <tr key={item.item_key}>
-                      <td className="mono font-semibold">{item.item_key}</td>
-                      <td className="mono text-[11px] max-w-xs truncate" style={{ color: 'var(--text-secondary)' }}>
-                        {JSON.stringify(item.payload)}
+                      <td className="mono font-semibold whitespace-nowrap">{item.item_key}</td>
+                      <td
+                        className="mono text-[11px] max-w-sm truncate"
+                        style={{ color: 'var(--text-secondary)' }}
+                        title={JSON.stringify(item.payload)}
+                      >
+                        {summarizePolicy(selectedNs, item.payload)}
                       </td>
-                      <td style={{ color: 'var(--text-muted)' }}>{formatRelativeTime(item.updated_at)}</td>
-                      <td className="text-right">
+                      <td className="whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                        {formatRelativeTime(item.updated_at)}
+                      </td>
+                      <td className="text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-1">
                           <button
                             type="button"
-                            className="btn text-xs py-1 px-2"
-                            onClick={() => openEditModal(item)}
+                            className="btn btn-sm"
+                            onClick={() => openEditDrawer(item)}
                           >
-                            <Edit3 size={12} />
+                            <Edit3 size={11} />
+                            <span>Edit</span>
                           </button>
                           <button
                             type="button"
-                            className="btn-ghost p-1.5 rounded cursor-pointer border-0"
+                            className="btn-ghost p-1 rounded cursor-pointer border-0"
                             style={{ color: 'var(--danger)' }}
                             onClick={() => handleDelete(item.item_key)}
                           >
@@ -353,22 +410,24 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
           )}
         </div>
 
-        {/* Recent Policy Changes Feed */}
-        <div className="surface p-5 space-y-3">
-          <h2 className="m-0 text-sm font-semibold">Recent Policy Changes</h2>
-          <p className="m-0 text-xs" style={{ color: 'var(--text-muted)' }}>
-            Real-time change feed propagated automatically to every connected node.
-          </p>
+        {/* Right: Recent Policy Changes */}
+        <div className="surface overflow-hidden xl:col-span-3">
+          <div
+            className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wide"
+            style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-sidebar)', color: 'var(--text-muted)' }}
+          >
+            Recent Policy Changes
+          </div>
           {!detail || detail.recent_events.length === 0 ? (
-            <div className="py-8 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
+            <div className="p-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
               No policy changes recorded yet.
             </div>
           ) : (
-            <div className="space-y-2 max-h-[420px] overflow-y-auto tabular">
+            <div className="p-2.5 space-y-1.5 max-h-[520px] overflow-y-auto tabular">
               {detail.recent_events.map((ev) => (
                 <div
                   key={ev.seq}
-                  className="p-2.5 rounded-lg text-xs"
+                  className="px-2.5 py-2 rounded-md text-xs"
                   style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border-light)' }}
                 >
                   <div className="flex items-center justify-between gap-2">
@@ -377,7 +436,7 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
                       {ev.op === 'delete' ? 'removed' : 'updated'}
                     </span>
                   </div>
-                  <div className="text-[11px] mt-1 flex items-center justify-between" style={{ color: 'var(--text-muted)' }}>
+                  <div className="text-[10.5px] mt-1 flex items-center justify-between" style={{ color: 'var(--text-muted)' }}>
                     <span>{formatRelativeTime(ev.created_at)}</span>
                     <span className="mono opacity-75">v{ev.seq}</span>
                   </div>
@@ -388,17 +447,17 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
         </div>
       </div>
 
-      {/* Upsert Policy Modal */}
-      <Modal
-        open={modalOpen}
-        onClose={() => setModalOpen(false)}
+      {/* Right-Hand Upsert Policy Drawer */}
+      <Drawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
         title={
           editingExisting
             ? `Update ${selectedMeta.title} · ${itemKey}`
             : `Add ${selectedMeta.title} Policy`
         }
         subtitle="Applies immediately to 100% of connected nodes without reloading gateway config."
-        maxWidth="max-w-xl"
+        widthClass="max-w-xl"
       >
         <form onSubmit={handleSave} className="space-y-4">
           <div>
@@ -414,30 +473,30 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
           <div>
             <label className="block text-xs font-medium mb-1">Policy JSON</label>
             <textarea
-              className="input-base mono text-xs min-h-[210px]"
+              className="input-base mono text-xs min-h-[320px]"
               value={itemJson}
               onChange={(e) => setItemJson(e.target.value)}
               spellCheck={false}
               required
             />
           </div>
-          <div className="flex items-center justify-between pt-1">
+          <div className="flex items-center justify-between pt-2">
             <span className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--ok)' }}>
               <CheckCircle2 size={13} />
-              <span>Instant fleet sync · Unaffected by config rollbacks</span>
+              <span>Instant fleet sync · Unaffected by rollbacks</span>
             </span>
             <div className="flex gap-2">
-              <button type="button" className="btn" onClick={() => setModalOpen(false)}>
+              <button type="button" className="btn" onClick={() => setDrawerOpen(false)}>
                 Cancel
               </button>
               <button type="submit" className="btn btn-primary" disabled={saving}>
-                <Zap size={14} />
+                <Zap size={13} />
                 <span>{saving ? 'Syncing…' : 'Save & Sync'}</span>
               </button>
             </div>
           </div>
         </form>
-      </Modal>
+      </Drawer>
     </div>
   );
 }

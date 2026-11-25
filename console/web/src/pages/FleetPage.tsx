@@ -206,246 +206,260 @@ export function FleetPage({
     }
   };
 
+  const syncedCount = nodes.filter((n) => n.status === 'synced').length;
+
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="m-0 text-xl font-semibold tracking-tight">Fleet &amp; Nodes</h1>
-          <p className="m-0 mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
-            Live inventory of outbound-connected <code>shunt</code> instances, release rollout convergence, canary labels, and live policy sync health.
-          </p>
+    <div className="space-y-3.5">
+      {/* Compact Toolbar */}
+      <div className="surface px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2.5 min-w-0">
+          <span className="font-semibold text-sm">Fleet Inventory</span>
+          <span className="badge mono tabular">{nodes.length} nodes</span>
+          {nodes.length > 0 && (
+            <span className={syncedCount === nodes.length ? 'badge badge-ok tabular' : 'badge badge-warn tabular'}>
+              {syncedCount}/{nodes.length} synced
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-2">
-          <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none px-2.5 py-1.5 rounded-lg surface">
+        <div className="flex items-center gap-2 shrink-0">
+          <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none px-2 py-1 rounded-md" style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}>
             <input
               type="checkbox"
               checked={autoRefresh}
               onChange={(e) => setAutoRefresh(e.target.checked)}
             />
-            <span>Live poll (4s)</span>
+            <span>Auto-poll (4s)</span>
           </label>
-          <button type="button" className="btn" onClick={() => load()}>
-            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+          <button type="button" className="btn btn-sm" onClick={() => load()}>
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
             <span>Refresh</span>
           </button>
           <button
             type="button"
-            className="btn btn-primary"
+            className="btn btn-sm btn-primary"
             onClick={() => {
               setCreatedToken(null);
-              // Trigger via parent
               window.dispatchEvent(new CustomEvent('shunt-open-connect-node'));
             }}
           >
-            <Plus size={14} />
+            <Plus size={13} />
             <span>Connect Node</span>
           </button>
         </div>
       </div>
 
-      {/* Node Inventory Table */}
-      <div className="surface overflow-hidden">
-        {nodes.length === 0 ? (
-          <div className="p-12 text-center space-y-3">
-            <Server size={28} style={{ color: 'var(--text-muted)' }} className="mx-auto" />
-            <div className="font-medium text-sm">No nodes enrolled in {cluster.slug}</div>
-            <p className="m-0 text-xs max-w-md mx-auto" style={{ color: 'var(--text-muted)' }}>
-              Mint a cluster bootstrap token and start any <code>shunt</code> binary with <code>--control-plane</code>. No local config file needed.
-            </p>
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => window.dispatchEvent(new CustomEvent('shunt-open-connect-node'))}
-            >
-              <Terminal size={14} />
-              <span>Connect First Node</span>
-            </button>
+      {/* Main Split: Enrolled Nodes (left) + Enrollment Tokens (right on xl) */}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-3.5 items-start">
+        {/* Node Inventory Table */}
+        <div className="surface overflow-hidden xl:col-span-8">
+          <div
+            className="px-3.5 py-2 flex items-center justify-between"
+            style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-sidebar)' }}
+          >
+            <span className="text-xs font-semibold flex items-center gap-1.5">
+              <Server size={13} style={{ color: 'var(--text-muted)' }} />
+              <span>Enrolled Data-Plane Nodes</span>
+            </span>
+            <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+              Outbound-connected instances
+            </span>
           </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="swiss-table text-xs">
-              <thead>
-                <tr>
-                  <th>Node</th>
-                  <th>Status</th>
-                  <th>Config Release</th>
-                  <th>Live Policies</th>
-                  <th>Labels</th>
-                  <th>Last Heartbeat</th>
-                  <th className="text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {nodes.map((node) => (
-                  <React.Fragment key={node.id}>
-                    <tr>
-                      <td>
-                        <div className="font-semibold text-sm">{node.name}</div>
-                        <div className="mono text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                          {node.id} · v{node.shunt_version}
-                        </div>
-                      </td>
-                      <td>
-                        <NodeStatusBadge status={node.status} />
-                      </td>
-                      <td className="mono">
-                        <div>
-                          <strong>v{node.active_revision}</strong>
-                          {node.target_revision != null && node.target_revision !== node.active_revision && (
-                            <span style={{ color: 'var(--warn)' }}> → v{node.target_revision}</span>
-                          )}
-                        </div>
-                        <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                          {shortDigest(node.active_digest)}
-                        </div>
-                      </td>
-                      <td>
-                        <PolicySyncCell node={node} namespaces={namespaces} />
-                      </td>
-                      <td>
-                        <div className="flex flex-wrap gap-1">
-                          {Object.entries(node.labels).length === 0 ? (
-                            <span style={{ color: 'var(--text-muted)' }}>none</span>
-                          ) : (
-                            Object.entries(node.labels).map(([k, v]) => (
-                              <span key={k} className="badge mono text-[11px]">
-                                {k}={v}
-                              </span>
-                            ))
-                          )}
-                        </div>
-                      </td>
-                      <td style={{ color: 'var(--text-muted)' }}>
-                        {formatRelativeTime(node.last_heartbeat_at)}
-                      </td>
-                      <td className="text-right">
-                        <div className="inline-flex items-center gap-1">
-                          <button
-                            type="button"
-                            className="btn text-xs py-1 px-2"
-                            title="Edit labels (canary rings)"
-                            onClick={() => {
-                              setEditingNode(node);
-                              setEditLabelsStr(
-                                Object.entries(node.labels)
-                                  .map(([k, v]) => `${k}=${v}`)
-                                  .join(',')
-                              );
-                            }}
-                          >
-                            <Tag size={12} />
-                            <span>Labels</span>
-                          </button>
-                          <button
-                            type="button"
-                            className="btn-ghost p-1.5 rounded cursor-pointer border-0"
-                            style={{ color: 'var(--danger)' }}
-                            title="Deregister node"
-                            onClick={() => handleDeleteNode(node)}
-                          >
-                            <Trash2 size={14} />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                    {node.last_reload_error && (
+
+          {nodes.length === 0 ? (
+            <div className="p-10 text-center space-y-2.5">
+              <Server size={24} style={{ color: 'var(--text-muted)' }} className="mx-auto" />
+              <div className="font-medium text-sm">No nodes enrolled in {cluster.slug}</div>
+              <p className="m-0 text-xs max-w-md mx-auto" style={{ color: 'var(--text-muted)' }}>
+                Mint a cluster bootstrap token and start any <code>shunt</code> binary with <code>--control-plane</code>. No local config file needed.
+              </p>
+              <button
+                type="button"
+                className="btn btn-sm btn-primary"
+                onClick={() => window.dispatchEvent(new CustomEvent('shunt-open-connect-node'))}
+              >
+                <Terminal size={13} />
+                <span>Connect First Node</span>
+              </button>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="swiss-table text-xs">
+                <thead>
+                  <tr>
+                    <th>Node</th>
+                    <th>Status</th>
+                    <th>Config Release</th>
+                    <th>Live Policies</th>
+                    <th>Labels</th>
+                    <th>Heartbeat</th>
+                    <th className="text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {nodes.map((node) => (
+                    <React.Fragment key={node.id}>
                       <tr>
-                        <td colSpan={7} style={{ background: 'var(--danger-soft)' }}>
-                          <div className="flex items-start gap-2 text-xs" style={{ color: 'var(--danger)' }}>
-                            <AlertTriangle size={14} className="shrink-0 mt-0.5" />
-                            <div>
-                              <strong>Last reload failed (previous snapshot preserved):</strong>{' '}
-                              <code className="mono">{node.last_reload_error}</code>
-                            </div>
+                        <td className="whitespace-nowrap">
+                          <div className="font-semibold">{node.name}</div>
+                          <div className="mono text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                            {node.id} · v{node.shunt_version}
+                          </div>
+                        </td>
+                        <td className="whitespace-nowrap">
+                          <NodeStatusBadge status={node.status} />
+                        </td>
+                        <td className="mono whitespace-nowrap">
+                          <div>
+                            <strong>v{node.active_revision}</strong>
+                            {node.target_revision != null && node.target_revision !== node.active_revision && (
+                              <span style={{ color: 'var(--warn)' }}> → v{node.target_revision}</span>
+                            )}
+                          </div>
+                          <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                            {shortDigest(node.active_digest)}
+                          </div>
+                        </td>
+                        <td className="whitespace-nowrap">
+                          <PolicySyncCell node={node} namespaces={namespaces} />
+                        </td>
+                        <td>
+                          <div className="flex flex-wrap gap-1">
+                            {Object.entries(node.labels).length === 0 ? (
+                              <span style={{ color: 'var(--text-muted)' }}>—</span>
+                            ) : (
+                              Object.entries(node.labels).map(([k, v]) => (
+                                <span key={k} className="badge mono text-[10.5px]">
+                                  {k}={v}
+                                </span>
+                              ))
+                            )}
+                          </div>
+                        </td>
+                        <td className="whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                          {formatRelativeTime(node.last_heartbeat_at)}
+                        </td>
+                        <td className="text-right whitespace-nowrap">
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              title="Edit labels (canary rings)"
+                              onClick={() => {
+                                setEditingNode(node);
+                                setEditLabelsStr(
+                                  Object.entries(node.labels)
+                                    .map(([k, v]) => `${k}=${v}`)
+                                    .join(',')
+                                );
+                              }}
+                            >
+                              <Tag size={11} />
+                              <span>Labels</span>
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-ghost p-1 rounded cursor-pointer border-0"
+                              style={{ color: 'var(--danger)' }}
+                              title="Deregister node"
+                              onClick={() => handleDeleteNode(node)}
+                            >
+                              <Trash2 size={13} />
+                            </button>
                           </div>
                         </td>
                       </tr>
-                    )}
-                  </React.Fragment>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* Bootstrap Tokens List */}
-      <div className="surface p-5 space-y-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="m-0 text-sm font-semibold flex items-center gap-2">
-              <KeyRound size={15} />
-              <span>Cluster Bootstrap Enrollment Tokens</span>
-            </h2>
-            <p className="m-0 mt-0.5 text-xs" style={{ color: 'var(--text-muted)' }}>
-              Tokens used by new <code>shunt</code> nodes to enroll and obtain a long-lived node credential.
-            </p>
-          </div>
+                      {node.last_reload_error && (
+                        <tr>
+                          <td colSpan={7} style={{ background: 'var(--danger-soft)' }}>
+                            <div className="flex items-start gap-2 text-xs" style={{ color: 'var(--danger)' }}>
+                              <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                              <div>
+                                <strong>Last reload failed (previous snapshot preserved):</strong>{' '}
+                                <code className="mono">{node.last_reload_error}</code>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
-        {tokens.length === 0 ? (
-          <div className="text-xs py-4" style={{ color: 'var(--text-muted)' }}>
-            No enrollment tokens created yet.
+        {/* Bootstrap Tokens Panel */}
+        <div className="surface overflow-hidden xl:col-span-4">
+          <div
+            className="px-3.5 py-2 flex items-center justify-between"
+            style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-sidebar)' }}
+          >
+            <span className="text-xs font-semibold flex items-center gap-1.5">
+              <KeyRound size={13} style={{ color: 'var(--text-muted)' }} />
+              <span>Enrollment Tokens ({tokens.length})</span>
+            </span>
           </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="swiss-table text-xs">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Prefix</th>
-                  <th>Default Labels</th>
-                  <th>Uses</th>
-                  <th>Status</th>
-                  <th className="text-right">Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tokens.map((t) => (
-                  <tr key={t.id}>
-                    <td className="font-medium">{t.name}</td>
-                    <td className="mono">{t.prefix}</td>
-                    <td>
-                      {Object.entries(t.default_labels).map(([k, v]) => (
-                        <span key={k} className="badge mono mr-1">
-                          {k}={v}
-                        </span>
-                      ))}
-                    </td>
-                    <td className="mono">
-                      {t.uses_count}
-                      {t.max_uses ? ` / ${t.max_uses}` : ''}
-                    </td>
-                    <td>
-                      {t.revoked_at ? (
-                        <span className="badge badge-danger">
-                          <XCircle size={11} />
-                          Revoked
-                        </span>
-                      ) : (
-                        <span className="badge badge-ok">
-                          <CheckCircle2 size={11} />
-                          Active
-                        </span>
-                      )}
-                    </td>
-                    <td className="text-right">
-                      {!t.revoked_at && (
-                        <button
-                          type="button"
-                          className="btn btn-danger text-xs py-1 px-2"
-                          onClick={() => handleRevokeToken(t.id)}
-                        >
-                          Revoke
-                        </button>
-                      )}
-                    </td>
+
+          {tokens.length === 0 ? (
+            <div className="p-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
+              No enrollment tokens created yet.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="swiss-table text-xs">
+                <thead>
+                  <tr>
+                    <th>Token</th>
+                    <th>Uses</th>
+                    <th>Status</th>
+                    <th className="text-right">Action</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+                </thead>
+                <tbody>
+                  {tokens.map((t) => (
+                    <tr key={t.id}>
+                      <td>
+                        <div className="font-medium">{t.name}</div>
+                        <div className="mono text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                          {t.prefix}
+                        </div>
+                      </td>
+                      <td className="mono whitespace-nowrap">
+                        {t.uses_count}
+                        {t.max_uses ? `/${t.max_uses}` : ''}
+                      </td>
+                      <td className="whitespace-nowrap">
+                        {t.revoked_at ? (
+                          <span className="badge badge-danger">
+                            <XCircle size={10} />
+                            Revoked
+                          </span>
+                        ) : (
+                          <span className="badge badge-ok">
+                            <CheckCircle2 size={10} />
+                            Active
+                          </span>
+                        )}
+                      </td>
+                      <td className="text-right whitespace-nowrap">
+                        {!t.revoked_at && (
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-danger"
+                            onClick={() => handleRevokeToken(t.id)}
+                          >
+                            Revoke
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Connect Node Modal */}
@@ -495,14 +509,14 @@ export function FleetPage({
               <div className="mt-1.5 flex gap-1.5">
                 <button
                   type="button"
-                  className="btn text-xs py-0.5 px-2"
+                  className="btn btn-sm"
                   onClick={() => setTokenLabels('ring=stable')}
                 >
                   ring=stable
                 </button>
                 <button
                   type="button"
-                  className="btn text-xs py-0.5 px-2"
+                  className="btn btn-sm"
                   onClick={() => setTokenLabels('ring=canary')}
                 >
                   ring=canary
@@ -514,7 +528,7 @@ export function FleetPage({
                 Cancel
               </button>
               <button type="submit" className="btn btn-primary" disabled={creatingToken}>
-                <Terminal size={14} />
+                <Terminal size={13} />
                 <span>{creatingToken ? 'Generating…' : 'Generate Token & Command'}</span>
               </button>
             </div>
@@ -522,7 +536,7 @@ export function FleetPage({
         ) : (
           <div className="space-y-4">
             <div
-              className="p-3 rounded-lg text-xs"
+              className="p-3 rounded-md text-xs"
               style={{
                 background: 'var(--ok-soft)',
                 border: '1px solid var(--ok-border)',
@@ -562,7 +576,7 @@ export function FleetPage({
       >
         <div className="space-y-4">
           <div>
-            <label className="block text-xs font-medium mb-1">Labels (`key=value,key2=value2`)</label>
+            <label className="block text-xs font-medium mb-1">Labels (<code>key=value,key2=value2</code>)</label>
             <input
               className="input-base mono text-xs"
               value={editLabelsStr}

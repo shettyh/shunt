@@ -11,7 +11,7 @@ import {
   SecretScopeType,
   slugify,
 } from '../lib/api';
-import { CopyButton, Modal, useToast } from '../components/ui';
+import { CopyButton, Drawer, useToast } from '../components/ui';
 
 export function SecretsPage({
   org,
@@ -24,7 +24,7 @@ export function SecretsPage({
   const [secrets, setSecrets] = useState<SecretMeta[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const [modalOpen, setModalOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [rotatingSecret, setRotatingSecret] = useState<SecretMeta | null>(null);
   const [slug, setSlug] = useState('');
   const [description, setDescription] = useState('');
@@ -57,7 +57,7 @@ export function SecretsPage({
     setDeliveryMode('vault');
     setSecretValue('');
     setEnvVarName('');
-    setModalOpen(true);
+    setDrawerOpen(true);
   };
 
   const openRotate = (s: SecretMeta) => {
@@ -68,7 +68,7 @@ export function SecretsPage({
     setDeliveryMode(s.delivery_mode);
     setSecretValue('');
     setEnvVarName(s.env_var_name || '');
-    setModalOpen(true);
+    setDrawerOpen(true);
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -94,7 +94,7 @@ export function SecretsPage({
           ? `Rotated secret "${targetSlug}" to v${rotatingSecret.key_version + 1}`
           : `Stored secret "${targetSlug}" securely`
       );
-      setModalOpen(false);
+      setDrawerOpen(false);
       load();
     } catch (err) {
       toast.push(err instanceof ApiProblemError ? err.message : String(err), 'error');
@@ -115,40 +115,27 @@ export function SecretsPage({
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="m-0 text-xl font-semibold tracking-tight">Secrets Vault</h1>
-          <p className="m-0 mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
-            Write-only envelope-encrypted storage (per-secret 256-bit AES-256-GCM DEK) or zero-trust <code>env:VAR</code> passthrough. Plaintext secrets are never returned by the API or shown in diffs/exports.
-          </p>
+    <div className="space-y-3.5">
+      {/* Compact Toolbar */}
+      <div className="surface px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2.5 min-w-0">
+          <span className="font-semibold text-sm">Secrets Vault</span>
+          <span className="badge badge-accent">
+            <Lock size={10} />
+            <span>AES-256-GCM Vault</span>
+          </span>
+          <span className="badge badge-ok">
+            <Shield size={10} />
+            <span>Zero-Trust env:VAR</span>
+          </span>
+          <span className="text-xs hidden xl:inline" style={{ color: 'var(--text-muted)' }}>
+            Write-only storage—plaintext secrets are never returned by the API or shown in diffs/exports
+          </span>
         </div>
-        <button type="button" className="btn btn-primary" onClick={openCreate}>
-          <Plus size={14} />
+        <button type="button" className="btn btn-sm btn-primary shrink-0" onClick={openCreate}>
+          <Plus size={13} />
           <span>Add Secret</span>
         </button>
-      </div>
-
-      {/* Mode Explainer */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 text-xs">
-        <div className="surface-subtle p-4 flex items-start gap-3">
-          <Lock size={16} style={{ color: 'var(--accent)' }} className="mt-0.5 shrink-0" />
-          <div>
-            <div className="font-semibold">Managed Vault (<code>vault</code>)</div>
-            <p className="m-0 mt-0.5" style={{ color: 'var(--text-muted)' }}>
-              Encrypted with a unique DEK + AAD tenant binding. Decrypted only when authenticated <code>shunt</code> nodes fetch signed release bundles over TLS.
-            </p>
-          </div>
-        </div>
-        <div className="surface-subtle p-4 flex items-start gap-3">
-          <Shield size={16} style={{ color: 'var(--ok)' }} className="mt-0.5 shrink-0" />
-          <div>
-            <div className="font-semibold">Zero-Trust Env Ref (<code>env_ref</code>)</div>
-            <p className="m-0 mt-0.5" style={{ color: 'var(--text-muted)' }}>
-              Compiles directly to <code>env:VAR_NAME</code> so sensitive provider credentials never touch the control-plane database at all.
-            </p>
-          </div>
-        </div>
       </div>
 
       {/* Secrets Table */}
@@ -158,14 +145,15 @@ export function SecretsPage({
             Loading vault entries…
           </div>
         ) : secrets.length === 0 ? (
-          <div className="p-12 text-center space-y-3">
-            <KeyRound size={26} style={{ color: 'var(--text-muted)' }} className="mx-auto" />
+          <div className="p-10 text-center space-y-2.5">
+            <KeyRound size={24} style={{ color: 'var(--text-muted)' }} className="mx-auto" />
             <div className="font-medium text-sm">No secrets stored in {org.name} yet</div>
             <p className="m-0 text-xs max-w-md mx-auto" style={{ color: 'var(--text-muted)' }}>
-              Store upstream provider API keys or TLS private keys once, then reference them safely as <code>secret:&lt;slug&gt;</code> in your cluster topology.
+              Store upstream provider API keys or TLS private keys once, then reference them safely as{' '}
+              <code>secret:&lt;slug&gt;</code> or <code>env:VAR_NAME</code> in your cluster config.
             </p>
-            <button type="button" className="btn btn-primary" onClick={openCreate}>
-              <Plus size={14} />
+            <button type="button" className="btn btn-sm btn-primary" onClick={openCreate}>
+              <Plus size={13} />
               <span>Create First Secret</span>
             </button>
           </div>
@@ -192,14 +180,14 @@ export function SecretsPage({
                   return (
                     <tr key={s.id}>
                       <td>
-                        <div className="mono font-semibold text-sm">{s.slug}</div>
+                        <div className="mono font-semibold whitespace-nowrap">{s.slug}</div>
                         {s.description && (
                           <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
                             {s.description}
                           </div>
                         )}
                       </td>
-                      <td>
+                      <td className="whitespace-nowrap">
                         <div className="inline-flex items-center gap-1.5">
                           <code className="text-xs px-1.5 py-0.5 rounded" style={{ background: 'var(--bg-code)' }}>
                             {refStr}
@@ -207,31 +195,33 @@ export function SecretsPage({
                           <CopyButton text={refStr} label="" />
                         </div>
                       </td>
-                      <td>
+                      <td className="whitespace-nowrap">
                         {s.delivery_mode === 'vault' ? (
                           <span className="badge badge-accent">AES-256-GCM Vault</span>
                         ) : (
                           <span className="badge badge-ok">Env Passthrough</span>
                         )}
                       </td>
-                      <td>
+                      <td className="whitespace-nowrap">
                         <span className="badge mono">{s.scope_type}</span>
                       </td>
-                      <td className="mono">v{s.key_version}</td>
-                      <td style={{ color: 'var(--text-muted)' }}>{formatRelativeTime(s.updated_at)}</td>
-                      <td className="text-right">
+                      <td className="mono whitespace-nowrap">v{s.key_version}</td>
+                      <td className="whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                        {formatRelativeTime(s.updated_at)}
+                      </td>
+                      <td className="text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-1">
                           <button
                             type="button"
-                            className="btn text-xs py-1 px-2"
+                            className="btn btn-sm"
                             onClick={() => openRotate(s)}
                           >
-                            <RotateCw size={12} />
+                            <RotateCw size={11} />
                             <span>Rotate</span>
                           </button>
                           <button
                             type="button"
-                            className="btn-ghost p-1.5 rounded cursor-pointer border-0"
+                            className="btn-ghost p-1 rounded cursor-pointer border-0"
                             style={{ color: 'var(--danger)' }}
                             onClick={() => handleDelete(s)}
                           >
@@ -248,12 +238,13 @@ export function SecretsPage({
         )}
       </div>
 
-      {/* Create / Rotate Secret Modal */}
-      <Modal
-        open={modalOpen}
-        onClose={() => setModalOpen(false)}
+      {/* Create / Rotate Secret Drawer */}
+      <Drawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
         title={rotatingSecret ? `Rotate secret "${rotatingSecret.slug}"` : 'Add Secret to Vault'}
         subtitle="Write-only: secret values are envelope-encrypted immediately and cannot be read back via UI or API."
+        widthClass="max-w-lg"
       >
         <form onSubmit={handleSave} className="space-y-4">
           <div className="grid grid-cols-2 gap-3">
@@ -298,7 +289,7 @@ export function SecretsPage({
               <button
                 type="button"
                 onClick={() => setDeliveryMode('vault')}
-                className="p-3 rounded-lg text-left cursor-pointer"
+                className="p-2.5 rounded-md text-left cursor-pointer"
                 style={{
                   background: deliveryMode === 'vault' ? 'var(--accent-soft)' : 'var(--bg)',
                   border: `1px solid ${deliveryMode === 'vault' ? 'var(--accent)' : 'var(--border)'}`,
@@ -312,7 +303,7 @@ export function SecretsPage({
               <button
                 type="button"
                 onClick={() => setDeliveryMode('env_ref')}
-                className="p-3 rounded-lg text-left cursor-pointer"
+                className="p-2.5 rounded-md text-left cursor-pointer"
                 style={{
                   background: deliveryMode === 'env_ref' ? 'var(--accent-soft)' : 'var(--bg)',
                   border: `1px solid ${deliveryMode === 'env_ref' ? 'var(--accent)' : 'var(--border)'}`,
@@ -328,11 +319,9 @@ export function SecretsPage({
 
           {deliveryMode === 'vault' ? (
             <div>
-              <label className="block text-xs font-medium mb-1">
-                Secret Value (write-only)
-              </label>
+              <label className="block text-xs font-medium mb-1">Secret Value (write-only)</label>
               <textarea
-                className="input-base mono text-xs min-h-[84px]"
+                className="input-base mono text-xs min-h-[100px]"
                 value={secretValue}
                 onChange={(e) => setSecretValue(e.target.value)}
                 placeholder="sk-... or PEM private key"
@@ -354,17 +343,17 @@ export function SecretsPage({
             </div>
           )}
 
-          <div className="flex justify-end gap-2 pt-1">
-            <button type="button" className="btn" onClick={() => setModalOpen(false)}>
+          <div className="flex justify-end gap-2 pt-2">
+            <button type="button" className="btn" onClick={() => setDrawerOpen(false)}>
               Cancel
             </button>
             <button type="submit" className="btn btn-primary" disabled={saving}>
-              <Lock size={14} />
+              <Lock size={13} />
               <span>{saving ? 'Encrypting…' : rotatingSecret ? 'Rotate Secret' : 'Store Secret'}</span>
             </button>
           </div>
         </form>
-      </Modal>
+      </Drawer>
     </div>
   );
 }

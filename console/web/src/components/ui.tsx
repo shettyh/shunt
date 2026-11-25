@@ -233,6 +233,74 @@ export function Modal({
   );
 }
 
+export function Drawer({
+  open,
+  onClose,
+  title,
+  subtitle,
+  children,
+  widthClass = 'max-w-xl',
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+  widthClass?: string;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex justify-end"
+      style={{ background: 'rgba(0, 0, 0, 0.35)', backdropFilter: 'blur(2px)' }}
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        className={`w-full ${widthClass} h-full flex flex-col shadow-2xl overflow-hidden`}
+        style={{
+          background: 'var(--bg-elevated)',
+          borderLeft: '1px solid var(--border)',
+        }}
+      >
+        <div
+          className="px-5 py-3.5 flex items-start justify-between gap-4 shrink-0"
+          style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-sidebar)' }}
+        >
+          <div className="min-w-0">
+            <h2 className="m-0 text-sm font-semibold tracking-tight truncate">{title}</h2>
+            {subtitle && (
+              <p className="m-0 mt-0.5 text-xs" style={{ color: 'var(--text-muted)' }}>
+                {subtitle}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="btn-ghost p-1 rounded-md cursor-pointer border-0 shrink-0"
+            aria-label="Close drawer"
+          >
+            <X size={16} />
+          </button>
+        </div>
+        <div className="p-5 overflow-y-auto flex-1">{children}</div>
+      </div>
+    </div>
+  );
+}
+
 export function ShuntMark({ size = 26 }: { size?: number }) {
   return (
     <div
