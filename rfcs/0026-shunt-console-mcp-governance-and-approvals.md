@@ -23,7 +23,7 @@ Autonomous coding, DevOps, and enterprise agents calling MCP tools (`github__mer
 
 ### Goals
 - **Live MCP Catalog Discovery:** Inspect tools, resources, prompts, and JSON input schemas exposed by every registered upstream MCP server without leaving `shunt-console`.
-- **Fast Fleet-Wide Agent ACLs (Channel 2):** Update per-agent server/tool/resource/prompt permissions and JSON argument constraints via `mcp.agent_acls` in ~20–50 ms with zero topology reload and zero hot-path overhead.
+- **Fast Fleet-Wide Agent ACLs (Channel 2):** Update per-agent server/tool/resource/prompt permissions and JSON argument constraints via `mcp.agent_acls` in ~20–50 ms with zero topology reload and zero hot-path overhead. Following [RFC 0023 §4.8](./0023-shunt-console-architecture-and-control-plane.md#48-web-console-ux-principles), Agent Permissions, Approval Inbox, and Kill-Switch appear as first-class **MCP & Agents** views with `Instant Sync` indicators rather than exposing Channel 2/3 transport terms in the UI.
 - **Tamper-Proof Human-in-the-Loop Approvals (Channel 3 + Channel 2):**
   - Bind every approval grant to `canonical_args_sha256` (reusing `shunt-mcp`'s deterministic canonical JSON serializer) so an approved safe call cannot be replayed with malicious arguments.
   - Support both **Async/Deferred Mode** (immediate `-32004` with `approval_id`, agent retries once approved) and **Hold/Wait Mode** (data plane holds the MCP call open up to a bounded timeout until a human clicks Approve/Deny).

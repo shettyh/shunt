@@ -19,10 +19,20 @@ import {
 } from '../lib/api';
 import { Modal, useToast } from '../components/ui';
 
-const NAMESPACE_TEMPLATES: Record<string, { key: string; value: object; hint: string }> = {
+interface PolicyGroupMeta {
+  title: string;
+  pillar: 'AI' | 'MCP' | 'Custom';
+  key: string;
+  hint: string;
+  value: object;
+}
+
+const POLICY_CATALOG: Record<string, PolicyGroupMeta> = {
   'ai.virtual_keys': {
+    title: 'AI Virtual Keys',
+    pillar: 'AI',
     key: 'vk_team_search',
-    hint: 'SHA-256 hashed virtual key policies synced to ai-virtual-keys',
+    hint: 'Hashed virtual API keys, allowed models, RPM/TPM & spend caps for ai-virtual-keys',
     value: {
       enabled: true,
       org: 'acme',
@@ -34,18 +44,24 @@ const NAMESPACE_TEMPLATES: Record<string, { key: string; value: object; hint: st
     },
   },
   'ai.budgets': {
+    title: 'AI Budgets',
+    pillar: 'AI',
     key: 'team:acme/search',
-    hint: 'Org & team spend ceilings synced to ai-budget',
+    hint: 'Organization and team spend ceilings (soft & hard caps) enforced by ai-budget',
     value: { limit_usd: 1000.0, soft_limit_usd: 800.0, window: 'monthly', mode: 'hard' },
   },
   'ai.pricing': {
+    title: 'Model Pricing',
+    pillar: 'AI',
     key: 'gpt-4o',
-    hint: 'Per-1M token model pricing overrides',
+    hint: 'Per-1M token cost overrides applied fleet-wide without reloading gateway config',
     value: { input_usd_per_1m: 2.5, output_usd_per_1m: 10.0, cached_input_usd_per_1m: 1.25 },
   },
   'mcp.agent_acls': {
+    title: 'MCP Agent Permissions',
+    pillar: 'MCP',
     key: 'agent_ci_triage',
-    hint: 'Least-privilege MCP tool & server ACLs',
+    hint: 'Least-privilege server, tool, resource & prompt allow/deny rules per agent',
     value: {
       enabled: true,
       allowed_servers: ['github', 'jira'],
@@ -54,8 +70,10 @@ const NAMESPACE_TEMPLATES: Record<string, { key: string; value: object; hint: st
     },
   },
   'mcp.kill_switch': {
+    title: 'Emergency Kill-Switch',
+    pillar: 'MCP',
     key: 'ks_emergency_1',
-    hint: 'Emergency sub-50ms containment rules for agents, sessions, servers, or tools',
+    hint: 'Sub-second fleet-wide blocks for rogue agents, sessions, servers, or tools',
     value: {
       scope: 'principal',
       target: 'agent_rogue_1',
@@ -64,11 +82,25 @@ const NAMESPACE_TEMPLATES: Record<string, { key: string; value: object; hint: st
     },
   },
   'mcp.approvals': {
+    title: 'MCP Tool Approvals',
+    pillar: 'MCP',
     key: 'appr_01',
-    hint: 'Cryptographically args-pinned human-in-the-loop MCP approval grants',
+    hint: 'Args-bound human-in-the-loop approval grants for gated tool invocations',
     value: { principal: 'agent_ci_triage', tool: 'github__create_issue', max_uses: 1 },
   },
 };
+
+function getPolicyMeta(namespace: string): PolicyGroupMeta {
+  return (
+    POLICY_CATALOG[namespace] || {
+      title: namespace,
+      pillar: 'Custom',
+      key: 'policy_1',
+      hint: 'Instant-sync runtime policy entries',
+      value: { enabled: true },
+    }
+  );
+}
 
 export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
   const toast = useToast();
@@ -84,12 +116,14 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
   const [editingExisting, setEditingExisting] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  const selectedMeta = getPolicyMeta(selectedNs);
+
   const loadSummaries = async () => {
     try {
       const s = await api.listStateNamespaces(cluster.slug);
       setSummaries(s);
     } catch (err) {
-      toast.push(err instanceof ApiProblemError ? err.message : 'Failed to load namespaces', 'error');
+      toast.push(err instanceof ApiProblemError ? err.message : 'Failed to load policy groups', 'error');
     }
   };
 
@@ -99,7 +133,7 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
       const d = await api.getNamespaceState(cluster.slug, ns);
       setDetail(d);
     } catch (err) {
-      toast.push(err instanceof ApiProblemError ? err.message : 'Failed to load namespace state', 'error');
+      toast.push(err instanceof ApiProblemError ? err.message : 'Failed to load policies', 'error');
     } finally {
       setLoading(false);
     }
@@ -111,10 +145,7 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
   }, [cluster.slug, selectedNs]);
 
   const openCreateModal = () => {
-    const tpl = NAMESPACE_TEMPLATES[selectedNs] || {
-      key: 'item_1',
-      value: { enabled: true },
-    };
+    const tpl = getPolicyMeta(selectedNs);
     setItemKey(tpl.key);
     setItemJson(JSON.stringify(tpl.value, null, 2));
     setEditingExisting(false);
@@ -139,8 +170,8 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
     }
     setSaving(true);
     try {
-      const ev = await api.upsertStateItem(cluster.slug, selectedNs, itemKey.trim(), parsed);
-      toast.push(`Pushed ${selectedNs}/${itemKey.trim()} at seq #${ev.seq} over Channel 2`);
+      await api.upsertStateItem(cluster.slug, selectedNs, itemKey.trim(), parsed);
+      toast.push(`Synced ${selectedMeta.title} policy "${itemKey.trim()}" across fleet`);
       setModalOpen(false);
       await Promise.all([loadSummaries(), loadDetail(selectedNs)]);
     } catch (err) {
@@ -151,12 +182,16 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
   };
 
   const handleDelete = async (key: string) => {
-    if (!window.confirm(`Delete "${key}" from ${selectedNs}? This fans out immediately to 100% of cluster nodes.`)) {
+    if (
+      !window.confirm(
+        `Remove "${key}" from ${selectedMeta.title}? This takes effect immediately across 100% of cluster nodes.`
+      )
+    ) {
       return;
     }
     try {
-      const ev = await api.deleteStateItem(cluster.slug, selectedNs, key);
-      toast.push(`Deleted ${selectedNs}/${key} at seq #${ev.seq} (propagating fleet-wide)`);
+      await api.deleteStateItem(cluster.slug, selectedNs, key);
+      toast.push(`Removed "${key}" from ${selectedMeta.title} across fleet`);
       await Promise.all([loadSummaries(), loadDetail(selectedNs)]);
     } catch (err) {
       toast.push(err instanceof ApiProblemError ? err.message : String(err), 'error');
@@ -167,9 +202,15 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="m-0 text-xl font-semibold tracking-tight">Synced State Tables (Channel 2)</h1>
+          <div className="flex items-center gap-2.5">
+            <h1 className="m-0 text-xl font-semibold tracking-tight">Live Policies</h1>
+            <span className="badge badge-ok">
+              <Zap size={11} />
+              <span>Instant Sync</span>
+            </span>
+          </div>
           <p className="m-0 mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
-            Lock-free <code>ArcSwap</code> identity &amp; policy tables synced fleet-wide in ~20–50ms via monotonic SSE deltas—completely isolated from Channel 1 topology rollbacks.
+            High-velocity access &amp; safety controls applied to 100% of nodes in milliseconds—independent of config releases and never undone by rollbacks.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -186,14 +227,15 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
           </button>
           <button type="button" className="btn btn-primary" onClick={openCreateModal}>
             <Plus size={14} />
-            <span>Upsert Entry</span>
+            <span>Add Policy</span>
           </button>
         </div>
       </div>
 
-      {/* Namespace Selector Cards */}
+      {/* Policy Group Selector Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 tabular">
         {summaries.map((s) => {
+          const meta = getPolicyMeta(s.namespace);
           const active = s.namespace === selectedNs;
           const allConverged =
             s.total_online_nodes > 0 && s.converged_nodes === s.total_online_nodes;
@@ -209,18 +251,23 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
               }}
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="mono text-xs font-semibold">{s.namespace}</span>
-                <span className="badge mono text-[11px]">seq #{s.head_seq}</span>
+                <span className="text-sm font-semibold">{meta.title}</span>
+                <span className={meta.pillar === 'MCP' ? 'badge badge-accent text-[10px]' : 'badge text-[10px]'}>
+                  {meta.pillar}
+                </span>
               </div>
-              <div className="mt-2 flex items-center justify-between text-xs" style={{ color: 'var(--text-muted)' }}>
+              <div className="mono text-[11px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                {s.namespace}
+              </div>
+              <div className="mt-2.5 flex items-center justify-between text-xs" style={{ color: 'var(--text-muted)' }}>
                 <span>
-                  <strong style={{ color: 'var(--text-primary)' }}>{s.item_count}</strong> active key
-                  {s.item_count === 1 ? '' : 's'}
+                  <strong style={{ color: 'var(--text-primary)' }}>{s.item_count}</strong> active{' '}
+                  {s.item_count === 1 ? 'policy' : 'policies'}
                 </span>
                 <span style={{ color: allConverged ? 'var(--ok)' : 'var(--text-muted)' }}>
                   {s.total_online_nodes === 0
                     ? '0 nodes online'
-                    : `${s.converged_nodes}/${s.total_online_nodes} converged`}
+                    : `${s.converged_nodes}/${s.total_online_nodes} nodes updated`}
                 </span>
               </div>
             </button>
@@ -228,38 +275,36 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
         })}
       </div>
 
-      {/* Active Namespace Items */}
+      {/* Active Policy Group Items */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <div className="surface p-5 lg:col-span-2 space-y-3">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-3">
             <div>
-              <h2 className="m-0 text-sm font-semibold flex items-center gap-2 mono">
+              <h2 className="m-0 text-sm font-semibold flex items-center gap-2">
                 <Layers size={15} />
-                <span>{selectedNs}</span>
-                {detail && <span className="badge badge-ok">head seq #{detail.head_seq}</span>}
+                <span>{selectedMeta.title}</span>
+                <span className="badge mono text-[11px]">{selectedNs}</span>
               </h2>
-              {NAMESPACE_TEMPLATES[selectedNs]?.hint && (
-                <p className="m-0 mt-0.5 text-xs" style={{ color: 'var(--text-muted)' }}>
-                  {NAMESPACE_TEMPLATES[selectedNs].hint}
-                </p>
-              )}
+              <p className="m-0 mt-0.5 text-xs" style={{ color: 'var(--text-muted)' }}>
+                {selectedMeta.hint}
+              </p>
             </div>
-            <button type="button" className="btn text-xs py-1 px-2.5" onClick={openCreateModal}>
+            <button type="button" className="btn text-xs py-1 px-2.5 shrink-0" onClick={openCreateModal}>
               <Zap size={12} />
-              <span>Push Delta</span>
+              <span>Add Policy</span>
             </button>
           </div>
 
           {loading ? (
             <div className="py-8 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
-              Loading entries…
+              Loading policies…
             </div>
           ) : !detail || detail.items.length === 0 ? (
             <div className="py-10 text-center text-xs space-y-2" style={{ color: 'var(--text-muted)' }}>
-              <div>No active entries in <code>{selectedNs}</code>.</div>
+              <div>No active policies in <strong>{selectedMeta.title}</strong> yet.</div>
               <button type="button" className="btn text-xs" onClick={openCreateModal}>
                 <Plus size={12} />
-                <span>Add first entry</span>
+                <span>Add first policy</span>
               </button>
             </div>
           ) : (
@@ -267,9 +312,8 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
               <table className="swiss-table text-xs">
                 <thead>
                   <tr>
-                    <th>Item Key</th>
-                    <th>Seq</th>
-                    <th>Value Preview</th>
+                    <th>Policy ID</th>
+                    <th>Configuration</th>
                     <th>Updated</th>
                     <th className="text-right">Actions</th>
                   </tr>
@@ -278,9 +322,6 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
                   {detail.items.map((item) => (
                     <tr key={item.item_key}>
                       <td className="mono font-semibold">{item.item_key}</td>
-                      <td className="mono" style={{ color: 'var(--text-muted)' }}>
-                        #{item.seq}
-                      </td>
                       <td className="mono text-[11px] max-w-xs truncate" style={{ color: 'var(--text-secondary)' }}>
                         {JSON.stringify(item.payload)}
                       </td>
@@ -312,15 +353,15 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
           )}
         </div>
 
-        {/* Append-only Delta Log */}
+        {/* Recent Policy Changes Feed */}
         <div className="surface p-5 space-y-3">
-          <h2 className="m-0 text-sm font-semibold">Recent Delta Events</h2>
+          <h2 className="m-0 text-sm font-semibold">Recent Policy Changes</h2>
           <p className="m-0 text-xs" style={{ color: 'var(--text-muted)' }}>
-            Append-only <code>control_events</code> streamed over SSE with automatic <code>full_sync</code> fallback on compacted cursors.
+            Real-time change feed propagated automatically to every connected node.
           </p>
           {!detail || detail.recent_events.length === 0 ? (
             <div className="py-8 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
-              No delta events yet.
+              No policy changes recorded yet.
             </div>
           ) : (
             <div className="space-y-2 max-h-[420px] overflow-y-auto tabular">
@@ -331,14 +372,14 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
                   style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border-light)' }}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="mono font-semibold">#{ev.seq}</span>
-                    <span className={ev.op === 'delete' ? 'badge badge-danger mono' : 'badge badge-ok mono'}>
-                      {ev.op}
+                    <span className="mono font-semibold truncate">{ev.item_key}</span>
+                    <span className={ev.op === 'delete' ? 'badge badge-danger' : 'badge badge-ok'}>
+                      {ev.op === 'delete' ? 'removed' : 'updated'}
                     </span>
                   </div>
-                  <div className="mono mt-1 truncate">{ev.item_key}</div>
-                  <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                    {formatRelativeTime(ev.created_at)}
+                  <div className="text-[11px] mt-1 flex items-center justify-between" style={{ color: 'var(--text-muted)' }}>
+                    <span>{formatRelativeTime(ev.created_at)}</span>
+                    <span className="mono opacity-75">v{ev.seq}</span>
                   </div>
                 </div>
               ))}
@@ -347,17 +388,21 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
         </div>
       </div>
 
-      {/* Upsert Entry Modal */}
+      {/* Upsert Policy Modal */}
       <Modal
         open={modalOpen}
         onClose={() => setModalOpen(false)}
-        title={editingExisting ? `Update ${selectedNs}/${itemKey}` : `Push entry to ${selectedNs}`}
-        subtitle="Propagates immediately to 100% of connected nodes over Channel 2 SSE."
+        title={
+          editingExisting
+            ? `Update ${selectedMeta.title} · ${itemKey}`
+            : `Add ${selectedMeta.title} Policy`
+        }
+        subtitle="Applies immediately to 100% of connected nodes without reloading gateway config."
         maxWidth="max-w-xl"
       >
         <form onSubmit={handleSave} className="space-y-4">
           <div>
-            <label className="block text-xs font-medium mb-1">Item Key</label>
+            <label className="block text-xs font-medium mb-1">Policy ID</label>
             <input
               className="input-base mono text-xs"
               value={itemKey}
@@ -367,7 +412,7 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
             />
           </div>
           <div>
-            <label className="block text-xs font-medium mb-1">JSON Payload</label>
+            <label className="block text-xs font-medium mb-1">Policy JSON</label>
             <textarea
               className="input-base mono text-xs min-h-[210px]"
               value={itemJson}
@@ -379,7 +424,7 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
           <div className="flex items-center justify-between pt-1">
             <span className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--ok)' }}>
               <CheckCircle2 size={13} />
-              <span>Zero topology reload · Lock-free ArcSwap</span>
+              <span>Instant fleet sync · Unaffected by config rollbacks</span>
             </span>
             <div className="flex gap-2">
               <button type="button" className="btn" onClick={() => setModalOpen(false)}>
@@ -387,7 +432,7 @@ export function SyncedStatePage({ cluster }: { cluster: Cluster }) {
               </button>
               <button type="submit" className="btn btn-primary" disabled={saving}>
                 <Zap size={14} />
-                <span>{saving ? 'Pushing…' : 'Push to Fleet'}</span>
+                <span>{saving ? 'Syncing…' : 'Save & Sync'}</span>
               </button>
             </div>
           </div>

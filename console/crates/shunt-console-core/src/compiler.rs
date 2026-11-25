@@ -360,11 +360,12 @@ impl ConsoleCompiler {
         Ok(items)
     }
 
-    /// Returns a curated, immediately valid starter `shunt.toml` preset for the Setup Wizard.
-    pub fn starter_preset_toml(preset: &str) -> &'static str {
-        match preset {
-            "http-api" => {
-                r#"[server]
+    /// Returns the clean, neutral starter `shunt.toml` skeleton for a newly created cluster.
+    ///
+    /// Every Shunt cluster is unified by default and can serve HTTP APIs, AI models, and MCP
+    /// servers simultaneously without locking the cluster into a single gateway mode.
+    pub fn default_cluster_toml() -> &'static str {
+        r#"[server]
 listen = "0.0.0.0:8080"
 drain_timeout_ms = 30000
 
@@ -378,55 +379,7 @@ name = "request-id"
 
 [[plugins]]
 name = "metrics"
-
-[[upstreams]]
-name = "api-backend"
-endpoints = ["http://127.0.0.1:3000"]
-
-[[routes]]
-id = "health-api"
-path_prefix = "/api"
-upstream = "api-backend"
 "#
-            }
-            "ai-gateway" => {
-                r#"[server]
-listen = "0.0.0.0:8080"
-drain_timeout_ms = 30000
-
-[admin]
-enabled = true
-listen = "127.0.0.1:9090"
-ui = false
-
-[[plugins]]
-name = "request-id"
-
-[[plugins]]
-name = "metrics"
-
-[[upstreams]]
-name = "openai-upstream"
-endpoints = ["https://api.openai.com"]
-
-[[routes]]
-id = "ai-chat"
-path_prefix = "/v1"
-upstream = "openai-upstream"
-"#
-            }
-            _ => {
-                r#"[server]
-listen = "0.0.0.0:8080"
-drain_timeout_ms = 30000
-
-[admin]
-enabled = true
-listen = "127.0.0.1:9090"
-ui = false
-"#
-            }
-        }
     }
 }
 
@@ -548,34 +501,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn starter_presets_compile_and_verify_cleanly() {
-        for preset in ["empty", "http-api", "ai-gateway"] {
-            let toml_src = ConsoleCompiler::starter_preset_toml(preset);
-            let items = ConsoleCompiler::decompose_toml(toml_src).unwrap();
-            let resources: Vec<TopologyResource> = items
-                .into_iter()
-                .map(|(kind, slug, sort_order, spec)| TopologyResource {
-                    id: format!("r_{slug}"),
-                    cluster_id: "cls_1".to_owned(),
-                    kind,
-                    slug,
-                    sort_order,
-                    version: 1,
-                    etag: "\"1\"".to_owned(),
-                    spec,
-                    draft_state: "active".to_owned(),
-                    updated_by: "test".to_owned(),
-                    created_at: String::new(),
-                    updated_at: String::new(),
-                })
-                .collect();
-            let compiled = ConsoleCompiler::compile_and_verify("test", &resources, false).unwrap();
-            assert!(
-                compiled.verify_report.passed,
-                "preset `{preset}` failed verify: {:?}",
-                compiled.diagnostics
-            );
-        }
+    fn default_cluster_skeleton_compiles_and_verifies_cleanly() {
+        let toml_src = ConsoleCompiler::default_cluster_toml();
+        let items = ConsoleCompiler::decompose_toml(toml_src).unwrap();
+        let resources: Vec<TopologyResource> = items
+            .into_iter()
+            .map(|(kind, slug, sort_order, spec)| TopologyResource {
+                id: format!("r_{slug}"),
+                cluster_id: "cls_1".to_owned(),
+                kind,
+                slug,
+                sort_order,
+                version: 1,
+                etag: "\"1\"".to_owned(),
+                spec,
+                draft_state: "active".to_owned(),
+                updated_by: "test".to_owned(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .collect();
+        let compiled = ConsoleCompiler::compile_and_verify("test", &resources, false).unwrap();
+        assert!(
+            compiled.verify_report.passed,
+            "default cluster skeleton failed verify: {:?}",
+            compiled.diagnostics
+        );
     }
 
     #[test]

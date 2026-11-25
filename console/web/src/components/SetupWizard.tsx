@@ -19,33 +19,6 @@ import {
 } from '../lib/api';
 import { ConnectCommandBox, ShuntMark, useToast } from './ui';
 
-const PRESETS = [
-  {
-    id: 'http-api',
-    title: 'HTTP API Gateway',
-    desc: 'Includes request-id, Prometheus metrics, a starter upstream, and an /api prefix route.',
-    tag: 'Recommended',
-  },
-  {
-    id: 'ai-gateway',
-    title: 'AI Gateway Starter',
-    desc: 'Pre-wired /v1 route targeting OpenAI upstream, ready for shunt-ai routing & virtual keys.',
-    tag: 'AI',
-  },
-  {
-    id: 'empty',
-    title: 'Minimal Empty Cluster',
-    desc: 'Clean [server] + [admin] listener skeleton. Add routes or import shunt.toml later.',
-    tag: 'Minimal',
-  },
-  {
-    id: 'import',
-    title: 'Import existing shunt.toml',
-    desc: 'Paste or upload your existing shunt.toml to migrate into Console-managed revisions.',
-    tag: 'Migrate',
-  },
-];
-
 export function SetupWizard({ onComplete }: { onComplete: () => void }) {
   const toast = useToast();
   const [step, setStep] = useState<1 | 2 | 3>(1);
@@ -65,7 +38,7 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
   const [clusterSlug, setClusterSlug] = useState('prod-us');
   const [clusterSlugTouched, setClusterSlugTouched] = useState(false);
   const [environment, setEnvironment] = useState('production');
-  const [preset, setPreset] = useState('http-api');
+  const [configSource, setConfigSource] = useState<'default' | 'import'>('default');
   const [importToml, setImportToml] = useState('');
   const [autoPublish, setAutoPublish] = useState(true);
 
@@ -90,7 +63,7 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
     const reader = new FileReader();
     reader.onload = () => {
       setImportToml(String(reader.result || ''));
-      setPreset('import');
+      setConfigSource('import');
     };
     reader.readAsText(file);
   };
@@ -114,13 +87,12 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
         cluster_slug: clusterSlug.trim(),
         cluster_name: clusterName.trim() || clusterSlug.trim(),
         environment,
-        starter_preset: preset === 'import' ? 'empty' : preset,
-        import_toml: preset === 'import' ? importToml : undefined,
+        import_toml: configSource === 'import' ? importToml : undefined,
         auto_publish: autoPublish,
       });
       setBootResult(res);
       setStep(3);
-      toast.push('Control plane initialized and Revision #1 ready!');
+      toast.push('Control plane initialized and Release #1 ready!');
     } catch (err) {
       const msg = err instanceof ApiProblemError ? err.message : String(err);
       setError(msg);
@@ -311,10 +283,10 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
             <div className="space-y-5">
               <div>
                 <h1 className="m-0 text-xl font-semibold tracking-tight">
-                  Configure your first gateway cluster
+                  Create your first gateway cluster
                 </h1>
                 <p className="m-0 mt-1 text-sm" style={{ color: 'var(--text-muted)' }}>
-                  Pick a starter topology or import an existing <code className="text-xs">shunt.toml</code>.
+                  Every Shunt cluster is unified—route HTTP APIs, AI models, and MCP servers side by side on the same fleet.
                 </p>
               </div>
 
@@ -360,38 +332,52 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
 
               <div>
                 <label className="block text-xs font-medium mb-2" style={{ color: 'var(--text-secondary)' }}>
-                  Starter Topology
+                  Initial Configuration
                 </label>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  {PRESETS.map((p) => {
-                    const selected = preset === p.id;
-                    return (
-                      <button
-                        key={p.id}
-                        type="button"
-                        onClick={() => setPreset(p.id)}
-                        className="text-left p-3.5 rounded-lg cursor-pointer transition-colors"
-                        style={{
-                          background: selected ? 'var(--accent-soft)' : 'var(--bg)',
-                          border: `1px solid ${selected ? 'var(--accent)' : 'var(--border)'}`,
-                        }}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>
-                            {p.title}
-                          </span>
-                          <span className={selected ? 'badge badge-accent' : 'badge'}>{p.tag}</span>
-                        </div>
-                        <p className="m-0 mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
-                          {p.desc}
-                        </p>
-                      </button>
-                    );
-                  })}
+                  <button
+                    type="button"
+                    onClick={() => setConfigSource('default')}
+                    className="text-left p-3.5 rounded-lg cursor-pointer transition-colors"
+                    style={{
+                      background: configSource === 'default' ? 'var(--accent-soft)' : 'var(--bg)',
+                      border: `1px solid ${configSource === 'default' ? 'var(--accent)' : 'var(--border)'}`,
+                    }}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>
+                        Start Fresh
+                      </span>
+                      <span className={configSource === 'default' ? 'badge badge-accent' : 'badge'}>Default</span>
+                    </div>
+                    <p className="m-0 mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
+                      Clean gateway skeleton with listeners, request-id, and metrics. Add any mix of HTTP, AI, and MCP routes after setup.
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setConfigSource('import')}
+                    className="text-left p-3.5 rounded-lg cursor-pointer transition-colors"
+                    style={{
+                      background: configSource === 'import' ? 'var(--accent-soft)' : 'var(--bg)',
+                      border: `1px solid ${configSource === 'import' ? 'var(--accent)' : 'var(--border)'}`,
+                    }}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>
+                        Import existing shunt.toml
+                      </span>
+                      <span className={configSource === 'import' ? 'badge badge-accent' : 'badge'}>Migrate</span>
+                    </div>
+                    <p className="m-0 mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
+                      Paste or upload your current <code className="text-[11px]">shunt.toml</code> to bring existing routes and plugins under Console management.
+                    </p>
+                  </button>
                 </div>
               </div>
 
-              {preset === 'import' && (
+              {configSource === 'import' && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>
@@ -419,7 +405,7 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
                   onChange={(e) => setAutoPublish(e.target.checked)}
                 />
                 <span>
-                  Validate with <code className="text-xs">shunt verify</code> and publish Revision #1 immediately
+                  Validate with <code className="text-xs">shunt verify</code> and publish Release #1 immediately
                 </span>
               </label>
 
@@ -431,7 +417,7 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={submitting || !clusterSlug.trim() || (preset === 'import' && !importToml.trim())}
+                  disabled={submitting || !clusterSlug.trim() || (configSource === 'import' && !importToml.trim())}
                   onClick={handleBootstrap}
                 >
                   {submitting ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
@@ -514,7 +500,7 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
                         {connectedNodes.length} node{connectedNodes.length > 1 ? 's' : ''} connected!
                       </div>
                       <div className="text-xs mono mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-                        {connectedNodes[0].name} · rev #{connectedNodes[0].active_revision} · {connectedNodes[0].status}
+                        {connectedNodes[0].name} · v{connectedNodes[0].active_revision} · {connectedNodes[0].status}
                       </div>
                     </div>
                   </div>

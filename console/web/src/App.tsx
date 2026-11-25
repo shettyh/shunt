@@ -59,7 +59,8 @@ function ConsoleAppInner() {
   const [ncName, setNcName] = useState('');
   const [ncSlug, setNcSlug] = useState('');
   const [ncEnv, setNcEnv] = useState('staging');
-  const [ncPreset, setNcPreset] = useState('http-api');
+  const [ncShowImport, setNcShowImport] = useState(false);
+  const [ncImportToml, setNcImportToml] = useState('');
 
   const hydrateSession = useCallback(async () => {
     setBooting(true);
@@ -142,12 +143,14 @@ function ConsoleAppInner() {
         slug: slugify(ncSlug || ncName),
         name: ncName.trim(),
         environment: ncEnv,
-        starter_preset: ncPreset,
+        import_toml: ncShowImport && ncImportToml.trim() ? ncImportToml : undefined,
       });
       toast.push(`Created cluster "${created.name}"`);
       setNewClusterOpen(false);
       setNcName('');
       setNcSlug('');
+      setNcShowImport(false);
+      setNcImportToml('');
       await loadClusters(selectedOrgSlug);
       setSelectedClusterSlug(created.slug);
     } catch (err) {
@@ -175,10 +178,10 @@ function ConsoleAppInner() {
   const currentCluster = clusters.find((c) => c.slug === selectedClusterSlug) || clusters[0];
 
   const navItems: { id: NavSection; label: string; group: string; icon: React.ReactNode }[] = [
-    { id: 'overview', label: 'Overview', group: 'Control Plane', icon: <Activity size={15} /> },
-    { id: 'fleet', label: 'Fleet & Nodes', group: 'Control Plane', icon: <Server size={15} /> },
-    { id: 'topology', label: 'Topology (Ch 1)', group: 'Control Plane', icon: <FileCode2 size={15} /> },
-    { id: 'state', label: 'Synced State (Ch 2)', group: 'Control Plane', icon: <Layers size={15} /> },
+    { id: 'overview', label: 'Overview', group: 'Gateway', icon: <Activity size={15} /> },
+    { id: 'fleet', label: 'Fleet & Nodes', group: 'Gateway', icon: <Server size={15} /> },
+    { id: 'topology', label: 'Config & Releases', group: 'Gateway', icon: <FileCode2 size={15} /> },
+    { id: 'state', label: 'Live Policies', group: 'Gateway', icon: <Layers size={15} /> },
     { id: 'secrets', label: 'Secrets Vault', group: 'Security & Governance', icon: <KeyRound size={15} /> },
     { id: 'access', label: 'Access & Audit', group: 'Security & Governance', icon: <Shield size={15} /> },
   ];
@@ -265,7 +268,7 @@ function ConsoleAppInner() {
 
       {/* Navigation */}
       <nav className="flex-1 p-3 space-y-5 overflow-y-auto">
-        {['Control Plane', 'Security & Governance'].map((group) => (
+        {['Gateway', 'Security & Governance'].map((group) => (
           <div key={group} className="space-y-1">
             <div
               className="px-2.5 text-[11px] font-semibold uppercase tracking-wider mb-1.5"
@@ -494,7 +497,7 @@ function ConsoleAppInner() {
         open={newClusterOpen}
         onClose={() => setNewClusterOpen(false)}
         title="Create Cluster"
-        subtitle="Each cluster maintains isolated Channel 1 topology revisions and Channel 2 synced state tables."
+        subtitle="Each cluster manages its own gateway configuration, versioned releases, and instant live policies—ready for HTTP APIs, AI models, and MCP tools together."
       >
         <form onSubmit={handleCreateCluster} className="space-y-3.5">
           <div className="grid grid-cols-2 gap-3">
@@ -522,28 +525,30 @@ function ConsoleAppInner() {
               />
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-medium mb-1">Environment</label>
-              <select className="input-base" value={ncEnv} onChange={(e) => setNcEnv(e.target.value)}>
-                <option value="production">production</option>
-                <option value="staging">staging</option>
-                <option value="development">development</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-medium mb-1">Starter Preset</label>
-              <select
-                className="input-base"
-                value={ncPreset}
-                onChange={(e) => setNcPreset(e.target.value)}
-              >
-                <option value="http-api">HTTP API Starter</option>
-                <option value="ai-gateway">AI Gateway Starter</option>
-                <option value="empty">Empty Minimal</option>
-              </select>
-            </div>
+          <div>
+            <label className="block text-xs font-medium mb-1">Environment</label>
+            <select className="input-base" value={ncEnv} onChange={(e) => setNcEnv(e.target.value)}>
+              <option value="production">production</option>
+              <option value="staging">staging</option>
+              <option value="development">development</option>
+            </select>
           </div>
+          <label className="flex items-center gap-2 text-xs cursor-pointer select-none pt-1">
+            <input
+              type="checkbox"
+              checked={ncShowImport}
+              onChange={(e) => setNcShowImport(e.target.checked)}
+            />
+            <span>Import an existing <code>shunt.toml</code> instead of starting from a clean skeleton</span>
+          </label>
+          {ncShowImport && (
+            <textarea
+              className="input-base mono text-xs min-h-[120px]"
+              value={ncImportToml}
+              onChange={(e) => setNcImportToml(e.target.value)}
+              placeholder={`[server]\nlisten = "0.0.0.0:8080"\n\n[[upstreams]]\nname = "api"\nendpoints = ["http://127.0.0.1:3000"]`}
+            />
+          )}
           <div className="flex justify-end gap-2 pt-2">
             <button type="button" className="btn" onClick={() => setNewClusterOpen(false)}>
               Cancel

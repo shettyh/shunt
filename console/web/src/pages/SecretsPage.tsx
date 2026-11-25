@@ -136,7 +136,7 @@ export function SecretsPage({
           <div>
             <div className="font-semibold">Managed Vault (<code>vault</code>)</div>
             <p className="m-0 mt-0.5" style={{ color: 'var(--text-muted)' }}>
-              Encrypted with a unique DEK + AAD tenant binding. Decrypted only when authenticated <code>shunt</code> nodes fetch signed Channel 1 bundles over TLS.
+              Encrypted with a unique DEK + AAD tenant binding. Decrypted only when authenticated <code>shunt</code> nodes fetch signed release bundles over TLS.
             </p>
           </div>
         </div>

@@ -67,7 +67,7 @@ export function OverviewPage({
   const syncedNodes = nodes.filter((n) => n.status === 'synced').length;
   const driftedNodes = nodes.filter((n) => n.status === 'drifted' || n.status === 'lagging').length;
   const activeDefaultRev = cluster.ring_assignments['*'] ?? revisions[0]?.revision ?? 0;
-  const totalCh2Items = namespaces.reduce((acc, s) => acc + s.item_count, 0);
+  const totalPolicyItems = namespaces.reduce((acc, s) => acc + s.item_count, 0);
   const latestRev = revisions.find((r) => r.revision === activeDefaultRev) || revisions[0];
 
   return (
@@ -81,7 +81,7 @@ export function OverviewPage({
             <span className="badge badge-accent">{cluster.environment}</span>
           </div>
           <p className="m-0 mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
-            Unified 3-Channel control plane overview for Channel 1 topology revisions and Channel 2 dynamic state tables.
+            Unified gateway control plane for HTTP APIs, AI routing, and MCP governance on this cluster.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -111,7 +111,7 @@ export function OverviewPage({
               <span>No data-plane nodes connected to {cluster.slug} yet</span>
             </div>
             <p className="m-0 mt-1 text-xs" style={{ color: 'var(--text-secondary)' }}>
-              Connect your first stateless <code>shunt</code> node with one outbound command. It will pull Revision #{activeDefaultRev || 1} and stay synchronized automatically.
+              Connect your first stateless <code>shunt</code> node with one outbound command. It will pull Release #{activeDefaultRev || 1} and stay synchronized automatically.
             </p>
           </div>
           <button type="button" className="btn btn-accent shrink-0" onClick={onConnectNode}>
@@ -148,14 +148,14 @@ export function OverviewPage({
           className="surface p-4 text-left cursor-pointer hover:border-[var(--accent)] transition-colors"
         >
           <div className="flex items-center justify-between text-xs" style={{ color: 'var(--text-muted)' }}>
-            <span>CHANNEL 1 REVISION</span>
+            <span>ACTIVE RELEASE</span>
             <FileCode2 size={14} />
           </div>
           <div className="mt-2 text-2xl font-semibold mono">
             {activeDefaultRev > 0 ? `v${activeDefaultRev}` : 'Draft'}
           </div>
           <div className="mt-1 text-xs mono" style={{ color: 'var(--text-muted)' }}>
-            {latestRev ? `sha256:${shortDigest(latestRev.digest)}` : 'No published revision yet'}
+            {latestRev ? `sha256:${shortDigest(latestRev.digest)}` : 'No published release yet'}
           </div>
         </button>
 
@@ -165,12 +165,12 @@ export function OverviewPage({
           className="surface p-4 text-left cursor-pointer hover:border-[var(--accent)] transition-colors"
         >
           <div className="flex items-center justify-between text-xs" style={{ color: 'var(--text-muted)' }}>
-            <span>CHANNEL 2 STATE ITEMS</span>
+            <span>LIVE POLICIES</span>
             <Layers size={14} />
           </div>
-          <div className="mt-2 text-2xl font-semibold mono">{totalCh2Items}</div>
+          <div className="mt-2 text-2xl font-semibold mono">{totalPolicyItems}</div>
           <div className="mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
-            Across {namespaces.length} lock-free ArcSwap namespaces
+            Across {namespaces.length} instant-sync policy groups
           </div>
         </button>
 
@@ -210,7 +210,7 @@ export function OverviewPage({
 
           {Object.keys(cluster.ring_assignments).length === 0 ? (
             <p className="m-0 text-xs" style={{ color: 'var(--text-muted)' }}>
-              No topology revisions published yet. Open <strong>Topology &amp; Revisions</strong> to validate and publish Revision #1.
+              No releases published yet. Open <strong>Config &amp; Releases</strong> to validate and publish Release #1.
             </p>
           ) : (
             <div className="space-y-2 tabular">
@@ -223,7 +223,7 @@ export function OverviewPage({
                   <span className="mono text-xs font-medium">
                     {ring === '*' ? '* (all default nodes)' : ring}
                   </span>
-                  <span className="badge badge-ok mono">rev #{rev}</span>
+                  <span className="badge badge-ok mono">v{rev}</span>
                 </div>
               ))}
             </div>
@@ -240,7 +240,7 @@ export function OverviewPage({
             >
               <span className="flex items-center gap-2">
                 <FileCode2 size={14} />
-                <span>Edit or Import shunt.toml</span>
+                <span>Edit Config or Import shunt.toml</span>
               </span>
               <ArrowRight size={13} />
             </button>
@@ -251,7 +251,7 @@ export function OverviewPage({
             >
               <span className="flex items-center gap-2">
                 <Layers size={14} />
-                <span>Push Instant Channel 2 Update</span>
+                <span>Manage Live Policies</span>
               </span>
               <ArrowRight size={13} />
             </button>

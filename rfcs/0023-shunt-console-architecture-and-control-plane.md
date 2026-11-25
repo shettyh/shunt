@@ -229,6 +229,20 @@ shunt run \
 shunt-console serve --listen 0.0.0.0:8443 --db sqlite://./shunt-console.db
 ```
 
+### 4.8 Web Console UX Principles
+
+To keep `shunt-console` intuitive as Pillars A–E ([RFC 0024](./0024-shunt-console-fleet-and-config-studio.md)–[0027](./0027-shunt-console-observability-and-audit.md)) land, the embedded Web UI enforces two non-negotiable UX rules:
+
+1. **Unified Multi-Purpose Clusters (No Gateway-Type Lock-In):**
+   - Cluster creation and onboarding **never** ask users to choose a gateway "type" or "mode" (HTTP API vs. AI vs. MCP). Every cluster initializes from a clean, neutral gateway skeleton (or optional `shunt.toml` import) and can simultaneously serve HTTP APIs, `/v1/*` AI endpoints, and `/mcp` agent tools.
+   - All capability surfaces (Gateway, AI, MCP, Observability, Security) live side-by-side in collapsible sidebar groups with clean empty states and in-context templates—avoiding artificial silos without overwhelming single-pillar users.
+2. **Behavior-First Abstractions (Zero Wire-Protocol Jargon in UI):**
+   - Internal protocol and implementation terms (**Channel 1 / Channel 2 / Channel 3**, `ArcSwap`, `SyncedTable`, `control_events`, `full_sync`) belong strictly in architecture docs, wire APIs, and code—never in Web UI navigation, KPI cards, table headers, or toasts.
+   - Instead, the UI frames concepts by operator behavior:
+     - **Config & Releases** (*Versioned · Rollback-safe*): Listeners, upstreams, routes, route groups, and plugins that go through Draft → Verify → Rollout → Rollback.
+     - **Live Policies** (*Instant Sync*, graduating into native AI Virtual Keys/Budgets/Pricing and MCP Agent Permissions/Approvals/Kill-Switch screens in RFCs 0025–0026): High-velocity access and safety controls that propagate fleet-wide in milliseconds and are never reverted by config rollbacks.
+     - **Fleet Sync Health:** Displayed as clean `Up to date` / `Policy Lag` indicators rather than raw sequence dumps (with per-namespace cursors available on hover/details for troubleshooting).
+
 ## 5. Alternatives Considered & Rejected
 
 1. **Embedding `shunt-console` inside the `shunt` data-plane binary:**

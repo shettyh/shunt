@@ -89,9 +89,8 @@ pub struct InitialBootstrapInput {
     pub cluster_name: String,
     #[serde(default = "default_env_prod")]
     pub environment: String,
-    /// Starter topology preset (`"http-api"`, `"ai-gateway"`, `"empty"`), or raw `import_toml`.
-    #[serde(default = "default_preset")]
-    pub starter_preset: String,
+    /// Optional existing `shunt.toml` to import into the initial cluster draft.
+    /// When omitted, seeds the clean default unified gateway skeleton.
     #[serde(default)]
     pub import_toml: Option<String>,
     #[serde(default = "default_true")]
@@ -100,9 +99,6 @@ pub struct InitialBootstrapInput {
 
 fn default_env_prod() -> String {
     "production".to_owned()
-}
-fn default_preset() -> String {
-    "http-api".to_owned()
 }
 fn default_true() -> bool {
     true
@@ -133,8 +129,10 @@ pub struct CreateClusterInput {
     pub description: String,
     #[serde(default = "default_env_prod")]
     pub environment: String,
+    /// Optional `shunt.toml` to import into the cluster's initial draft.
+    /// When omitted, seeds the clean default unified gateway skeleton.
     #[serde(default)]
-    pub starter_preset: Option<String>,
+    pub import_toml: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]
@@ -494,22 +492,11 @@ impl ConsoleStore {
                     name: input.cluster_name.clone(),
                     description: "Initial cluster created during setup".to_owned(),
                     environment: input.environment.clone(),
-                    starter_preset: if input.import_toml.is_some() {
-                        None
-                    } else {
-                        Some(input.starter_preset.clone())
-                    },
+                    import_toml: input.import_toml.clone(),
                 },
                 &actor,
             )
             .await?;
-
-        if let Some(toml_src) = input.import_toml.as_deref()
-            && !toml_src.trim().is_empty()
-        {
-            self.import_toml_into_cluster(&cluster.id, toml_src, &actor)
-                .await?;
-        }
 
         let initial_revision = if input.auto_publish {
             Some(
@@ -1749,10 +1736,13 @@ impl ConsoleStore {
             .await?;
         });
 
-        if let Some(preset) = input.starter_preset.as_deref() {
-            let toml_src = ConsoleCompiler::starter_preset_toml(preset);
-            self.import_toml_into_cluster(&id, toml_src, actor).await?;
-        }
+        let initial_toml = input
+            .import_toml
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| ConsoleCompiler::default_cluster_toml());
+        self.import_toml_into_cluster(&id, initial_toml, actor)
+            .await?;
 
         self.append_audit(
             actor,
@@ -4138,7 +4128,6 @@ mod tests {
                 cluster_slug: "prod-us".to_owned(),
                 cluster_name: "Prod US".to_owned(),
                 environment: "production".to_owned(),
-                starter_preset: "http-api".to_owned(),
                 import_toml: None,
                 auto_publish: true,
             })
@@ -4158,7 +4147,6 @@ mod tests {
                 cluster_slug: "dev".to_owned(),
                 cluster_name: "Dev".to_owned(),
                 environment: "dev".to_owned(),
-                starter_preset: "empty".to_owned(),
                 import_toml: None,
                 auto_publish: false,
             })

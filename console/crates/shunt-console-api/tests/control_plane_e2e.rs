@@ -103,7 +103,28 @@ async fn end_to_end_control_plane_channels_rollback_lkg_rbac_and_audit() {
         Some("DENY")
     );
 
-    // 2. First-run bootstrap via REST API.
+    // 2. First-run bootstrap via REST API (importing a starter shunt.toml).
+    let starter_toml = r#"[server]
+listen = "0.0.0.0:8080"
+drain_timeout_ms = 30000
+
+[admin]
+enabled = true
+listen = "127.0.0.1:9090"
+ui = false
+
+[[plugins]]
+name = "request-id"
+
+[[upstreams]]
+name = "api-backend"
+endpoints = ["http://127.0.0.1:3000"]
+
+[[routes]]
+id = "health-api"
+path_prefix = "/api"
+upstream = "api-backend"
+"#;
     let (st, _, boot) = api_req(
         &http,
         http::Method::POST,
@@ -119,7 +140,7 @@ async fn end_to_end_control_plane_channels_rollback_lkg_rbac_and_audit() {
             "cluster_slug": "prod-us",
             "cluster_name": "Prod US",
             "environment": "production",
-            "starter_preset": "http-api",
+            "import_toml": starter_toml,
             "auto_publish": true
         })),
     )

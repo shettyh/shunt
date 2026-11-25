@@ -35,7 +35,7 @@ const RESOURCE_TEMPLATES: Record<TopologyResourceKind, object> = {
   },
   route: {
     id: 'my-route',
-    path_prefix: '/v1/items',
+    path_prefix: '/api/items',
     upstream: 'my-service',
     plugins: [],
   },
@@ -64,6 +64,45 @@ const RESOURCE_TEMPLATES: Record<TopologyResourceKind, object> = {
     enabled: false,
     backend: 'otlp_http',
   },
+};
+
+const QUICK_STARTER_SNIPPETS: Partial<
+  Record<TopologyResourceKind, { label: string; slug: string; spec: object }[]>
+> = {
+  upstream: [
+    {
+      label: 'HTTP Service',
+      slug: 'api-backend',
+      spec: { name: 'api-backend', endpoints: ['http://127.0.0.1:3000'] },
+    },
+    {
+      label: 'AI Provider (OpenAI)',
+      slug: 'openai-upstream',
+      spec: { name: 'openai-upstream', endpoints: ['https://api.openai.com'] },
+    },
+    {
+      label: 'MCP Server',
+      slug: 'mcp-github',
+      spec: { name: 'mcp-github', endpoints: ['http://127.0.0.1:8090'] },
+    },
+  ],
+  route: [
+    {
+      label: 'HTTP API Route',
+      slug: 'api-route',
+      spec: { id: 'api-route', path_prefix: '/api', upstream: 'api-backend', plugins: [] },
+    },
+    {
+      label: 'AI Gateway (/v1)',
+      slug: 'ai-v1',
+      spec: { id: 'ai-v1', path_prefix: '/v1', upstream: 'openai-upstream', plugins: [] },
+    },
+    {
+      label: 'MCP Gateway (/mcp)',
+      slug: 'mcp-endpoint',
+      spec: { id: 'mcp-endpoint', path_prefix: '/mcp', upstream: 'mcp-github', plugins: [] },
+    },
+  ],
 };
 
 export function TopologyPage({
@@ -207,7 +246,7 @@ export function TopologyPage({
         ring_selector: pubRing.trim() || '*',
         notes: pubNotes.trim(),
       });
-      toast.push(`Published Revision #${rev.revision} to ring "${pubRing || '*'}"`);
+      toast.push(`Published Release #${rev.revision} to ring "${pubRing || '*'}"`);
       setPublishOpen(false);
       setPubNotes('');
       onClusterChanged();
@@ -223,14 +262,14 @@ export function TopologyPage({
   const handleRollback = async (rev: number) => {
     if (
       !window.confirm(
-        `Roll back cluster "${cluster.slug}" default fleet to Revision #${rev}?\n\nChannel 2 state (virtual keys, budgets, MCP ACLs, kill-switches) will NOT be reverted.`
+        `Roll back cluster "${cluster.slug}" default fleet to Release #${rev}?\n\nActive Live Policies (virtual keys, budgets, MCP agent permissions, and kill-switches) will NOT be reverted.`
       )
     ) {
       return;
     }
     try {
       await api.rollbackRevision(cluster.slug, rev, '*');
-      toast.push(`Rolled back ${cluster.slug} to Revision #${rev} (Channel 2 untouched)`);
+      toast.push(`Rolled back ${cluster.slug} to Release #${rev} (Live Policies untouched)`);
       onClusterChanged();
       await load();
     } catch (err) {
@@ -241,7 +280,7 @@ export function TopologyPage({
   const handlePromote = async (rev: number) => {
     try {
       await api.promoteRevision(cluster.slug, rev, '*');
-      toast.push(`Promoted Revision #${rev} to all nodes (*)`);
+      toast.push(`Promoted Release #${rev} to all nodes (*)`);
       onClusterChanged();
       await load();
     } catch (err) {
@@ -254,9 +293,12 @@ export function TopologyPage({
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="m-0 text-xl font-semibold tracking-tight">Topology &amp; Revisions</h1>
+          <div className="flex items-center gap-2.5">
+            <h1 className="m-0 text-xl font-semibold tracking-tight">Config &amp; Releases</h1>
+            <span className="badge">Versioned · Rollback-safe</span>
+          </div>
           <p className="m-0 mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
-            Channel 1 authoritative gateway configuration. Validated in Rust by <code>shunt-config</code> + <code>shunt verify</code> and Ed25519-signed before fleet delivery.
+            Listeners, upstreams, routes, and plugins for HTTP APIs, AI models, and MCP servers—validated by <code>shunt-config</code> + <code>shunt verify</code> and Ed25519-signed before rollout.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -271,7 +313,7 @@ export function TopologyPage({
             onClick={() => setPublishOpen(true)}
           >
             <Rocket size={14} />
-            <span>Publish Revision</span>
+            <span>Publish Release</span>
           </button>
         </div>
       </div>
@@ -331,9 +373,9 @@ export function TopologyPage({
       {/* Sub-tabs */}
       <div className="flex items-center gap-1" style={{ borderBottom: '1px solid var(--border)' }}>
         {[
-          { id: 'draft' as const, label: `Draft Resources (${resources.length})`, icon: <GitBranch size={14} /> },
+          { id: 'draft' as const, label: `Draft Config (${resources.length})`, icon: <GitBranch size={14} /> },
           { id: 'toml' as const, label: 'Compiled shunt.toml', icon: <FileCode2 size={14} /> },
-          { id: 'revisions' as const, label: `Revisions & Rollback (${revisions.length})`, icon: <History size={14} /> },
+          { id: 'revisions' as const, label: `Releases & Rollback (${revisions.length})`, icon: <History size={14} /> },
         ].map((t) => (
           <button
             key={t.id}
@@ -441,7 +483,7 @@ export function TopologyPage({
             <div>
               <h2 className="m-0 text-sm font-semibold">Canonical Compiled shunt.toml (Secrets Redacted)</h2>
               <p className="m-0 mt-0.5 text-xs" style={{ color: 'var(--text-muted)' }}>
-                References like <code>secret:&lt;slug&gt;</code> are resolved into memory only when authenticated nodes pull a signed bundle over Channel 1.
+                References like <code>secret:&lt;slug&gt;</code> are resolved into node memory only when authenticated nodes pull a signed release bundle.
               </p>
             </div>
             <CopyButton text={validation?.compiled_toml || ''} label="Copy TOML" />
@@ -450,7 +492,7 @@ export function TopologyPage({
         </div>
       )}
 
-      {/* Tab 3: Revisions & Rollback */}
+      {/* Tab 3: Releases & Rollback */}
       {tab === 'revisions' && (
         <div className="space-y-4">
           <div
@@ -459,20 +501,20 @@ export function TopologyPage({
           >
             <ShieldCheck size={16} style={{ color: 'var(--ok)' }} className="shrink-0" />
             <span>
-              <strong>Safe Rollback Guarantee:</strong> Rolling back a Channel 1 topology revision never un-revokes virtual keys, budgets, MCP ACLs, or emergency kill-switches synced over Channel 2.
+              <strong>Safe Rollback Guarantee:</strong> Rolling back a config release never un-revokes virtual keys, budgets, MCP agent permissions, or emergency kill-switches managed under <strong>Live Policies</strong>.
             </span>
           </div>
 
           <div className="surface overflow-hidden">
             {revisions.length === 0 ? (
               <div className="p-10 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
-                No revisions published yet. Click <strong>Publish Revision</strong> above to cut Revision #1.
+                No releases published yet. Click <strong>Publish Release</strong> above to cut Release #1.
               </div>
             ) : (
               <table className="swiss-table text-xs">
                 <thead>
                   <tr>
-                    <th>Revision</th>
+                    <th>Release</th>
                     <th>Active Rings</th>
                     <th>Digest</th>
                     <th>Notes</th>
@@ -580,6 +622,26 @@ export function TopologyPage({
               {editError}
             </div>
           )}
+          {!editEtag && QUICK_STARTER_SNIPPETS[editKind] && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                Quick template:
+              </span>
+              {QUICK_STARTER_SNIPPETS[editKind]!.map((tpl) => (
+                <button
+                  key={tpl.label}
+                  type="button"
+                  className="btn text-xs py-0.5 px-2"
+                  onClick={() => {
+                    setEditSlug(tpl.slug);
+                    setEditJson(JSON.stringify(tpl.spec, null, 2));
+                  }}
+                >
+                  {tpl.label}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-medium mb-1">Resource Kind</label>
@@ -648,8 +710,8 @@ export function TopologyPage({
       <Modal
         open={publishOpen}
         onClose={() => setPublishOpen(false)}
-        title={`Publish Topology Revision to ${cluster.slug}`}
-        subtitle="Creates an immutable, Ed25519-signed revision and pushes it to matching nodes over Channel 1."
+        title={`Publish Config Release to ${cluster.slug}`}
+        subtitle="Creates an immutable, Ed25519-signed release and rolls it out to matching nodes."
       >
         <form onSubmit={handlePublish} className="space-y-4">
           <div>
@@ -688,17 +750,17 @@ export function TopologyPage({
             </button>
             <button type="submit" className="btn btn-primary" disabled={publishing}>
               <Rocket size={14} />
-              <span>{publishing ? 'Publishing…' : 'Publish & Push to Fleet'}</span>
+              <span>{publishing ? 'Publishing…' : 'Publish & Roll Out'}</span>
             </button>
           </div>
         </form>
       </Modal>
 
-      {/* Revision TOML Viewer Modal */}
+      {/* Release TOML Viewer Modal */}
       <Modal
         open={Boolean(inspectRev)}
         onClose={() => setInspectRev(null)}
-        title={`Revision #${inspectRev?.revision} — Canonical shunt.toml`}
+        title={`Release #${inspectRev?.revision} — Canonical shunt.toml`}
         subtitle={`Digest: ${inspectRev?.digest || ''} · Ed25519 signed`}
         maxWidth="max-w-3xl"
       >

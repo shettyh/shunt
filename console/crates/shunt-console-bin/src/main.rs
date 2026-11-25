@@ -100,9 +100,9 @@ enum Commands {
         /// Initial cluster display name.
         #[arg(long = "cluster-name", default_value = "Production")]
         cluster_name: String,
-        /// Starter topology preset (`http-api`, `ai-gateway`, `empty`).
-        #[arg(long = "preset", default_value = "http-api")]
-        preset: String,
+        /// Optional path to an existing `shunt.toml` to import into the initial cluster.
+        #[arg(long = "import-toml")]
+        import_toml: Option<std::path::PathBuf>,
     },
     /// Export a cluster's active or specific revision as a standalone redacted `shunt.toml`.
     Export {
@@ -255,8 +255,18 @@ async fn main() -> ExitCode {
             org_name,
             cluster,
             cluster_name,
-            preset,
+            import_toml,
         } => {
+            let imported = match import_toml {
+                Some(path) => match std::fs::read_to_string(&path) {
+                    Ok(content) => Some(content),
+                    Err(err) => {
+                        eprintln!("error: failed to read `{}`: {err}", path.display());
+                        return ExitCode::FAILURE;
+                    }
+                },
+                None => None,
+            };
             let store = match connect_store(&database_url, &master_key_env).await {
                 Ok(s) => s,
                 Err(code) => return code,
@@ -271,8 +281,7 @@ async fn main() -> ExitCode {
                     cluster_slug: cluster.clone(),
                     cluster_name,
                     environment: "production".to_owned(),
-                    starter_preset: preset,
-                    import_toml: None,
+                    import_toml: imported,
                     auto_publish: true,
                 })
                 .await

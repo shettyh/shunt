@@ -18,6 +18,7 @@ import {
   Cluster,
   CreatedBootstrapToken,
   formatRelativeTime,
+  NamespaceStateSummary,
   NodeRecord,
   NodeStatus,
   shortDigest,
@@ -29,7 +30,7 @@ function NodeStatusBadge({ status }: { status: NodeStatus }) {
     synced: { cls: 'badge badge-ok', label: 'Synced' },
     converging: { cls: 'badge badge-accent', label: 'Converging' },
     drifted: { cls: 'badge badge-danger', label: 'Drifted' },
-    lagging: { cls: 'badge badge-warn', label: 'Lagging Ch2' },
+    lagging: { cls: 'badge badge-warn', label: 'Policy Lag' },
     offline: { cls: 'badge', label: 'Offline' },
   };
   const cfg = map[status] || map.offline;
@@ -40,6 +41,47 @@ function NodeStatusBadge({ status }: { status: NodeStatus }) {
         style={{ background: 'currentColor' }}
       />
       <span>{cfg.label}</span>
+    </span>
+  );
+}
+
+function PolicySyncCell({
+  node,
+  namespaces,
+}: {
+  node: NodeRecord;
+  namespaces: NamespaceStateSummary[];
+}) {
+  if (node.status === 'offline') {
+    return (
+      <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+        Offline
+      </span>
+    );
+  }
+  const activeNamespaces = namespaces.filter((ns) => ns.head_seq > 0);
+  const behind = activeNamespaces.filter((ns) => (node.synced_seqs[ns.namespace] ?? 0) < ns.head_seq);
+  const detailsTooltip =
+    activeNamespaces.length === 0
+      ? 'No live policies configured yet'
+      : activeNamespaces
+          .map((ns) => `${ns.namespace}: v${node.synced_seqs[ns.namespace] ?? 0} / v${ns.head_seq}`)
+          .join('\n');
+
+  if (behind.length === 0) {
+    return (
+      <span className="badge badge-ok" title={detailsTooltip}>
+        <CheckCircle2 size={11} />
+        <span>Up to date</span>
+      </span>
+    );
+  }
+
+  return (
+    <span className="badge badge-warn" title={detailsTooltip}>
+      <span>
+        {behind.length} {behind.length === 1 ? 'group' : 'groups'} syncing
+      </span>
     </span>
   );
 }
@@ -56,6 +98,7 @@ export function FleetPage({
   const toast = useToast();
   const [nodes, setNodes] = useState<NodeRecord[]>([]);
   const [tokens, setTokens] = useState<BootstrapTokenMeta[]>([]);
+  const [namespaces, setNamespaces] = useState<NamespaceStateSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
 
@@ -73,12 +116,14 @@ export function FleetPage({
   const load = async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      const [n, t] = await Promise.all([
+      const [n, t, ns] = await Promise.all([
         api.listNodes(cluster.slug),
         api.listBootstrapTokens(cluster.slug).catch(() => []),
+        api.listStateNamespaces(cluster.slug).catch(() => []),
       ]);
       setNodes(n);
       setTokens(t);
+      setNamespaces(ns);
     } catch (err) {
       if (!silent) {
         toast.push(err instanceof ApiProblemError ? err.message : 'Failed to load fleet', 'error');
@@ -167,7 +212,7 @@ export function FleetPage({
         <div>
           <h1 className="m-0 text-xl font-semibold tracking-tight">Fleet &amp; Nodes</h1>
           <p className="m-0 mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
-            Live inventory of outbound-connected <code>shunt</code> instances, revision convergence, canary labels, and Channel 2 sequence cursors.
+            Live inventory of outbound-connected <code>shunt</code> instances, release rollout convergence, canary labels, and live policy sync health.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -223,8 +268,8 @@ export function FleetPage({
                 <tr>
                   <th>Node</th>
                   <th>Status</th>
-                  <th>Topology (Ch 1)</th>
-                  <th>Synced Seqs (Ch 2)</th>
+                  <th>Config Release</th>
+                  <th>Live Policies</th>
                   <th>Labels</th>
                   <th>Last Heartbeat</th>
                   <th className="text-right">Actions</th>
@@ -245,9 +290,9 @@ export function FleetPage({
                       </td>
                       <td className="mono">
                         <div>
-                          rev <strong>#{node.active_revision}</strong>
+                          <strong>v{node.active_revision}</strong>
                           {node.target_revision != null && node.target_revision !== node.active_revision && (
-                            <span style={{ color: 'var(--warn)' }}> → #{node.target_revision}</span>
+                            <span style={{ color: 'var(--warn)' }}> → v{node.target_revision}</span>
                           )}
                         </div>
                         <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
@@ -255,23 +300,7 @@ export function FleetPage({
                         </div>
                       </td>
                       <td>
-                        <div className="flex flex-wrap gap-1">
-                          {Object.entries(node.synced_seqs).length === 0 ? (
-                            <span style={{ color: 'var(--text-muted)' }}>—</span>
-                          ) : (
-                            Object.entries(node.synced_seqs)
-                              .filter(([, seq]) => seq > 0)
-                              .map(([ns, seq]) => (
-                                <span key={ns} className="badge mono text-[11px]">
-                                  {ns}:{seq}
-                                </span>
-                              ))
-                          )}
-                          {Object.values(node.synced_seqs).every((v) => v === 0) &&
-                            Object.keys(node.synced_seqs).length > 0 && (
-                              <span className="badge mono text-[11px]">seq 0 (idle)</span>
-                            )}
-                        </div>
+                        <PolicySyncCell node={node} namespaces={namespaces} />
                       </td>
                       <td>
                         <div className="flex flex-wrap gap-1">

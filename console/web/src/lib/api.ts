@@ -352,7 +352,6 @@ export const api = {
     cluster_slug: string;
     cluster_name: string;
     environment: string;
-    starter_preset: string;
     import_toml?: string;
     auto_publish: boolean;
   }) =>
@@ -385,7 +384,7 @@ export const api = {
       name: string;
       description?: string;
       environment: string;
-      starter_preset?: string;
+      import_toml?: string;
     }
   ) =>
     request<Cluster>(`/api/v1/orgs/${org}/clusters`, {
