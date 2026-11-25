@@ -181,12 +181,12 @@ function ConsoleAppInner() {
   const currentCluster = clusters.find((c) => c.slug === selectedClusterSlug) || clusters[0];
 
   const navItems: { id: NavSection; label: string; group: string; icon: React.ReactNode }[] = [
-    { id: 'overview', label: 'Overview', group: 'Gateway', icon: <Activity size={15} /> },
-    { id: 'fleet', label: 'Fleet & Nodes', group: 'Gateway', icon: <Server size={15} /> },
-    { id: 'topology', label: 'Config & Releases', group: 'Gateway', icon: <FileCode2 size={15} /> },
-    { id: 'state', label: 'Live Policies', group: 'Gateway', icon: <Layers size={15} /> },
-    { id: 'secrets', label: 'Secrets Vault', group: 'Security & Governance', icon: <KeyRound size={15} /> },
-    { id: 'access', label: 'Access & Audit', group: 'Security & Governance', icon: <Shield size={15} /> },
+    { id: 'overview', label: 'Overview', group: 'Gateway', icon: <Activity size={16} /> },
+    { id: 'fleet', label: 'Fleet & Nodes', group: 'Gateway', icon: <Server size={16} /> },
+    { id: 'topology', label: 'Config & Releases', group: 'Gateway', icon: <FileCode2 size={16} /> },
+    { id: 'state', label: 'Live Policies', group: 'Gateway', icon: <Layers size={16} /> },
+    { id: 'secrets', label: 'Secrets Vault', group: 'Security & Governance', icon: <KeyRound size={16} /> },
+    { id: 'access', label: 'Access & Audit', group: 'Security & Governance', icon: <Shield size={16} /> },
   ];
 
   const activeNav = navItems.find((i) => i.id === section) || navItems[0];
@@ -194,41 +194,41 @@ function ConsoleAppInner() {
   const sidebarContent = (
     <div className="flex flex-col h-full">
       {/* Brand */}
-      <div className="px-3.5 h-12 flex items-center justify-between shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
-        <div className="flex items-center gap-2">
-          <ShuntMark size={24} />
+      <div className="px-4 h-14 flex items-center justify-between shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+        <div className="flex items-center gap-2.5">
+          <ShuntMark size={28} />
           <div>
-            <div className="font-semibold text-[13px] tracking-tight leading-none">Shunt Console</div>
-            <div className="mono text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
+            <div className="font-semibold text-[15px] tracking-tight leading-tight">Shunt Console</div>
+            <div className="mono text-xs" style={{ color: 'var(--text-muted)' }}>
               v{status?.version} · {status?.db_kind}
             </div>
           </div>
         </div>
         <button
           type="button"
-          className="lg:hidden btn-ghost p-1 border-0 cursor-pointer"
+          className="lg:hidden btn-ghost p-1.5 border-0 cursor-pointer"
           onClick={() => setMobileMenuOpen(false)}
         >
-          <X size={16} />
+          <X size={18} />
         </button>
       </div>
 
       {/* Org & Cluster Switcher */}
-      <div className="p-2.5 space-y-1.5" style={{ borderBottom: '1px solid var(--border)' }}>
-        <div className="flex items-center justify-between text-[10px] uppercase tracking-wider font-semibold px-1" style={{ color: 'var(--text-muted)' }}>
+      <div className="p-3.5 space-y-2" style={{ borderBottom: '1px solid var(--border)' }}>
+        <div className="flex items-center justify-between text-xs uppercase tracking-wider font-semibold px-0.5" style={{ color: 'var(--text-muted)' }}>
           <span>Cluster</span>
           <button
             type="button"
-            className="btn-ghost px-1 py-0.5 text-[10px] flex items-center gap-0.5 border-0 cursor-pointer rounded"
+            className="btn-ghost px-1.5 py-0.5 text-xs flex items-center gap-1 border-0 cursor-pointer rounded"
             onClick={() => setNewClusterOpen(true)}
-            title="New cluster"
+            title="Create new cluster"
           >
-            <Plus size={11} />
+            <Plus size={13} />
             <span>New</span>
           </button>
         </div>
         <select
-          className="input-base text-xs py-1 font-medium"
+          className="input-base text-sm py-1.5 font-medium"
           value={selectedClusterSlug}
           onChange={(e) => setSelectedClusterSlug(e.target.value)}
         >
@@ -241,7 +241,7 @@ function ConsoleAppInner() {
 
         {orgs.length > 1 && (
           <select
-            className="input-base text-xs py-1"
+            className="input-base text-sm py-1.5"
             value={selectedOrgSlug}
             onChange={(e) => setSelectedOrgSlug(e.target.value)}
           >
@@ -255,11 +255,11 @@ function ConsoleAppInner() {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 p-2.5 space-y-4 overflow-y-auto">
+      <nav className="flex-1 p-3.5 space-y-5 overflow-y-auto">
         {['Gateway', 'Security & Governance'].map((group) => (
-          <div key={group} className="space-y-0.5">
+          <div key={group} className="space-y-1">
             <div
-              className="px-2 text-[10px] font-semibold uppercase tracking-wider mb-1"
+              className="px-2.5 text-xs font-semibold uppercase tracking-wider mb-1.5"
               style={{ color: 'var(--text-muted)' }}
             >
               {group}
@@ -276,10 +276,10 @@ function ConsoleAppInner() {
                       setSection(item.id);
                       setMobileMenuOpen(false);
                     }}
-                    className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs cursor-pointer border-0 transition-colors text-left"
+                    className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm cursor-pointer border-0 transition-colors text-left"
                     style={{
-                      background: active ? 'var(--bg-hover)' : 'transparent',
-                      color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                      background: active ? 'var(--accent-soft)' : 'transparent',
+                      color: active ? 'var(--accent)' : 'var(--text-secondary)',
                       fontWeight: active ? 600 : 500,
                     }}
                   >
@@ -295,25 +295,25 @@ function ConsoleAppInner() {
       </nav>
 
       {/* Footer Utilities */}
-      <div className="p-2.5 space-y-2 text-xs" style={{ borderTop: '1px solid var(--border)' }}>
-        <div className="flex items-center justify-between gap-1">
+      <div className="p-3.5 space-y-2.5 text-sm" style={{ borderTop: '1px solid var(--border)' }}>
+        <div className="flex items-center justify-between gap-2">
           <div
-            className="inline-flex rounded-md p-0.5"
+            className="inline-flex rounded-lg p-0.5"
             style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}
             role="group"
             aria-label="Theme"
           >
             {[
-              { id: 'system' as const, icon: <Monitor size={12} />, label: 'System theme' },
-              { id: 'light' as const, icon: <Sun size={12} />, label: 'Light theme' },
-              { id: 'dark' as const, icon: <Moon size={12} />, label: 'Dark theme' },
+              { id: 'system' as const, icon: <Monitor size={14} />, label: 'System theme' },
+              { id: 'light' as const, icon: <Sun size={14} />, label: 'Light theme' },
+              { id: 'dark' as const, icon: <Moon size={14} />, label: 'Dark theme' },
             ].map((t) => (
               <button
                 key={t.id}
                 type="button"
                 title={t.label}
                 onClick={() => theme.setPref(t.id)}
-                className="p-1 rounded border-0 cursor-pointer"
+                className="p-1.5 rounded-md border-0 cursor-pointer"
                 style={{
                   background: theme.pref === t.id ? 'var(--bg-elevated)' : 'transparent',
                   color: theme.pref === t.id ? 'var(--text-primary)' : 'var(--text-muted)',
@@ -327,18 +327,18 @@ function ConsoleAppInner() {
             href="/api/v1/openapi.json"
             target="_blank"
             rel="noreferrer"
-            className="btn-ghost px-1.5 py-1 rounded text-[11px] flex items-center gap-1 no-underline"
+            className="btn-ghost px-2 py-1 rounded text-xs flex items-center gap-1 no-underline"
             style={{ color: 'var(--text-muted)' }}
           >
             <span>OpenAPI</span>
-            <ExternalLink size={11} />
+            <ExternalLink size={12} />
           </a>
         </div>
 
-        <div className="flex items-center justify-between gap-2 pt-1.5" style={{ borderTop: '1px solid var(--border-light)' }}>
+        <div className="flex items-center justify-between gap-2 pt-2" style={{ borderTop: '1px solid var(--border-light)' }}>
           <div className="min-w-0">
-            <div className="font-medium text-xs truncate">{me?.user?.display_name || me?.actor_id}</div>
-            <div className="text-[10px] truncate mono" style={{ color: 'var(--text-muted)' }}>
+            <div className="font-medium text-sm truncate">{me?.user?.display_name || me?.actor_id}</div>
+            <div className="text-xs truncate mono" style={{ color: 'var(--text-muted)' }}>
               {me?.bindings[0]?.role || 'authenticated'}
             </div>
           </div>
@@ -346,10 +346,10 @@ function ConsoleAppInner() {
             type="button"
             onClick={handleLogout}
             title="Sign out"
-            className="btn-ghost p-1 rounded border-0 cursor-pointer"
+            className="btn-ghost p-1.5 rounded border-0 cursor-pointer"
             style={{ color: 'var(--text-muted)' }}
           >
-            <LogOut size={13} />
+            <LogOut size={15} />
           </button>
         </div>
       </div>
@@ -360,7 +360,7 @@ function ConsoleAppInner() {
     <div className="min-h-screen flex" style={{ background: 'var(--bg-canvas)' }}>
       {/* Desktop Sidebar */}
       <aside
-        className="hidden lg:block w-56 shrink-0 sticky top-0 h-screen"
+        className="hidden lg:block w-64 shrink-0 sticky top-0 h-screen"
         style={{ background: 'var(--bg-sidebar)', borderRight: '1px solid var(--border)' }}
       >
         {sidebarContent}
@@ -375,7 +375,7 @@ function ConsoleAppInner() {
             if (e.target === e.currentTarget) setMobileMenuOpen(false);
           }}
         >
-          <aside className="w-60 h-full" style={{ background: 'var(--bg-sidebar)' }}>
+          <aside className="w-64 h-full" style={{ background: 'var(--bg-sidebar)' }}>
             {sidebarContent}
           </aside>
         </div>
@@ -383,39 +383,39 @@ function ConsoleAppInner() {
 
       {/* Main Workspace */}
       <div className="flex-1 min-w-0 flex flex-col">
-        {/* Compact Sticky Top Workspace Bar */}
+        {/* Clean Sticky Top Bar */}
         <header
-          className="sticky top-0 z-20 h-12 px-4 sm:px-5 flex items-center justify-between gap-3 shrink-0"
+          className="sticky top-0 z-20 h-14 px-5 lg:px-8 flex items-center justify-between gap-4 shrink-0"
           style={{ background: 'var(--bg-elevated)', borderBottom: '1px solid var(--border)' }}
         >
-          <div className="flex items-center gap-2 min-w-0">
+          <div className="flex items-center gap-2.5 min-w-0">
             <button
               type="button"
-              className="lg:hidden btn-ghost p-1 border-0 cursor-pointer"
+              className="lg:hidden btn-ghost p-1.5 border-0 cursor-pointer"
               onClick={() => setMobileMenuOpen(true)}
             >
-              <Menu size={17} />
+              <Menu size={18} />
             </button>
             {currentCluster && (
-              <div className="flex items-center gap-1.5 text-xs min-w-0">
+              <div className="flex items-center gap-2 text-sm min-w-0">
                 <span className="font-medium truncate" style={{ color: 'var(--text-muted)' }}>
                   {currentCluster.name}
                 </span>
                 <span className="badge badge-accent hidden sm:inline-flex">{currentCluster.environment}</span>
-                <ChevronRight size={13} style={{ color: 'var(--text-muted)' }} className="shrink-0" />
+                <ChevronRight size={15} style={{ color: 'var(--text-muted)' }} className="shrink-0" />
                 <span className="font-semibold truncate">{activeNav.label}</span>
               </div>
             )}
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-2.5 shrink-0">
             {status?.ephemeral_dev_key && (
               <span
                 className="badge badge-warn cursor-help hidden md:inline-flex"
                 title="Local Dev Mode: Using an auto-generated Secrets Vault KEK. Set SHUNT_CONSOLE_MASTER_KEY for production deployments."
               >
-                <AlertTriangle size={11} />
-                <span>Dev KEK</span>
+                <AlertTriangle size={13} />
+                <span>Dev Key</span>
               </span>
             )}
             <button
@@ -423,11 +423,11 @@ function ConsoleAppInner() {
               onClick={() => setPaletteOpen(true)}
               className="btn btn-sm"
               style={{ background: 'var(--bg-subtle)', color: 'var(--text-muted)' }}
-              title="Open command palette"
+              title="Open quick actions"
             >
-              <Command size={12} />
-              <span className="hidden sm:inline">Search…</span>
-              <kbd className="mono text-[10px]">⌘K</kbd>
+              <Command size={14} />
+              <span className="hidden sm:inline">Quick jump</span>
+              <kbd className="mono text-xs">⌘K</kbd>
             </button>
             {currentCluster && (
               <button
@@ -438,14 +438,14 @@ function ConsoleAppInner() {
                   setConnectModalOpen(true);
                 }}
               >
-                <Terminal size={12} />
+                <Terminal size={14} />
                 <span className="hidden sm:inline">Connect Node</span>
               </button>
             )}
           </div>
         </header>
 
-        <main className="flex-1 w-full px-4 sm:px-5 py-4">
+        <main className="flex-1 w-full max-w-[1440px] px-5 lg:px-8 py-6">
           {!currentOrg || !currentCluster ? (
             <div className="surface p-10 text-center space-y-3">
               <div className="font-semibold">No clusters found</div>

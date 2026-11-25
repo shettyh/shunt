@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   Columns2,
   Download,
   Edit3,
@@ -107,6 +108,29 @@ const QUICK_STARTER_SNIPPETS: Partial<
   ],
 };
 
+const ADD_MENU_ITEMS: { kind: TopologyResourceKind; title: string; desc: string }[] = [
+  {
+    kind: 'route',
+    title: 'Route',
+    desc: 'Match HTTP API, /v1 AI, or /mcp paths to an upstream',
+  },
+  {
+    kind: 'upstream',
+    title: 'Upstream',
+    desc: 'Backend service pool, AI provider, or MCP server',
+  },
+  {
+    kind: 'route_group',
+    title: 'Route Group',
+    desc: 'Shared path prefix and plugin chain for multiple routes',
+  },
+  {
+    kind: 'global_plugin',
+    title: 'Global Plugin',
+    desc: 'Middleware running across every route (metrics, auth, limits)',
+  },
+];
+
 const KIND_ORDER: Record<TopologyResourceKind, number> = {
   route: 0,
   route_group: 1,
@@ -119,14 +143,14 @@ const KIND_ORDER: Record<TopologyResourceKind, number> = {
 };
 
 const KIND_META: Record<TopologyResourceKind, { label: string; badgeCls: string }> = {
-  route: { label: 'route', badgeCls: 'badge badge-accent mono' },
-  route_group: { label: 'group', badgeCls: 'badge badge-accent mono' },
-  upstream: { label: 'upstream', badgeCls: 'badge badge-ok mono' },
-  global_plugin: { label: 'plugin', badgeCls: 'badge mono' },
-  server: { label: 'server', badgeCls: 'badge mono' },
-  admin: { label: 'admin', badgeCls: 'badge mono' },
-  state: { label: 'state', badgeCls: 'badge mono' },
-  telemetry: { label: 'telemetry', badgeCls: 'badge mono' },
+  route: { label: 'Route', badgeCls: 'badge badge-accent' },
+  route_group: { label: 'Route Group', badgeCls: 'badge badge-accent' },
+  upstream: { label: 'Upstream', badgeCls: 'badge badge-ok' },
+  global_plugin: { label: 'Plugin', badgeCls: 'badge' },
+  server: { label: 'Server', badgeCls: 'badge' },
+  admin: { label: 'Admin', badgeCls: 'badge' },
+  state: { label: 'State', badgeCls: 'badge' },
+  telemetry: { label: 'Telemetry', badgeCls: 'badge' },
 };
 
 type KindFilter = 'all' | 'route' | 'upstream' | 'route_group' | 'global_plugin' | 'system';
@@ -148,47 +172,56 @@ function summarizeResource(r: TopologyResource): string {
               : 'ANY';
       const target = s.upstream ? ` → ${String(s.upstream)}` : '';
       const group = s.group ? ` · group:${String(s.group)}` : '';
-      const plugins = Array.isArray(s.plugins) && s.plugins.length > 0 ? ` · ${s.plugins.length} plugin${s.plugins.length === 1 ? '' : 's'}` : '';
+      const plugins =
+        Array.isArray(s.plugins) && s.plugins.length > 0
+          ? ` · ${s.plugins.length} plugin${s.plugins.length === 1 ? '' : 's'}`
+          : '';
       return `${matcher}${target}${group}${plugins}`;
     }
     case 'route_group': {
       const prefix = s.path_prefix ? `PREFIX ${String(s.path_prefix)}` : 'shared group';
       const upstream = s.upstream ? ` → ${String(s.upstream)}` : '';
-      const plugins = Array.isArray(s.plugins) ? ` · ${s.plugins.length} plugin${s.plugins.length === 1 ? '' : 's'}` : '';
+      const plugins = Array.isArray(s.plugins)
+        ? ` · ${s.plugins.length} plugin${s.plugins.length === 1 ? '' : 's'}`
+        : '';
       return `${prefix}${upstream}${plugins}`;
     }
     case 'upstream': {
       const eps = Array.isArray(s.endpoints) ? s.endpoints.map(String) : [];
       const first = eps[0] || 'no endpoints';
       const more = eps.length > 1 ? ` (+${eps.length - 1} more)` : '';
-      const timeout = typeof s.connect_timeout_ms === 'number' ? ` · connect ${s.connect_timeout_ms}ms` : '';
+      const timeout =
+        typeof s.connect_timeout_ms === 'number' ? ` · connect ${s.connect_timeout_ms}ms` : '';
       return `${first}${more}${timeout}`;
     }
     case 'global_plugin': {
       const name = typeof s.name === 'string' ? s.name : r.slug;
       const cfg = s.config && typeof s.config === 'object' ? Object.keys(s.config as object) : [];
-      return cfg.length > 0 ? `${name} (${cfg.join(', ')})` : `${name} (default config)`;
+      return cfg.length > 0 ? `${name} (${cfg.join(', ')})` : `${name} · default settings`;
     }
     case 'server': {
       const listen = typeof s.listen === 'string' ? s.listen : '0.0.0.0:8080';
-      const drain = typeof s.drain_timeout_ms === 'number' ? ` · drain ${Math.round(s.drain_timeout_ms / 1000)}s` : '';
+      const drain =
+        typeof s.drain_timeout_ms === 'number'
+          ? ` · drain ${Math.round(s.drain_timeout_ms / 1000)}s`
+          : '';
       const tls = s.tls ? ' · TLS' : '';
-      return `listen ${listen}${drain}${tls}`;
+      return `Listen ${listen}${drain}${tls}`;
     }
     case 'admin': {
-      if (s.enabled === false) return 'disabled';
+      if (s.enabled === false) return 'Disabled';
       const listen = typeof s.listen === 'string' ? s.listen : '127.0.0.1:9090';
       const ui = s.ui ? ' · Inspector UI on' : ' · API only';
       return `${listen}${ui}`;
     }
     case 'state': {
       const backend = typeof s.backend === 'string' ? s.backend : 'memory';
-      return `backend: ${backend}`;
+      return `Backend: ${backend}`;
     }
     case 'telemetry': {
       const enabled = Boolean(s.enabled);
       const backend = typeof s.backend === 'string' ? s.backend : 'otlp_http';
-      return enabled ? `enabled · ${backend}` : `disabled (${backend})`;
+      return enabled ? `Enabled (${backend})` : `Disabled (${backend})`;
     }
     default:
       return JSON.stringify(r.spec);
@@ -203,11 +236,13 @@ export function TopologyPage({
   onClusterChanged: () => void;
 }) {
   const toast = useToast();
-  const [tab, setTab] = useState<'draft' | 'toml' | 'revisions'>('draft');
+  const [tab, setTab] = useState<'draft' | 'revisions' | 'toml'>('draft');
   const [kindFilter, setKindFilter] = useState<KindFilter>('all');
   const [search, setSearch] = useState('');
-  const [splitToml, setSplitToml] = useState(true);
+  const [splitToml, setSplitToml] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const addMenuRef = useRef<HTMLDivElement>(null);
 
   const [resources, setResources] = useState<TopologyResource[]>([]);
   const [validation, setValidation] = useState<ValidateDraftResult | null>(null);
@@ -236,6 +271,24 @@ export function TopologyPage({
 
   // Inspect Release TOML Drawer
   const [inspectRev, setInspectRev] = useState<TopologyRevision | null>(null);
+
+  useEffect(() => {
+    if (!addMenuOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (addMenuRef.current && !addMenuRef.current.contains(e.target as Node)) {
+        setAddMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setAddMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [addMenuOpen]);
 
   const load = async () => {
     setLoading(true);
@@ -298,6 +351,7 @@ export function TopologyPage({
   }, [resources]);
 
   const openNewResource = (kind: TopologyResourceKind) => {
+    setAddMenuOpen(false);
     setEditKind(kind);
     setEditSlug(kind === 'upstream' ? 'new-upstream' : kind === 'route' ? 'new-route' : 'default');
     setEditEtag(undefined);
@@ -379,7 +433,7 @@ export function TopologyPage({
         ring_selector: pubRing.trim() || '*',
         notes: pubNotes.trim(),
       });
-      toast.push(`Published Release #${rev.revision} to ring "${pubRing || '*'}"`);
+      toast.push(`Published Release v${rev.revision} to ring "${pubRing || '*'}"`);
       setPublishOpen(false);
       setPubNotes('');
       onClusterChanged();
@@ -395,14 +449,14 @@ export function TopologyPage({
   const handleRollback = async (rev: number) => {
     if (
       !window.confirm(
-        `Roll back cluster "${cluster.slug}" default fleet to Release #${rev}?\n\nActive Live Policies (virtual keys, budgets, MCP agent permissions, and kill-switches) will NOT be reverted.`
+        `Roll back cluster "${cluster.slug}" default fleet to Release v${rev}?\n\nActive Live Policies (virtual keys, budgets, MCP agent permissions, and kill-switches) will NOT be reverted.`
       )
     ) {
       return;
     }
     try {
       await api.rollbackRevision(cluster.slug, rev, '*');
-      toast.push(`Rolled back ${cluster.slug} to Release #${rev} (Live Policies untouched)`);
+      toast.push(`Rolled back ${cluster.slug} to Release v${rev} (Live Policies untouched)`);
       onClusterChanged();
       await load();
     } catch (err) {
@@ -413,7 +467,7 @@ export function TopologyPage({
   const handlePromote = async (rev: number) => {
     try {
       await api.promoteRevision(cluster.slug, rev, '*');
-      toast.push(`Promoted Release #${rev} to all nodes (*)`);
+      toast.push(`Promoted Release v${rev} to all nodes (*)`);
       onClusterChanged();
       await load();
     } catch (err) {
@@ -422,89 +476,45 @@ export function TopologyPage({
   };
 
   return (
-    <div className="space-y-3.5">
-      {/* Compact Unified Toolbar */}
-      <div className="surface px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-3 min-w-0">
-          {/* Segmented View Switcher */}
-          <div
-            className="inline-flex rounded-md p-0.5 text-xs"
-            style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}
-          >
-            {[
-              { id: 'draft' as const, label: `Draft Config (${resources.length})`, icon: <GitBranch size={13} /> },
-              { id: 'revisions' as const, label: `Releases (${revisions.length})`, icon: <History size={13} /> },
-              { id: 'toml' as const, label: 'Full TOML', icon: <FileCode2 size={13} /> },
-            ].map((t) => (
+    <div className="space-y-5">
+      {/* Clear, Friendly Page Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1 className="m-0 text-[22px] font-semibold tracking-tight">Config &amp; Releases</h1>
+            {validation && (
               <button
-                key={t.id}
                 type="button"
-                onClick={() => setTab(t.id)}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded border-0 cursor-pointer font-medium transition-colors"
-                style={{
-                  background: tab === t.id ? 'var(--bg-elevated)' : 'transparent',
-                  color: tab === t.id ? 'var(--text-primary)' : 'var(--text-muted)',
-                  boxShadow: tab === t.id ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
-                }}
+                onClick={() => setShowDiagnostics((v) => !v)}
+                className={validation.valid ? 'badge badge-ok cursor-pointer' : 'badge badge-danger cursor-pointer'}
+                title={`Draft digest: ${validation.digest}`}
               >
-                {t.icon}
-                <span>{t.label}</span>
+                {validation.valid ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
+                <span>
+                  {validation.valid
+                    ? `Ready · ${validation.upstream_count} upstream, ${validation.route_count} route${validation.warnings ? ` · ${validation.warnings} warning` : ''}`
+                    : `${validation.errors} error${validation.errors === 1 ? '' : 's'} in draft`}
+                </span>
               </button>
-            ))}
+            )}
           </div>
-
-          {/* Inline Live Validation Pill */}
-          {validation && (
-            <button
-              type="button"
-              onClick={() => setShowDiagnostics((v) => !v)}
-              className={validation.valid ? 'badge badge-ok cursor-pointer' : 'badge badge-danger cursor-pointer'}
-              title={`Draft digest: ${validation.digest}`}
-            >
-              {validation.valid ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}
-              <span>
-                {validation.valid
-                  ? `Valid · ${validation.upstream_count} upstream · ${validation.route_count} route${validation.warnings ? ` · ${validation.warnings} warn` : ''}`
-                  : `${validation.errors} validation error${validation.errors === 1 ? '' : 's'}`}
-              </span>
-            </button>
-          )}
-          {validation && (
-            <span className="mono text-[11px] hidden 2xl:inline" style={{ color: 'var(--text-muted)' }}>
-              {shortDigest(validation.digest)}
-            </span>
-          )}
+          <p className="m-0 mt-1 text-sm" style={{ color: 'var(--text-muted)' }}>
+            Manage routes, upstreams, and plugins for HTTP APIs, AI models, and MCP servers—then publish signed releases to your fleet.
+          </p>
         </div>
 
-        {/* Right-Aligned Actions */}
-        <div className="flex items-center gap-2 shrink-0">
-          {tab === 'draft' && (
-            <button
-              type="button"
-              className="btn btn-sm hidden xl:inline-flex"
-              style={{
-                background: splitToml ? 'var(--accent-soft)' : undefined,
-                borderColor: splitToml ? 'var(--accent-border)' : undefined,
-                color: splitToml ? 'var(--accent)' : undefined,
-              }}
-              onClick={() => setSplitToml((v) => !v)}
-              title="Toggle live compiled shunt.toml split pane"
-            >
-              <Columns2 size={13} />
-              <span>{splitToml ? 'Split TOML' : 'Show TOML'}</span>
-            </button>
-          )}
-          <button type="button" className="btn btn-sm" onClick={() => setImportOpen(true)}>
-            <Upload size={13} />
-            <span>Import TOML</span>
+        <div className="flex items-center gap-2.5 shrink-0">
+          <button type="button" className="btn" onClick={() => setImportOpen(true)}>
+            <Upload size={15} />
+            <span>Import shunt.toml</span>
           </button>
           <button
             type="button"
-            className="btn btn-sm btn-primary"
+            className="btn btn-primary"
             disabled={!validation?.valid}
             onClick={() => setPublishOpen(true)}
           >
-            <Rocket size={13} />
+            <Rocket size={15} />
             <span>Publish Release</span>
           </button>
         </div>
@@ -512,12 +522,12 @@ export function TopologyPage({
 
       {/* Collapsible shunt verify Diagnostics */}
       {showDiagnostics && validation && validation.diagnostics.length > 0 && (
-        <div className="surface p-3 space-y-1.5">
-          <div className="flex items-center justify-between text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
+        <div className="surface p-4 space-y-2">
+          <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
             <span>shunt verify Diagnostics ({validation.diagnostics.length})</span>
             <button
               type="button"
-              className="btn-ghost text-[11px] px-1.5 py-0.5 border-0 cursor-pointer rounded"
+              className="btn-ghost text-xs px-2 py-1 border-0 cursor-pointer rounded"
               onClick={() => setShowDiagnostics(false)}
             >
               Hide
@@ -526,32 +536,74 @@ export function TopologyPage({
           {validation.diagnostics.map((d, i) => (
             <div
               key={i}
-              className="text-xs px-2.5 py-1.5 rounded flex items-start gap-2"
+              className="text-sm px-3 py-2 rounded-lg flex items-start gap-2.5"
               style={{
                 background: d.severity === 'error' ? 'var(--danger-soft)' : 'var(--warn-soft)',
                 border: `1px solid ${d.severity === 'error' ? 'var(--danger-border)' : 'var(--warn-border)'}`,
               }}
             >
-              <span className="badge mono uppercase">{d.severity}</span>
+              <span className="badge mono uppercase mt-0.5">{d.severity}</span>
               <div className="min-w-0">
                 <span className="mono font-semibold">{d.rule}</span>
                 {d.subject && <span className="mono ml-1.5 opacity-80">({d.subject})</span>}
-                <span className="ml-2">{d.message}</span>
+                <div className="mt-0.5">{d.message}</div>
               </div>
             </div>
           ))}
         </div>
       )}
 
-      {/* Tab 1: Draft Config (+ Live Split Compiled TOML on Desktop) */}
+      {/* Clean Single Tab Row */}
+      <div className="flex flex-wrap items-center justify-between gap-3" style={{ borderBottom: '1px solid var(--border)' }}>
+        <div className="flex items-center gap-1">
+          {[
+            { id: 'draft' as const, label: `Draft Config (${resources.length})`, icon: <GitBranch size={15} /> },
+            { id: 'revisions' as const, label: `Releases & Rollback (${revisions.length})`, icon: <History size={15} /> },
+            { id: 'toml' as const, label: 'Compiled shunt.toml', icon: <FileCode2 size={15} /> },
+          ].map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setTab(t.id)}
+              className="flex items-center gap-2 px-3.5 py-2.5 text-sm font-medium bg-transparent border-0 cursor-pointer transition-colors"
+              style={{
+                color: tab === t.id ? 'var(--text-primary)' : 'var(--text-muted)',
+                borderBottom: `2px solid ${tab === t.id ? 'var(--accent)' : 'transparent'}`,
+                marginBottom: -1,
+              }}
+            >
+              {t.icon}
+              <span>{t.label}</span>
+            </button>
+          ))}
+        </div>
+
+        {tab === 'draft' && (
+          <button
+            type="button"
+            className="btn btn-sm mb-2 hidden xl:inline-flex"
+            style={{
+              background: splitToml ? 'var(--accent-soft)' : undefined,
+              borderColor: splitToml ? 'var(--accent-border)' : undefined,
+              color: splitToml ? 'var(--accent)' : undefined,
+            }}
+            onClick={() => setSplitToml((v) => !v)}
+          >
+            <Columns2 size={14} />
+            <span>{splitToml ? 'Hide TOML Preview' : 'Preview TOML'}</span>
+          </button>
+        )}
+      </div>
+
+      {/* Tab 1: Draft Config (+ Optional Split Compiled TOML) */}
       {tab === 'draft' && (
-        <div className={splitToml ? 'grid grid-cols-1 xl:grid-cols-12 gap-3.5 items-start' : 'space-y-3.5'}>
+        <div className={splitToml ? 'grid grid-cols-1 xl:grid-cols-12 gap-5 items-start' : ''}>
           {/* Resource Table Card */}
-          <div className={splitToml ? 'surface overflow-hidden xl:col-span-7' : 'surface overflow-hidden'}>
-            {/* Integrated Filter + Search + Add Bar */}
+          <div className={splitToml ? 'surface xl:col-span-7' : 'surface'}>
+            {/* Clean Filter + Search + Single Add Menu Bar */}
             <div
-              className="px-3 py-2 flex flex-wrap items-center justify-between gap-2"
-              style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-sidebar)' }}
+              className="px-4 py-3 flex flex-wrap items-center justify-between gap-3"
+              style={{ borderBottom: '1px solid var(--border)' }}
             >
               <div className="flex flex-wrap items-center gap-1">
                 {(
@@ -563,69 +615,98 @@ export function TopologyPage({
                     { id: 'global_plugin', label: `Plugins (${counts.global_plugin})` },
                     { id: 'system', label: `System (${counts.system})` },
                   ] as { id: KindFilter; label: string }[]
-                ).map((f) => (
-                  <button
-                    key={f.id}
-                    type="button"
-                    onClick={() => setKindFilter(f.id)}
-                    className="px-2 py-1 rounded text-[11px] font-medium border-0 cursor-pointer transition-colors"
-                    style={{
-                      background: kindFilter === f.id ? 'var(--bg-hover)' : 'transparent',
-                      color: kindFilter === f.id ? 'var(--text-primary)' : 'var(--text-muted)',
-                    }}
-                  >
-                    {f.label}
-                  </button>
-                ))}
+                ).map((f) => {
+                  const active = kindFilter === f.id;
+                  return (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setKindFilter(f.id)}
+                      className="px-2.5 py-1.5 rounded-md text-sm font-medium border-0 cursor-pointer transition-colors"
+                      style={{
+                        background: active ? 'var(--bg-subtle)' : 'transparent',
+                        color: active ? 'var(--text-primary)' : 'var(--text-muted)',
+                      }}
+                    >
+                      {f.label}
+                    </button>
+                  );
+                })}
               </div>
 
-              <div className="flex flex-wrap items-center gap-1.5">
-                <div className="relative">
-                  <Search
-                    size={12}
-                    className="absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none"
-                    style={{ color: 'var(--text-muted)' }}
-                  />
+              <div className="flex items-center gap-2.5">
+                {/* Flex Search Input (icon never overlaps placeholder) */}
+                <div
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg w-52"
+                  style={{ background: 'var(--bg)', border: '1px solid var(--border)' }}
+                >
+                  <Search size={14} style={{ color: 'var(--text-muted)' }} className="shrink-0" />
                   <input
-                    className="input-base text-xs py-1 pl-6 pr-2 w-36"
+                    className="w-full bg-transparent border-0 outline-none text-sm"
+                    style={{ color: 'var(--text-primary)' }}
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Filter…"
+                    placeholder="Filter resources…"
                   />
                 </div>
-                {(['route', 'upstream', 'route_group', 'global_plugin'] as TopologyResourceKind[]).map(
-                  (k) => (
-                    <button
-                      key={k}
-                      type="button"
-                      className="btn btn-sm"
-                      onClick={() => openNewResource(k)}
+
+                {/* Single Friendly Add Resource Dropdown */}
+                <div className="relative" ref={addMenuRef}>
+                  <button
+                    type="button"
+                    className="btn btn-accent"
+                    onClick={() => setAddMenuOpen((o) => !o)}
+                  >
+                    <Plus size={15} />
+                    <span>Add Resource</span>
+                    <ChevronDown size={14} />
+                  </button>
+                  {addMenuOpen && (
+                    <div
+                      className="surface absolute right-0 mt-1.5 w-80 p-1.5 z-30 shadow-xl"
+                      style={{ background: 'var(--bg-elevated)' }}
                     >
-                      <Plus size={11} />
-                      <span>{KIND_META[k].label}</span>
-                    </button>
-                  )
-                )}
+                      {ADD_MENU_ITEMS.map((item) => (
+                        <button
+                          key={item.kind}
+                          type="button"
+                          onClick={() => openNewResource(item.kind)}
+                          className="w-full text-left px-3 py-2.5 rounded-lg border-0 bg-transparent cursor-pointer transition-colors hover:bg-[var(--bg-hover)] block"
+                        >
+                          <div className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                            {item.title}
+                          </div>
+                          <div className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                            {item.desc}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
             {loading ? (
-              <div className="p-8 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
+              <div className="p-10 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
                 Loading draft configuration…
               </div>
             ) : filteredResources.length === 0 ? (
-              <div className="p-8 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
-                No matching resources.
+              <div className="p-10 text-center space-y-2">
+                <div className="text-sm font-medium">No matching resources</div>
+                <div className="text-sm" style={{ color: 'var(--text-muted)' }}>
+                  Try clearing your filter or click <strong>Add Resource</strong> to add a route, upstream, or plugin.
+                </div>
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="swiss-table text-xs">
+                <table className="swiss-table">
                   <thead>
                     <tr>
-                      <th>Kind</th>
-                      <th>Slug</th>
-                      <th>Configuration</th>
-                      <th>Ver</th>
+                      <th>Type</th>
+                      <th>Name</th>
+                      <th>Summary</th>
+                      <th>Version</th>
                       <th>Updated</th>
                       <th className="text-right">Actions</th>
                     </tr>
@@ -634,46 +715,53 @@ export function TopologyPage({
                     {filteredResources.map((r) => {
                       const meta = KIND_META[r.kind];
                       return (
-                        <tr key={r.id}>
+                        <tr
+                          key={r.id}
+                          className="cursor-pointer"
+                          onClick={() => openEditResource(r)}
+                        >
                           <td className="whitespace-nowrap">
                             <span className={meta.badgeCls}>{meta.label}</span>
                           </td>
                           <td className="mono font-semibold whitespace-nowrap">{r.slug}</td>
                           <td
-                            className="mono text-[11.5px] max-w-md truncate"
+                            className="mono text-[13px] max-w-lg truncate"
                             style={{ color: 'var(--text-secondary)' }}
                             title={JSON.stringify(r.spec)}
                           >
                             {summarizeResource(r)}
                           </td>
                           <td
-                            className="mono whitespace-nowrap"
+                            className="mono text-xs whitespace-nowrap"
                             style={{ color: 'var(--text-muted)' }}
                             title={`ETag: ${r.etag}`}
                           >
                             v{r.version}
                           </td>
-                          <td className="whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                          <td className="text-xs whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
                             {formatRelativeTime(r.updated_at)}
                           </td>
-                          <td className="text-right whitespace-nowrap">
-                            <div className="inline-flex items-center gap-1">
+                          <td
+                            className="text-right whitespace-nowrap"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <div className="inline-flex items-center gap-1.5">
                               <button
                                 type="button"
                                 className="btn btn-sm"
                                 onClick={() => openEditResource(r)}
                               >
-                                <Edit3 size={11} />
+                                <Edit3 size={13} />
                                 <span>Edit</span>
                               </button>
                               <button
                                 type="button"
-                                className="btn-ghost p-1 rounded cursor-pointer border-0"
+                                className="btn-ghost p-1.5 rounded-md cursor-pointer border-0"
                                 style={{ color: 'var(--danger)' }}
                                 title={`Delete ${r.kind}/${r.slug}`}
                                 onClick={() => handleDeleteResource(r)}
                               >
-                                <Trash2 size={13} />
+                                <Trash2 size={15} />
                               </button>
                             </div>
                           </td>
@@ -686,22 +774,22 @@ export function TopologyPage({
             )}
           </div>
 
-          {/* Live Compiled shunt.toml Split Pane */}
+          {/* Optional Live Compiled shunt.toml Split Pane */}
           {splitToml && (
-            <div className="surface overflow-hidden xl:col-span-5 xl:sticky xl:top-16">
+            <div className="surface overflow-hidden xl:col-span-5 xl:sticky xl:top-20">
               <div
-                className="px-3.5 py-2 flex items-center justify-between gap-2"
-                style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-sidebar)' }}
+                className="px-4 py-3 flex items-center justify-between gap-2"
+                style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-canvas)' }}
               >
                 <div className="flex items-center gap-2 min-w-0">
-                  <FileCode2 size={13} style={{ color: 'var(--text-muted)' }} />
-                  <span className="text-xs font-semibold truncate">Compiled shunt.toml</span>
-                  <span className="badge mono text-[10px]">secrets redacted</span>
+                  <FileCode2 size={15} style={{ color: 'var(--text-muted)' }} />
+                  <span className="text-sm font-semibold truncate">Compiled shunt.toml</span>
+                  <span className="badge mono">redacted</span>
                 </div>
                 <CopyButton text={validation?.compiled_toml || ''} label="Copy" />
               </div>
               <pre
-                className="mono m-0 p-3.5 text-[11.5px] leading-relaxed overflow-auto max-h-[calc(100vh-11rem)]"
+                className="mono m-0 p-4 text-[13px] leading-relaxed overflow-auto max-h-[calc(100vh-13rem)]"
                 style={{ background: 'var(--bg-code)', color: 'var(--text-primary)' }}
               >
                 {validation?.compiled_toml || '# No compiled config yet'}
@@ -711,38 +799,14 @@ export function TopologyPage({
         </div>
       )}
 
-      {/* Tab 2: Full-Width Compiled TOML View */}
-      {tab === 'toml' && (
-        <div className="surface overflow-hidden">
-          <div
-            className="px-4 py-2.5 flex items-center justify-between gap-3"
-            style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-sidebar)' }}
-          >
-            <div>
-              <div className="text-xs font-semibold">Canonical Compiled shunt.toml (Secrets Redacted)</div>
-              <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                References like <code>secret:&lt;slug&gt;</code> are resolved into node memory only when authenticated nodes pull a signed release bundle.
-              </div>
-            </div>
-            <CopyButton text={validation?.compiled_toml || ''} label="Copy TOML" />
-          </div>
-          <pre
-            className="mono m-0 p-4 text-xs leading-relaxed overflow-auto max-h-[72vh]"
-            style={{ background: 'var(--bg-code)', color: 'var(--text-primary)' }}
-          >
-            {validation?.compiled_toml || ''}
-          </pre>
-        </div>
-      )}
-
-      {/* Tab 3: Releases & Rollback */}
+      {/* Tab 2: Releases & Rollback */}
       {tab === 'revisions' && (
-        <div className="space-y-3">
+        <div className="space-y-4">
           <div
-            className="surface px-3.5 py-2.5 flex items-center gap-2 text-xs"
+            className="surface px-4 py-3 flex items-center gap-3 text-sm"
             style={{ background: 'var(--bg-elevated)' }}
           >
-            <ShieldCheck size={15} style={{ color: 'var(--ok)' }} className="shrink-0" />
+            <ShieldCheck size={18} style={{ color: 'var(--ok)' }} className="shrink-0" />
             <span>
               <strong>Safe Rollback Guarantee:</strong> Rolling back a config release never un-revokes virtual keys, budgets, MCP agent permissions, or emergency kill-switches managed under <strong>Live Policies</strong>.
             </span>
@@ -750,12 +814,12 @@ export function TopologyPage({
 
           <div className="surface overflow-hidden">
             {revisions.length === 0 ? (
-              <div className="p-10 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
-                No releases published yet. Click <strong>Publish Release</strong> above to cut Release #1.
+              <div className="p-12 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
+                No releases published yet. Click <strong>Publish Release</strong> above to create Release v1.
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="swiss-table text-xs">
+                <table className="swiss-table">
                   <thead>
                     <tr>
                       <th>Release</th>
@@ -777,9 +841,9 @@ export function TopologyPage({
                           <td className="mono font-semibold whitespace-nowrap">v{rev.revision}</td>
                           <td className="whitespace-nowrap">
                             {activeRings.length === 0 ? (
-                              <span style={{ color: 'var(--text-muted)' }}>historical</span>
+                              <span className="text-xs" style={{ color: 'var(--text-muted)' }}>historical</span>
                             ) : (
-                              <div className="flex flex-wrap gap-1">
+                              <div className="flex flex-wrap gap-1.5">
                                 {activeRings.map((ring) => (
                                   <span
                                     key={ring}
@@ -791,11 +855,11 @@ export function TopologyPage({
                               </div>
                             )}
                           </td>
-                          <td className="mono whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                          <td className="mono text-xs whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
                             {shortDigest(rev.digest)}
                           </td>
                           <td>{rev.notes || <span style={{ color: 'var(--text-muted)' }}>—</span>}</td>
-                          <td className="whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                          <td className="text-xs whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
                             {rev.published_by} · {formatRelativeTime(rev.created_at)}
                           </td>
                           <td className="text-right whitespace-nowrap">
@@ -805,15 +869,15 @@ export function TopologyPage({
                                 className="btn btn-sm"
                                 onClick={() => setInspectRev(rev)}
                               >
-                                <FileCode2 size={11} />
-                                <span>TOML</span>
+                                <FileCode2 size={13} />
+                                <span>View TOML</span>
                               </button>
                               <a
                                 href={`/api/v1/clusters/${cluster.slug}/revisions/${rev.revision}/export.toml`}
                                 className="btn btn-sm no-underline"
                                 title="Download shunt.toml"
                               >
-                                <Download size={11} />
+                                <Download size={13} />
                               </a>
                               {!isDefaultActive && activeRings.length > 0 && (
                                 <button
@@ -830,7 +894,7 @@ export function TopologyPage({
                                   className="btn btn-sm"
                                   onClick={() => handleRollback(rev.revision)}
                                 >
-                                  <RotateCcw size={11} />
+                                  <RotateCcw size={13} />
                                   <span>Rollback</span>
                                 </button>
                               )}
@@ -847,18 +911,42 @@ export function TopologyPage({
         </div>
       )}
 
+      {/* Tab 3: Full Compiled TOML View */}
+      {tab === 'toml' && (
+        <div className="surface overflow-hidden">
+          <div
+            className="px-5 py-3.5 flex flex-wrap items-center justify-between gap-3"
+            style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-canvas)' }}
+          >
+            <div>
+              <div className="text-sm font-semibold">Canonical Compiled shunt.toml (Secrets Redacted)</div>
+              <div className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                References like <code>secret:&lt;slug&gt;</code> are resolved into node memory only when authenticated nodes pull a signed release bundle.
+              </div>
+            </div>
+            <CopyButton text={validation?.compiled_toml || ''} label="Copy TOML" />
+          </div>
+          <pre
+            className="mono m-0 p-5 text-[13px] leading-relaxed overflow-auto max-h-[70vh]"
+            style={{ background: 'var(--bg-code)', color: 'var(--text-primary)' }}
+          >
+            {validation?.compiled_toml || ''}
+          </pre>
+        </div>
+      )}
+
       {/* Right-Hand Resource Editor Drawer */}
       <Drawer
         open={editorOpen}
         onClose={() => setEditorOpen(false)}
-        title={editEtag ? `Edit ${editKind}/${editSlug}` : `Add ${editKind}`}
-        subtitle="Uses ETag + If-Match optimistic concurrency to prevent silent overwrites."
+        title={editEtag ? `Edit ${KIND_META[editKind].label} · ${editSlug}` : `Add ${KIND_META[editKind].label}`}
+        subtitle="Changes are saved to your cluster draft and verified before publishing."
         widthClass="max-w-xl"
       >
         <form onSubmit={handleSaveResource} className="space-y-4">
           {editError && (
             <div
-              className="p-3 rounded-md text-xs"
+              className="p-3.5 rounded-lg text-sm"
               style={{
                 background: 'var(--danger-soft)',
                 border: '1px solid var(--danger-border)',
@@ -869,34 +957,36 @@ export function TopologyPage({
             </div>
           )}
           {!editEtag && QUICK_STARTER_SNIPPETS[editKind] && (
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
-                Quick template:
-              </span>
-              {QUICK_STARTER_SNIPPETS[editKind]!.map((tpl) => (
-                <button
-                  key={tpl.label}
-                  type="button"
-                  className="btn btn-sm"
-                  onClick={() => {
-                    setEditSlug(tpl.slug);
-                    setEditJson(JSON.stringify(tpl.spec, null, 2));
-                  }}
-                >
-                  {tpl.label}
-                </button>
-              ))}
+            <div className="space-y-1.5">
+              <div className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>
+                Start from an example:
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {QUICK_STARTER_SNIPPETS[editKind]!.map((tpl) => (
+                  <button
+                    key={tpl.label}
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() => {
+                      setEditSlug(tpl.slug);
+                      setEditJson(JSON.stringify(tpl.spec, null, 2));
+                    }}
+                  >
+                    {tpl.label}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 gap-3.5">
             <div>
-              <label className="block text-xs font-medium mb-1">Resource Kind</label>
-              <input className="input-base mono text-xs" value={editKind} disabled />
+              <label className="block text-sm font-medium mb-1.5">Resource Type</label>
+              <input className="input-base" value={KIND_META[editKind].label} disabled />
             </div>
             <div>
-              <label className="block text-xs font-medium mb-1">Slug</label>
+              <label className="block text-sm font-medium mb-1.5">Slug / Identifier</label>
               <input
-                className="input-base mono text-xs"
+                className="input-base mono"
                 value={editSlug}
                 disabled={Boolean(editEtag)}
                 onChange={(e) => setEditSlug(e.target.value)}
@@ -905,15 +995,15 @@ export function TopologyPage({
             </div>
           </div>
           <div>
-            <label className="block text-xs font-medium mb-1">Spec JSON</label>
+            <label className="block text-sm font-medium mb-1.5">Configuration (JSON)</label>
             <textarea
-              className="input-base mono text-xs min-h-[340px]"
+              className="input-base mono text-[13px] min-h-[340px]"
               value={editJson}
               onChange={(e) => setEditJson(e.target.value)}
               spellCheck={false}
             />
           </div>
-          <div className="flex justify-end gap-2 pt-2">
+          <div className="flex justify-end gap-2.5 pt-2">
             <button type="button" className="btn" onClick={() => setEditorOpen(false)}>
               Cancel
             </button>
@@ -934,18 +1024,18 @@ export function TopologyPage({
       >
         <form onSubmit={handleImportToml} className="space-y-4">
           <textarea
-            className="input-base mono text-xs min-h-[260px]"
+            className="input-base mono text-[13px] min-h-[280px]"
             value={importText}
             onChange={(e) => setImportText(e.target.value)}
             placeholder="Paste shunt.toml contents here…"
             required
           />
-          <div className="flex justify-end gap-2">
+          <div className="flex justify-end gap-2.5">
             <button type="button" className="btn" onClick={() => setImportOpen(false)}>
               Cancel
             </button>
             <button type="submit" className="btn btn-primary" disabled={importing}>
-              <Upload size={13} />
+              <Upload size={15} />
               <span>{importing ? 'Importing…' : 'Import into Draft'}</span>
             </button>
           </div>
@@ -956,19 +1046,19 @@ export function TopologyPage({
       <Modal
         open={publishOpen}
         onClose={() => setPublishOpen(false)}
-        title={`Publish Config Release to ${cluster.slug}`}
+        title={`Publish Release to ${cluster.slug}`}
         subtitle="Creates an immutable, Ed25519-signed release and rolls it out to matching nodes."
       >
         <form onSubmit={handlePublish} className="space-y-4">
           <div>
-            <label className="block text-xs font-medium mb-1">Target Rollout Ring</label>
+            <label className="block text-sm font-medium mb-1.5">Target Rollout Ring</label>
             <input
-              className="input-base mono text-xs"
+              className="input-base mono"
               value={pubRing}
               onChange={(e) => setPubRing(e.target.value)}
               placeholder="*"
             />
-            <div className="mt-1.5 flex gap-1.5">
+            <div className="mt-2 flex gap-2">
               <button type="button" className="btn btn-sm" onClick={() => setPubRing('*')}>
                 * (All Nodes)
               </button>
@@ -982,7 +1072,7 @@ export function TopologyPage({
             </div>
           </div>
           <div>
-            <label className="block text-xs font-medium mb-1">Release Notes</label>
+            <label className="block text-sm font-medium mb-1.5">Release Notes</label>
             <input
               className="input-base"
               value={pubNotes}
@@ -990,12 +1080,12 @@ export function TopologyPage({
               placeholder="e.g. Add /v2/orders upstream pool and increase drain timeout"
             />
           </div>
-          <div className="flex justify-end gap-2 pt-1">
+          <div className="flex justify-end gap-2.5 pt-2">
             <button type="button" className="btn" onClick={() => setPublishOpen(false)}>
               Cancel
             </button>
             <button type="submit" className="btn btn-primary" disabled={publishing}>
-              <Rocket size={13} />
+              <Rocket size={15} />
               <span>{publishing ? 'Publishing…' : 'Publish & Roll Out'}</span>
             </button>
           </div>

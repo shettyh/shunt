@@ -155,16 +155,16 @@ export function CopyButton({
   };
 
   return (
-    <button type="button" onClick={handleCopy} className={`btn text-xs py-1 px-2.5 ${className}`}>
+    <button type="button" onClick={handleCopy} className={`btn btn-sm ${className}`}>
       {copied ? (
         <>
-          <Check size={13} style={{ color: 'var(--ok)' }} />
+          <Check size={14} style={{ color: 'var(--ok)' }} />
           <span>Copied</span>
         </>
       ) : (
         <>
-          <Copy size={13} />
-          <span>{label}</span>
+          <Copy size={14} />
+          {label && <span>{label}</span>}
         </>
       )}
     </button>
@@ -275,13 +275,13 @@ export function Drawer({
         }}
       >
         <div
-          className="px-5 py-3.5 flex items-start justify-between gap-4 shrink-0"
-          style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-sidebar)' }}
+          className="px-6 py-4 flex items-start justify-between gap-4 shrink-0"
+          style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-canvas)' }}
         >
           <div className="min-w-0">
-            <h2 className="m-0 text-sm font-semibold tracking-tight truncate">{title}</h2>
+            <h2 className="m-0 text-base font-semibold tracking-tight truncate">{title}</h2>
             {subtitle && (
-              <p className="m-0 mt-0.5 text-xs" style={{ color: 'var(--text-muted)' }}>
+              <p className="m-0 mt-1 text-sm" style={{ color: 'var(--text-muted)' }}>
                 {subtitle}
               </p>
             )}
@@ -289,13 +289,13 @@ export function Drawer({
           <button
             type="button"
             onClick={onClose}
-            className="btn-ghost p-1 rounded-md cursor-pointer border-0 shrink-0"
+            className="btn-ghost p-1.5 rounded-md cursor-pointer border-0 shrink-0"
             aria-label="Close drawer"
           >
-            <X size={16} />
+            <X size={18} />
           </button>
         </div>
-        <div className="p-5 overflow-y-auto flex-1">{children}</div>
+        <div className="p-6 overflow-y-auto flex-1">{children}</div>
       </div>
     </div>
   );

@@ -54,7 +54,7 @@ function PolicySyncCell({
 }) {
   if (node.status === 'offline') {
     return (
-      <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+      <span className="text-sm" style={{ color: 'var(--text-muted)' }}>
         Offline
       </span>
     );
@@ -71,7 +71,7 @@ function PolicySyncCell({
   if (behind.length === 0) {
     return (
       <span className="badge badge-ok" title={detailsTooltip}>
-        <CheckCircle2 size={11} />
+        <CheckCircle2 size={12} />
         <span>Up to date</span>
       </span>
     );
@@ -209,81 +209,89 @@ export function FleetPage({
   const syncedCount = nodes.filter((n) => n.status === 'synced').length;
 
   return (
-    <div className="space-y-3.5">
-      {/* Compact Toolbar */}
-      <div className="surface px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2.5 min-w-0">
-          <span className="font-semibold text-sm">Fleet Inventory</span>
-          <span className="badge mono tabular">{nodes.length} nodes</span>
-          {nodes.length > 0 && (
-            <span className={syncedCount === nodes.length ? 'badge badge-ok tabular' : 'badge badge-warn tabular'}>
-              {syncedCount}/{nodes.length} synced
-            </span>
-          )}
+    <div className="space-y-5">
+      {/* Page Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1 className="m-0 text-[22px] font-semibold tracking-tight">Fleet &amp; Nodes</h1>
+            <span className="badge mono tabular">{nodes.length} nodes</span>
+            {nodes.length > 0 && (
+              <span className={syncedCount === nodes.length ? 'badge badge-ok tabular' : 'badge badge-warn tabular'}>
+                {syncedCount}/{nodes.length} synced
+              </span>
+            )}
+          </div>
+          <p className="m-0 mt-1 text-sm" style={{ color: 'var(--text-muted)' }}>
+            Connected <code>shunt</code> data-plane instances, release convergence, canary labels, and live policy sync health.
+          </p>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none px-2 py-1 rounded-md" style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}>
+
+        <div className="flex items-center gap-2.5 shrink-0">
+          <label
+            className="flex items-center gap-2 text-sm cursor-pointer select-none px-3 py-2 rounded-lg surface"
+          >
             <input
               type="checkbox"
               checked={autoRefresh}
               onChange={(e) => setAutoRefresh(e.target.checked)}
             />
-            <span>Auto-poll (4s)</span>
+            <span>Auto-poll</span>
           </label>
-          <button type="button" className="btn btn-sm" onClick={() => load()}>
-            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+          <button type="button" className="btn" onClick={() => load()}>
+            <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
             <span>Refresh</span>
           </button>
           <button
             type="button"
-            className="btn btn-sm btn-primary"
+            className="btn btn-primary"
             onClick={() => {
               setCreatedToken(null);
               window.dispatchEvent(new CustomEvent('shunt-open-connect-node'));
             }}
           >
-            <Plus size={13} />
+            <Plus size={15} />
             <span>Connect Node</span>
           </button>
         </div>
       </div>
 
-      {/* Main Split: Enrolled Nodes (left) + Enrollment Tokens (right on xl) */}
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-3.5 items-start">
-        {/* Node Inventory Table */}
+      {/* Main Split */}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
         <div className="surface overflow-hidden xl:col-span-8">
           <div
-            className="px-3.5 py-2 flex items-center justify-between"
-            style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-sidebar)' }}
+            className="px-5 py-3.5 flex items-center justify-between"
+            style={{ borderBottom: '1px solid var(--border)' }}
           >
-            <span className="text-xs font-semibold flex items-center gap-1.5">
-              <Server size={13} style={{ color: 'var(--text-muted)' }} />
+            <h2 className="m-0 text-sm font-semibold flex items-center gap-2">
+              <Server size={15} style={{ color: 'var(--text-muted)' }} />
               <span>Enrolled Data-Plane Nodes</span>
-            </span>
-            <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-              Outbound-connected instances
+            </h2>
+            <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+              Outbound-only connections
             </span>
           </div>
 
           {nodes.length === 0 ? (
-            <div className="p-10 text-center space-y-2.5">
-              <Server size={24} style={{ color: 'var(--text-muted)' }} className="mx-auto" />
-              <div className="font-medium text-sm">No nodes enrolled in {cluster.slug}</div>
-              <p className="m-0 text-xs max-w-md mx-auto" style={{ color: 'var(--text-muted)' }}>
-                Mint a cluster bootstrap token and start any <code>shunt</code> binary with <code>--control-plane</code>. No local config file needed.
+            <div className="p-12 text-center space-y-3">
+              <Server size={28} style={{ color: 'var(--text-muted)' }} className="mx-auto" />
+              <div className="font-semibold text-base">No nodes enrolled in {cluster.slug}</div>
+              <p className="m-0 text-sm max-w-md mx-auto" style={{ color: 'var(--text-muted)' }}>
+                Generate a cluster bootstrap token and start any <code>shunt</code> binary with{' '}
+                <code>--control-plane</code>. No local config file needed.
               </p>
               <button
                 type="button"
-                className="btn btn-sm btn-primary"
+                className="btn btn-primary"
                 onClick={() => window.dispatchEvent(new CustomEvent('shunt-open-connect-node'))}
               >
-                <Terminal size={13} />
+                <Terminal size={15} />
                 <span>Connect First Node</span>
               </button>
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="swiss-table text-xs">
+              <table className="swiss-table">
                 <thead>
                   <tr>
                     <th>Node</th>
@@ -301,7 +309,7 @@ export function FleetPage({
                       <tr>
                         <td className="whitespace-nowrap">
                           <div className="font-semibold">{node.name}</div>
-                          <div className="mono text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                          <div className="mono text-xs" style={{ color: 'var(--text-muted)' }}>
                             {node.id} · v{node.shunt_version}
                           </div>
                         </td>
@@ -315,7 +323,7 @@ export function FleetPage({
                               <span style={{ color: 'var(--warn)' }}> → v{node.target_revision}</span>
                             )}
                           </div>
-                          <div className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                          <div className="text-xs" style={{ color: 'var(--text-muted)' }}>
                             {shortDigest(node.active_digest)}
                           </div>
                         </td>
@@ -328,18 +336,18 @@ export function FleetPage({
                               <span style={{ color: 'var(--text-muted)' }}>—</span>
                             ) : (
                               Object.entries(node.labels).map(([k, v]) => (
-                                <span key={k} className="badge mono text-[10.5px]">
+                                <span key={k} className="badge mono">
                                   {k}={v}
                                 </span>
                               ))
                             )}
                           </div>
                         </td>
-                        <td className="whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                        <td className="text-xs whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
                           {formatRelativeTime(node.last_heartbeat_at)}
                         </td>
                         <td className="text-right whitespace-nowrap">
-                          <div className="inline-flex items-center gap-1">
+                          <div className="inline-flex items-center gap-1.5">
                             <button
                               type="button"
                               className="btn btn-sm"
@@ -353,17 +361,17 @@ export function FleetPage({
                                 );
                               }}
                             >
-                              <Tag size={11} />
+                              <Tag size={13} />
                               <span>Labels</span>
                             </button>
                             <button
                               type="button"
-                              className="btn-ghost p-1 rounded cursor-pointer border-0"
+                              className="btn-ghost p-1.5 rounded-md cursor-pointer border-0"
                               style={{ color: 'var(--danger)' }}
                               title="Deregister node"
                               onClick={() => handleDeleteNode(node)}
                             >
-                              <Trash2 size={13} />
+                              <Trash2 size={15} />
                             </button>
                           </div>
                         </td>
@@ -371,8 +379,8 @@ export function FleetPage({
                       {node.last_reload_error && (
                         <tr>
                           <td colSpan={7} style={{ background: 'var(--danger-soft)' }}>
-                            <div className="flex items-start gap-2 text-xs" style={{ color: 'var(--danger)' }}>
-                              <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                            <div className="flex items-start gap-2 text-sm" style={{ color: 'var(--danger)' }}>
+                              <AlertTriangle size={16} className="shrink-0 mt-0.5" />
                               <div>
                                 <strong>Last reload failed (previous snapshot preserved):</strong>{' '}
                                 <code className="mono">{node.last_reload_error}</code>
@@ -389,25 +397,25 @@ export function FleetPage({
           )}
         </div>
 
-        {/* Bootstrap Tokens Panel */}
+        {/* Enrollment Tokens */}
         <div className="surface overflow-hidden xl:col-span-4">
           <div
-            className="px-3.5 py-2 flex items-center justify-between"
-            style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-sidebar)' }}
+            className="px-5 py-3.5 flex items-center justify-between"
+            style={{ borderBottom: '1px solid var(--border)' }}
           >
-            <span className="text-xs font-semibold flex items-center gap-1.5">
-              <KeyRound size={13} style={{ color: 'var(--text-muted)' }} />
+            <h2 className="m-0 text-sm font-semibold flex items-center gap-2">
+              <KeyRound size={15} style={{ color: 'var(--text-muted)' }} />
               <span>Enrollment Tokens ({tokens.length})</span>
-            </span>
+            </h2>
           </div>
 
           {tokens.length === 0 ? (
-            <div className="p-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
+            <div className="p-8 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
               No enrollment tokens created yet.
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="swiss-table text-xs">
+              <table className="swiss-table">
                 <thead>
                   <tr>
                     <th>Token</th>
@@ -421,7 +429,7 @@ export function FleetPage({
                     <tr key={t.id}>
                       <td>
                         <div className="font-medium">{t.name}</div>
-                        <div className="mono text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                        <div className="mono text-xs" style={{ color: 'var(--text-muted)' }}>
                           {t.prefix}
                         </div>
                       </td>
@@ -432,12 +440,12 @@ export function FleetPage({
                       <td className="whitespace-nowrap">
                         {t.revoked_at ? (
                           <span className="badge badge-danger">
-                            <XCircle size={10} />
+                            <XCircle size={12} />
                             Revoked
                           </span>
                         ) : (
                           <span className="badge badge-ok">
-                            <CheckCircle2 size={10} />
+                            <CheckCircle2 size={12} />
                             Active
                           </span>
                         )}
@@ -477,7 +485,7 @@ export function FleetPage({
           <form onSubmit={handleCreateToken} className="space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
               <div>
-                <label className="block text-xs font-medium mb-1">Token Name</label>
+                <label className="block text-sm font-medium mb-1.5">Token Name</label>
                 <input
                   className="input-base"
                   value={tokenName}
@@ -487,7 +495,7 @@ export function FleetPage({
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium mb-1">Expiry (hours, 0 = none)</label>
+                <label className="block text-sm font-medium mb-1.5">Expiry (hours, 0 = none)</label>
                 <input
                   className="input-base mono"
                   type="number"
@@ -497,16 +505,16 @@ export function FleetPage({
               </div>
             </div>
             <div>
-              <label className="block text-xs font-medium mb-1">
+              <label className="block text-sm font-medium mb-1.5">
                 Default Node Labels (comma-separated)
               </label>
               <input
-                className="input-base mono text-xs"
+                className="input-base mono"
                 value={tokenLabels}
                 onChange={(e) => setTokenLabels(e.target.value)}
                 placeholder="ring=stable,region=us-east-1"
               />
-              <div className="mt-1.5 flex gap-1.5">
+              <div className="mt-2 flex gap-2">
                 <button
                   type="button"
                   className="btn btn-sm"
@@ -523,12 +531,12 @@ export function FleetPage({
                 </button>
               </div>
             </div>
-            <div className="flex justify-end gap-2 pt-2">
+            <div className="flex justify-end gap-2.5 pt-2">
               <button type="button" className="btn" onClick={onConnectModalClose}>
                 Cancel
               </button>
               <button type="submit" className="btn btn-primary" disabled={creatingToken}>
-                <Terminal size={13} />
+                <Terminal size={15} />
                 <span>{creatingToken ? 'Generating…' : 'Generate Token & Command'}</span>
               </button>
             </div>
@@ -536,7 +544,7 @@ export function FleetPage({
         ) : (
           <div className="space-y-4">
             <div
-              className="p-3 rounded-md text-xs"
+              className="p-3.5 rounded-lg text-sm"
               style={{
                 background: 'var(--ok-soft)',
                 border: '1px solid var(--ok-border)',
@@ -576,16 +584,18 @@ export function FleetPage({
       >
         <div className="space-y-4">
           <div>
-            <label className="block text-xs font-medium mb-1">Labels (<code>key=value,key2=value2</code>)</label>
+            <label className="block text-sm font-medium mb-1.5">
+              Labels (<code>key=value,key2=value2</code>)
+            </label>
             <input
-              className="input-base mono text-xs"
+              className="input-base mono"
               value={editLabelsStr}
               onChange={(e) => setEditLabelsStr(e.target.value)}
               placeholder="ring=canary,region=us-east-1"
               autoFocus
             />
           </div>
-          <div className="flex justify-end gap-2">
+          <div className="flex justify-end gap-2.5">
             <button type="button" className="btn" onClick={() => setEditingNode(null)}>
               Cancel
             </button>

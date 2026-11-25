@@ -166,83 +166,88 @@ export function AccessAuditPage({
   };
 
   return (
-    <div className="space-y-3.5">
-      {/* Compact Unified Toolbar (Segmented Tabs + Contextual Primary Action) */}
-      <div className="surface px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3">
-        <div
-          className="inline-flex rounded-md p-0.5 text-xs overflow-x-auto"
-          style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)' }}
-        >
-          {[
-            { id: 'users' as const, label: `Users & RBAC (${users.length})`, icon: <Users size={13} /> },
-            { id: 'tokens' as const, label: `API Tokens (${tokens.length})`, icon: <Key size={13} /> },
-            { id: 'oidc' as const, label: `OIDC / SSO (${oidcProviders.length})`, icon: <Globe size={13} /> },
-            { id: 'audit' as const, label: `Audit Log (${audit.length})`, icon: <FileSearch size={13} /> },
-          ].map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => setTab(t.id)}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded border-0 cursor-pointer font-medium whitespace-nowrap transition-colors"
-              style={{
-                background: tab === t.id ? 'var(--bg-elevated)' : 'transparent',
-                color: tab === t.id ? 'var(--text-primary)' : 'var(--text-muted)',
-                boxShadow: tab === t.id ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
-              }}
-            >
-              {t.icon}
-              <span>{t.label}</span>
-            </button>
-          ))}
+    <div className="space-y-5">
+      {/* Page Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="m-0 text-[22px] font-semibold tracking-tight">Access &amp; Audit</h1>
+          <p className="m-0 mt-1 text-sm" style={{ color: 'var(--text-muted)' }}>
+            Manage team users, RBAC roles, service API tokens, OIDC/SSO providers, and the tamper-evident audit chain.
+          </p>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2.5 shrink-0">
           {tab === 'users' && (
-            <button type="button" className="btn btn-sm btn-primary" onClick={() => setUserModal(true)}>
-              <UserPlus size={13} />
+            <button type="button" className="btn btn-primary" onClick={() => setUserModal(true)}>
+              <UserPlus size={15} />
               <span>Add User</span>
             </button>
           )}
           {tab === 'tokens' && (
             <button
               type="button"
-              className="btn btn-sm btn-primary"
+              className="btn btn-primary"
               onClick={() => {
                 setCreatedApiToken(null);
                 setTName('');
                 setTokenModal(true);
               }}
             >
-              <Plus size={13} />
+              <Plus size={15} />
               <span>Create API Token</span>
             </button>
           )}
           {tab === 'oidc' && (
-            <button type="button" className="btn btn-sm btn-primary" onClick={() => setOidcModal(true)}>
-              <Plus size={13} />
+            <button type="button" className="btn btn-primary" onClick={() => setOidcModal(true)}>
+              <Plus size={15} />
               <span>Add OIDC Provider</span>
             </button>
           )}
           {tab === 'audit' && (
             <button
               type="button"
-              className="btn btn-sm btn-primary"
+              className="btn btn-primary"
               onClick={handleVerifyAudit}
               disabled={verifying}
             >
-              <ShieldCheck size={13} />
+              <ShieldCheck size={15} />
               <span>{verifying ? 'Verifying…' : 'Verify Hash Chain'}</span>
             </button>
           )}
         </div>
       </div>
 
-      {/* Tab 1: Users & RBAC (Side-by-Side Split on Desktop) */}
+      {/* Clean Tab Bar */}
+      <div className="flex items-center gap-1 overflow-x-auto" style={{ borderBottom: '1px solid var(--border)' }}>
+        {[
+          { id: 'users' as const, label: `Users & RBAC (${users.length})`, icon: <Users size={15} /> },
+          { id: 'tokens' as const, label: `Service API Tokens (${tokens.length})`, icon: <Key size={15} /> },
+          { id: 'oidc' as const, label: `OIDC / SSO (${oidcProviders.length})`, icon: <Globe size={15} /> },
+          { id: 'audit' as const, label: `Admin Audit Log (${audit.length})`, icon: <FileSearch size={15} /> },
+        ].map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setTab(t.id)}
+            className="flex items-center gap-2 px-3.5 py-2.5 text-sm font-medium bg-transparent border-0 cursor-pointer whitespace-nowrap transition-colors"
+            style={{
+              color: tab === t.id ? 'var(--text-primary)' : 'var(--text-muted)',
+              borderBottom: `2px solid ${tab === t.id ? 'var(--accent)' : 'transparent'}`,
+              marginBottom: -1,
+            }}
+          >
+            {t.icon}
+            <span>{t.label}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* Tab 1: Users & RBAC */}
       {tab === 'users' && (
-        <div className="grid grid-cols-1 xl:grid-cols-12 gap-3.5 items-start">
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
           <div className="surface overflow-hidden xl:col-span-8">
             <div className="overflow-x-auto">
-              <table className="swiss-table text-xs">
+              <table className="swiss-table">
                 <thead>
                   <tr>
                     <th>User</th>
@@ -256,7 +261,7 @@ export function AccessAuditPage({
                     <tr key={u.user.id}>
                       <td className="whitespace-nowrap">
                         <div className="font-semibold">{u.user.display_name}</div>
-                        <div className="mono text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                        <div className="mono text-xs" style={{ color: 'var(--text-muted)' }}>
                           {u.user.email}
                         </div>
                       </td>
@@ -264,7 +269,7 @@ export function AccessAuditPage({
                         <span className="badge mono">{u.user.auth_provider}</span>
                       </td>
                       <td>
-                        <div className="flex flex-wrap gap-1">
+                        <div className="flex flex-wrap gap-1.5">
                           {u.bindings.map((b) => (
                             <span key={b.id} className="badge badge-accent mono">
                               {b.role}
@@ -273,7 +278,7 @@ export function AccessAuditPage({
                           ))}
                         </div>
                       </td>
-                      <td className="whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                      <td className="text-xs whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
                         {formatRelativeTime(u.user.created_at)}
                       </td>
                     </tr>
@@ -285,21 +290,21 @@ export function AccessAuditPage({
 
           <div className="surface overflow-hidden xl:col-span-4">
             <div
-              className="px-3.5 py-2 flex items-center gap-1.5 text-xs font-semibold"
-              style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-sidebar)' }}
+              className="px-4 py-3 flex items-center gap-2 text-sm font-semibold"
+              style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-canvas)' }}
             >
-              <Shield size={13} style={{ color: 'var(--text-muted)' }} />
+              <Shield size={15} style={{ color: 'var(--text-muted)' }} />
               <span>Built-In RBAC Roles</span>
             </div>
-            <div className="p-2.5 space-y-1.5 text-xs">
+            <div className="p-3 space-y-2">
               {me.roles_catalog.map((r) => (
                 <div
                   key={r.role}
-                  className="px-2.5 py-2 rounded-md"
-                  style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border-light)' }}
+                  className="px-3 py-2.5 rounded-lg"
+                  style={{ background: 'var(--bg-canvas)', border: '1px solid var(--border-light)' }}
                 >
-                  <div className="mono font-semibold text-[11.5px]">{r.role}</div>
-                  <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                  <div className="mono font-semibold text-sm">{r.role}</div>
+                  <div className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
                     {r.description}
                   </div>
                 </div>
@@ -313,12 +318,12 @@ export function AccessAuditPage({
       {tab === 'tokens' && (
         <div className="surface overflow-hidden">
           {tokens.length === 0 ? (
-            <div className="p-10 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
+            <div className="p-12 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
               No service API tokens minted yet. Create a scoped <code>shunt_ct_…</code> bearer token for Terraform or CI/CD.
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="swiss-table text-xs">
+              <table className="swiss-table">
                 <thead>
                   <tr>
                     <th>Name</th>
@@ -337,7 +342,7 @@ export function AccessAuditPage({
                       <td className="whitespace-nowrap">
                         <span className="badge badge-accent mono">{t.role}</span>
                       </td>
-                      <td className="whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                      <td className="text-xs whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
                         {t.last_used_at ? formatRelativeTime(t.last_used_at) : 'never'}
                       </td>
                       <td className="whitespace-nowrap">
@@ -371,12 +376,12 @@ export function AccessAuditPage({
       {tab === 'oidc' && (
         <div className="surface overflow-hidden">
           {oidcProviders.length === 0 ? (
-            <div className="p-10 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
+            <div className="p-12 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
               No OIDC/SSO providers configured (Okta, Google Workspace, Entra ID, GitHub, Keycloak). Local authentication is active.
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="swiss-table text-xs">
+              <table className="swiss-table">
                 <thead>
                   <tr>
                     <th>Provider</th>
@@ -391,17 +396,17 @@ export function AccessAuditPage({
                     <tr key={p.id}>
                       <td className="whitespace-nowrap">
                         <div className="font-semibold">{p.display_name}</div>
-                        <div className="mono text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                        <div className="mono text-xs" style={{ color: 'var(--text-muted)' }}>
                           {p.slug}
                         </div>
                       </td>
-                      <td className="mono text-[11px]">{p.issuer_url}</td>
-                      <td className="mono text-[11px]">{p.client_id}</td>
+                      <td className="mono text-[13px]">{p.issuer_url}</td>
+                      <td className="mono text-[13px]">{p.client_id}</td>
                       <td className="mono whitespace-nowrap">{p.group_claim}</td>
                       <td className="text-right whitespace-nowrap">
                         <button
                           type="button"
-                          className="btn-ghost p-1 rounded cursor-pointer border-0"
+                          className="btn-ghost p-1.5 rounded-md cursor-pointer border-0"
                           style={{ color: 'var(--danger)' }}
                           onClick={async () => {
                             await api.deleteOidcProvider(org.slug, p.slug);
@@ -409,7 +414,7 @@ export function AccessAuditPage({
                             loadAll();
                           }}
                         >
-                          <Trash2 size={13} />
+                          <Trash2 size={15} />
                         </button>
                       </td>
                     </tr>
@@ -423,17 +428,17 @@ export function AccessAuditPage({
 
       {/* Tab 4: Hash-Chained Admin Audit Log */}
       {tab === 'audit' && (
-        <div className="space-y-3">
+        <div className="space-y-4">
           {verification && (
             <div
-              className="surface px-3.5 py-2.5 flex items-center gap-2.5 text-xs"
+              className="surface px-4 py-3 flex items-center gap-3 text-sm"
               style={{
                 background: verification.valid ? 'var(--ok-soft)' : 'var(--danger-soft)',
                 borderColor: verification.valid ? 'var(--ok-border)' : 'var(--danger-border)',
                 color: verification.valid ? 'var(--ok)' : 'var(--danger)',
               }}
             >
-              {verification.valid ? <CheckCircle2 size={15} /> : <AlertTriangle size={15} />}
+              {verification.valid ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}
               <span>
                 <strong>
                   {verification.valid
@@ -447,7 +452,7 @@ export function AccessAuditPage({
 
           <div className="surface overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="swiss-table text-xs">
+              <table className="swiss-table">
                 <thead>
                   <tr>
                     <th>Seq</th>
@@ -465,16 +470,16 @@ export function AccessAuditPage({
                       <td className="whitespace-nowrap">
                         <span className="badge mono">{a.action}</span>
                       </td>
-                      <td className="mono whitespace-nowrap">
+                      <td className="mono text-[13px] whitespace-nowrap">
                         {a.resource_type}/{a.resource_id}
                       </td>
                       <td className="whitespace-nowrap" style={{ color: 'var(--text-secondary)' }}>
                         {a.actor_id}
                       </td>
-                      <td className="mono text-[11px] whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                      <td className="mono text-xs whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
                         {a.entry_hash.slice(0, 14)}…
                       </td>
-                      <td className="whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                      <td className="text-xs whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
                         {formatRelativeTime(a.ts)}
                       </td>
                     </tr>
@@ -492,13 +497,13 @@ export function AccessAuditPage({
         onClose={() => setUserModal(false)}
         title={`Add user to ${org.name}`}
       >
-        <form onSubmit={handleCreateUser} className="space-y-3.5">
+        <form onSubmit={handleCreateUser} className="space-y-4">
           <div>
-            <label className="block text-xs font-medium mb-1">Full Name</label>
+            <label className="block text-sm font-medium mb-1.5">Full Name</label>
             <input className="input-base" value={uName} onChange={(e) => setUName(e.target.value)} required />
           </div>
           <div>
-            <label className="block text-xs font-medium mb-1">Email</label>
+            <label className="block text-sm font-medium mb-1.5">Email</label>
             <input
               className="input-base"
               type="email"
@@ -508,7 +513,7 @@ export function AccessAuditPage({
             />
           </div>
           <div>
-            <label className="block text-xs font-medium mb-1">Initial Password (8+ chars)</label>
+            <label className="block text-sm font-medium mb-1.5">Initial Password (8+ chars)</label>
             <input
               className="input-base"
               type="password"
@@ -519,7 +524,7 @@ export function AccessAuditPage({
             />
           </div>
           <div>
-            <label className="block text-xs font-medium mb-1">RBAC Role</label>
+            <label className="block text-sm font-medium mb-1.5">RBAC Role</label>
             <select
               className="input-base"
               value={uRole}
@@ -532,7 +537,7 @@ export function AccessAuditPage({
               ))}
             </select>
           </div>
-          <div className="flex justify-end gap-2 pt-2">
+          <div className="flex justify-end gap-2.5 pt-2">
             <button type="button" className="btn" onClick={() => setUserModal(false)}>
               Cancel
             </button>
@@ -554,9 +559,9 @@ export function AccessAuditPage({
         subtitle="For CI/CD pipelines, Terraform, and programmatic control-plane automation."
       >
         {!createdApiToken ? (
-          <form onSubmit={handleCreateApiToken} className="space-y-3.5">
+          <form onSubmit={handleCreateApiToken} className="space-y-4">
             <div>
-              <label className="block text-xs font-medium mb-1">Token Name</label>
+              <label className="block text-sm font-medium mb-1.5">Token Name</label>
               <input
                 className="input-base"
                 value={tName}
@@ -565,9 +570,9 @@ export function AccessAuditPage({
                 required
               />
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-3.5">
               <div>
-                <label className="block text-xs font-medium mb-1">Role</label>
+                <label className="block text-sm font-medium mb-1.5">Role</label>
                 <select
                   className="input-base"
                   value={tRole}
@@ -581,7 +586,7 @@ export function AccessAuditPage({
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-medium mb-1">Expires (days, 0 = never)</label>
+                <label className="block text-sm font-medium mb-1.5">Expires (days, 0 = never)</label>
                 <input
                   className="input-base mono"
                   type="number"
@@ -590,7 +595,7 @@ export function AccessAuditPage({
                 />
               </div>
             </div>
-            <div className="flex justify-end gap-2 pt-2">
+            <div className="flex justify-end gap-2.5 pt-2">
               <button type="button" className="btn" onClick={() => setTokenModal(false)}>
                 Cancel
               </button>
@@ -602,7 +607,7 @@ export function AccessAuditPage({
         ) : (
           <div className="space-y-4">
             <div
-              className="p-3 rounded-md text-xs"
+              className="p-3.5 rounded-lg text-sm"
               style={{
                 background: 'var(--ok-soft)',
                 border: '1px solid var(--ok-border)',
@@ -619,7 +624,7 @@ export function AccessAuditPage({
               <div className="text-xs font-medium mb-1" style={{ color: 'var(--text-muted)' }}>
                 Example usage
               </div>
-              <pre className="code-block m-0 text-[11px]">
+              <pre className="code-block m-0 text-xs">
                 {`curl -H "Authorization: Bearer ${createdApiToken.plaintext_token}" \\\n  ${window.location.origin}/api/v1/orgs/${org.slug}/clusters`}
               </pre>
             </div>
@@ -646,19 +651,19 @@ export function AccessAuditPage({
         title="Configure OIDC / SSO Provider"
         subtitle="Authorization Code + PKCE (S256)"
       >
-        <form onSubmit={handleSaveOidc} className="space-y-3.5">
-          <div className="grid grid-cols-2 gap-3">
+        <form onSubmit={handleSaveOidc} className="space-y-4">
+          <div className="grid grid-cols-2 gap-3.5">
             <div>
-              <label className="block text-xs font-medium mb-1">Slug</label>
+              <label className="block text-sm font-medium mb-1.5">Slug</label>
               <input
-                className="input-base mono text-xs"
+                className="input-base mono"
                 value={oSlug}
                 onChange={(e) => setOSlug(slugify(e.target.value))}
                 required
               />
             </div>
             <div>
-              <label className="block text-xs font-medium mb-1">Display Name</label>
+              <label className="block text-sm font-medium mb-1.5">Display Name</label>
               <input
                 className="input-base"
                 value={oDisplayName}
@@ -668,35 +673,35 @@ export function AccessAuditPage({
             </div>
           </div>
           <div>
-            <label className="block text-xs font-medium mb-1">Issuer Discovery Base URL</label>
+            <label className="block text-sm font-medium mb-1.5">Issuer Discovery Base URL</label>
             <input
-              className="input-base mono text-xs"
+              className="input-base mono"
               value={oIssuer}
               onChange={(e) => setOIssuer(e.target.value)}
               placeholder="https://acme.okta.com/oauth2/default"
               required
             />
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 gap-3.5">
             <div>
-              <label className="block text-xs font-medium mb-1">Client ID</label>
+              <label className="block text-sm font-medium mb-1.5">Client ID</label>
               <input
-                className="input-base mono text-xs"
+                className="input-base mono"
                 value={oClientId}
                 onChange={(e) => setOClientId(e.target.value)}
                 required
               />
             </div>
             <div>
-              <label className="block text-xs font-medium mb-1">Groups Claim</label>
+              <label className="block text-sm font-medium mb-1.5">Groups Claim</label>
               <input
-                className="input-base mono text-xs"
+                className="input-base mono"
                 value={oGroupClaim}
                 onChange={(e) => setOGroupClaim(e.target.value)}
               />
             </div>
           </div>
-          <div className="flex justify-end gap-2 pt-2">
+          <div className="flex justify-end gap-2.5 pt-2">
             <button type="button" className="btn" onClick={() => setOidcModal(false)}>
               Cancel
             </button>
