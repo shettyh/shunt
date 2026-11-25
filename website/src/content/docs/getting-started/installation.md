@@ -1,13 +1,51 @@
 ---
 title: Installation
-description: Install the Shunt single-binary gateway via crates.io, GitHub Releases, Docker, or from source.
+description: Install the Shunt single-binary gateway via curl, Homebrew, GitHub Releases, Cargo, Docker, or from source.
 ---
 
 Shunt ships as a **single statically linked binary** (`shunt`) with all first-party plugin packs (`shunt-plugins`, `shunt-ai`, `shunt-mcp`) and the optional read-only Admin Inspector UI compiled in—zero runtime dependencies, no database, and no sidecars required.
 
+## Quick Install Script (macOS & Linux)
+
+Download the latest prebuilt release binary for your OS and architecture and verify its SHA-256 checksum against `SHA256SUMS.txt`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shettyh/shunt/main/install.sh | sh
+```
+
+By default, `shunt` is installed to `~/.local/bin/shunt` (using static `musl` builds on Linux). You can customize the version, install directory, or Linux libc variant:
+
+```bash
+# Pin a specific version and custom install directory
+curl -fsSL https://raw.githubusercontent.com/shettyh/shunt/main/install.sh | \
+  SHUNT_VERSION=v0.3.0 SHUNT_INSTALL_DIR=/usr/local/bin sh
+
+# Or pass flags directly
+curl -fsSL https://raw.githubusercontent.com/shettyh/shunt/main/install.sh | \
+  sh -s -- --version v0.3.0 --dir "$HOME/.local/bin"
+
+# Linux: opt into glibc instead of the default static musl build
+curl -fsSL https://raw.githubusercontent.com/shettyh/shunt/main/install.sh | \
+  SHUNT_LIBC=gnu sh
+```
+
+## Homebrew (macOS & Linux)
+
+Install prebuilt binaries via the official tap (Apple Silicon, Intel macOS, Linux `arm64`, and Linux `x86_64`):
+
+```bash
+brew install shettyh/tap/shunt
+```
+
+To upgrade later:
+
+```bash
+brew upgrade shunt
+```
+
 ## Prebuilt Binaries (GitHub Releases)
 
-Download the latest archive for your platform from [GitHub Releases](https://github.com/shettyh/shunt/releases). Available targets:
+Download an archive directly from [GitHub Releases](https://github.com/shettyh/shunt/releases). Available targets:
 
 | Platform | Architecture | Archive |
 | --- | --- | --- |
@@ -20,8 +58,8 @@ Every release includes `SHA256SUMS.txt` and GitHub build provenance attestations
 
 ```bash
 # Example: macOS Apple Silicon
-tar -xzf shunt-v0.1.2-aarch64-apple-darwin.tar.gz
-sudo mv shunt-v0.1.2-aarch64-apple-darwin/shunt /usr/local/bin/shunt
+tar -xzf shunt-v0.3.0-aarch64-apple-darwin.tar.gz
+sudo mv shunt-v0.3.0-aarch64-apple-darwin/shunt /usr/local/bin/shunt
 shunt --version
 ```
 

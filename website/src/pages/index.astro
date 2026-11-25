@@ -82,10 +82,18 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, '');
                 GitHub
               </a>
             </div>
-            <div class="install-line mono">
-              <span class="prompt">$</span>
-              <code id="install-text">cargo install shunt-cli</code>
-              <button id="copy-install" type="button" class="copy-quiet">copy</button>
+            <div class="install-box">
+              <div class="install-tabs" role="tablist" aria-label="Install method">
+                <button class="install-tab active" data-install="curl" role="tab" aria-selected="true" type="button">curl</button>
+                <button class="install-tab" data-install="brew" role="tab" aria-selected="false" type="button">Homebrew</button>
+                <button class="install-tab" data-install="cargo" role="tab" aria-selected="false" type="button">Cargo</button>
+                <button class="install-tab" data-install="docker" role="tab" aria-selected="false" type="button">Docker</button>
+              </div>
+              <div class="install-line mono">
+                <span class="prompt">$</span>
+                <code id="install-text">curl -fsSL https://raw.githubusercontent.com/shettyh/shunt/main/install.sh | sh</code>
+                <button id="copy-install" type="button" class="copy-quiet">copy</button>
+              </div>
             </div>
           </div>
 
@@ -342,11 +350,32 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, '');
         localStorage.setItem('starlight-theme', next);
       });
 
-      // Copy install command
+      // Install command tabs & copy
+      const INSTALL_CMDS = {
+        curl: 'curl -fsSL https://raw.githubusercontent.com/shettyh/shunt/main/install.sh | sh',
+        brew: 'brew install shettyh/tap/shunt',
+        cargo: 'cargo install shunt-cli',
+        docker: 'docker run --rm -p 8080:8080 ghcr.io/shettyh/shunt:latest',
+      };
+      let activeInstall = 'curl';
+      const installText = document.getElementById('install-text');
+      document.querySelectorAll('.install-tab').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.install-tab').forEach((b) => {
+            b.classList.remove('active');
+            b.setAttribute('aria-selected', 'false');
+          });
+          btn.classList.add('active');
+          btn.setAttribute('aria-selected', 'true');
+          activeInstall = btn.getAttribute('data-install') || 'curl';
+          if (installText) installText.textContent = INSTALL_CMDS[activeInstall];
+        });
+      });
+
       const copyInstall = document.getElementById('copy-install');
       copyInstall?.addEventListener('click', async () => {
         try {
-          await navigator.clipboard.writeText('cargo install shunt-cli');
+          await navigator.clipboard.writeText(INSTALL_CMDS[activeInstall]);
           copyInstall.textContent = 'copied';
           setTimeout(() => (copyInstall.textContent = 'copy'), 1500);
         } catch {}
@@ -774,6 +803,10 @@ window_secs = 60`,
         align-items: center;
       }
 
+      .hero-copy {
+        min-width: 0;
+      }
+
       .hero h1 {
         font-family: var(--font-serif);
         font-weight: 500;
@@ -844,17 +877,61 @@ window_secs = 60`,
         border-color: var(--text);
       }
 
-      .install-line {
+      .install-box {
         margin-top: 24px;
-        display: inline-flex;
+        max-width: 100%;
+      }
+
+      .install-tabs {
+        display: flex;
+        gap: 14px;
+        margin-bottom: 8px;
+      }
+
+      .install-tab {
+        border: none;
+        background: transparent;
+        padding: 0 0 4px;
+        border-bottom: 1.5px solid transparent;
+        font-family: var(--font-sans);
+        font-size: 0.78rem;
+        font-weight: 500;
+        color: var(--text-3);
+        cursor: pointer;
+      }
+
+      .install-tab:hover {
+        color: var(--text);
+      }
+
+      .install-tab.active {
+        color: var(--text);
+        border-bottom-color: var(--text);
+      }
+
+      .install-line {
+        display: flex;
         align-items: center;
         gap: 10px;
+        max-width: 100%;
         padding: 8px 12px;
         border-radius: 7px;
         border: 1px solid var(--border);
         background: var(--bg-code);
-        font-size: 0.83rem;
+        font-size: 0.81rem;
         color: var(--text);
+      }
+
+      .install-line code {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow-x: auto;
+        white-space: nowrap;
+        scrollbar-width: none;
+      }
+
+      .install-line code::-webkit-scrollbar {
+        display: none;
       }
 
       .prompt {

@@ -3,8 +3,8 @@ name: Release
 # Normal merges to `main` open/update a Release Please PR based on conventional
 # commits. Merging that PR creates a draft GitHub Release + tag, builds all
 # cross-platform binaries and the multi-arch GHCR Docker image, publishes the
-# GitHub Release once all builds succeed, and publishes workspace crates to
-# crates.io in dependency order.
+# GitHub Release once all builds succeed, updates `shettyh/homebrew-tap`, and
+# publishes workspace crates to crates.io in dependency order.
 on:
   push:
     branches: [main]
@@ -330,6 +330,67 @@ jobs:
             gh release edit "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --title "Shunt $TAG_NAME" --draft=false --prerelease
           else
             gh release edit "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --title "Shunt $TAG_NAME" --draft=false --latest
+          fi
+
+  update-homebrew:
+    name: Update Homebrew Tap
+    needs: [release_please, publish-release]
+    if: needs.release_please.outputs.should_publish == 'true' && needs.release_please.outputs.is_prerelease != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check Homebrew tap token
+        id: tap_auth
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -z "${HOMEBREW_TAP_TOKEN:-}" ]]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN secret is not set; skipping automatic shettyh/homebrew-tap Formula update."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.tap_auth.outputs.enabled == 'true'
+        with:
+          ref: ${{ needs.release_please.outputs.checkout_ref }}
+
+      - name: Checkout shettyh/homebrew-tap
+        if: steps.tap_auth.outputs.enabled == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: shettyh/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update Formula/shunt.rb
+        if: steps.tap_auth.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.release_please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          sums_dir="$RUNNER_TEMP/shunt-checksums"
+          mkdir -p "$sums_dir"
+          gh release download "$TAG_NAME" --repo "$GITHUB_REPOSITORY" -p SHA256SUMS.txt -D "$sums_dir"
+
+          python3 scripts/render-homebrew-formula.py \
+            --tag "$TAG_NAME" \
+            --checksums "$sums_dir/SHA256SUMS.txt" \
+            --repo "$GITHUB_REPOSITORY" \
+            --output homebrew-tap/Formula/shunt.rb
+
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/shunt.rb
+          if git diff --cached --quiet; then
+            echo "Formula/shunt.rb is already up to date."
+          else
+            git commit -m "Update shunt formula to ${TAG_NAME}"
+            git push
           fi
 
   crates-publish:
