@@ -8,16 +8,34 @@ use shunt_plugin_sdk::{
     ResponseHead, UpstreamRequest,
 };
 
+/// Accepts either a single header value string or a list of values (for multi-value `add`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum HeaderValueOrList {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl HeaderValueOrList {
+    pub(crate) fn into_vec(self) -> Vec<String> {
+        match self {
+            HeaderValueOrList::Single(v) => vec![v],
+            HeaderValueOrList::Multiple(vs) => vs,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 struct HeaderRewriteConfig {
     request_set: HashMap<String, String>,
-    request_add: HashMap<String, String>,
+    request_add: HashMap<String, HeaderValueOrList>,
     request_remove: Vec<String>,
     upstream_set: HashMap<String, String>,
+    upstream_add: HashMap<String, HeaderValueOrList>,
     upstream_remove: Vec<String>,
     response_set: HashMap<String, String>,
-    response_add: HashMap<String, String>,
+    response_add: HashMap<String, HeaderValueOrList>,
     response_remove: Vec<String>,
     /// Optional upstream `Host` header rewrite (e.g. Kubernetes Gateway API `URLRewrite.hostname`).
     upstream_host: Option<String>,
@@ -29,7 +47,7 @@ struct HeaderRewriteConfig {
     path_replace_prefix: Option<String>,
 }
 
-enum HeaderValSpec {
+pub(crate) enum HeaderValSpec {
     Static(HeaderValue),
     Template(String),
 }
@@ -46,21 +64,18 @@ impl HeaderValSpec {
     }
 }
 
-struct HeaderOps {
-    set: Vec<(HeaderName, HeaderValSpec)>,
-    add: Vec<(HeaderName, HeaderValSpec)>,
-    remove: Vec<HeaderName>,
+pub(crate) struct HeaderOps {
+    pub(crate) set: Vec<(HeaderName, HeaderValSpec)>,
+    pub(crate) add: Vec<(HeaderName, HeaderValSpec)>,
+    pub(crate) remove: Vec<HeaderName>,
 }
 
 impl HeaderOps {
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.set.is_empty() && self.add.is_empty() && self.remove.is_empty()
     }
 
-    fn apply(&self, headers: &mut HeaderMap, params: &PathParams) {
-        for name in &self.remove {
-            headers.remove(name);
-        }
+    pub(crate) fn apply(&self, headers: &mut HeaderMap, params: &PathParams) {
         for (name, spec) in &self.set {
             if let Some(val) = spec.resolve(params) {
                 headers.insert(name.clone(), val);
@@ -70,6 +85,9 @@ impl HeaderOps {
             if let Some(val) = spec.resolve(params) {
                 headers.append(name.clone(), val);
             }
+        }
+        for name in &self.remove {
+            headers.remove(name);
         }
     }
 }
@@ -110,7 +128,7 @@ fn expand_path_params(template: &str, params: &PathParams) -> String {
     out
 }
 
-fn compile_pairs(
+pub(crate) fn compile_pairs(
     plugin: &str,
     map: HashMap<String, String>,
 ) -> Result<Vec<(HeaderName, HeaderValSpec)>, PluginBuildError> {
@@ -136,7 +154,37 @@ fn compile_pairs(
     Ok(out)
 }
 
-fn compile_names(plugin: &str, names: Vec<String>) -> Result<Vec<HeaderName>, PluginBuildError> {
+pub(crate) fn compile_multi_pairs(
+    plugin: &str,
+    map: HashMap<String, HeaderValueOrList>,
+) -> Result<Vec<(HeaderName, HeaderValSpec)>, PluginBuildError> {
+    let mut out = Vec::with_capacity(map.len());
+    for (k, vals) in map {
+        let name =
+            HeaderName::from_bytes(k.as_bytes()).map_err(|e| PluginBuildError::BuildFailed {
+                plugin: plugin.to_owned(),
+                message: format!("invalid header name `{k}`: {e}"),
+            })?;
+        for v in vals.into_vec() {
+            let val = HeaderValue::from_str(&v).map_err(|e| PluginBuildError::BuildFailed {
+                plugin: plugin.to_owned(),
+                message: format!("invalid header value for `{k}`: {e}"),
+            })?;
+            let spec = if has_param_placeholder(&v) {
+                HeaderValSpec::Template(v)
+            } else {
+                HeaderValSpec::Static(val)
+            };
+            out.push((name.clone(), spec));
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn compile_names(
+    plugin: &str,
+    names: Vec<String>,
+) -> Result<Vec<HeaderName>, PluginBuildError> {
     names
         .into_iter()
         .map(|k| {
@@ -163,17 +211,17 @@ impl PluginFactory for HeaderRewriteFactory {
         let cfg: HeaderRewriteConfig = config.deserialize(self.name())?;
         let req_ops = HeaderOps {
             set: compile_pairs(self.name(), cfg.request_set)?,
-            add: compile_pairs(self.name(), cfg.request_add)?,
+            add: compile_multi_pairs(self.name(), cfg.request_add)?,
             remove: compile_names(self.name(), cfg.request_remove)?,
         };
         let up_ops = HeaderOps {
             set: compile_pairs(self.name(), cfg.upstream_set)?,
-            add: Vec::new(),
+            add: compile_multi_pairs(self.name(), cfg.upstream_add)?,
             remove: compile_names(self.name(), cfg.upstream_remove)?,
         };
         let res_ops = HeaderOps {
             set: compile_pairs(self.name(), cfg.response_set)?,
-            add: compile_pairs(self.name(), cfg.response_add)?,
+            add: compile_multi_pairs(self.name(), cfg.response_add)?,
             remove: compile_names(self.name(), cfg.response_remove)?,
         };
 

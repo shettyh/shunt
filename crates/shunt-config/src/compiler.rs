@@ -592,11 +592,18 @@ fn compile_resolved_route(ir: &ResolvedRoute<'_>) -> Result<RouteSpec, ConfigErr
         headers.push((name, v.clone()));
     }
 
+    let query_params = ir
+        .query_params
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
     let matcher = RouteMatch {
         hosts: ir.hosts.iter().map(|h| h.to_ascii_lowercase()).collect(),
         path,
         methods,
         headers,
+        query_params,
     };
 
     let mut spec = RouteSpec::new(ir.id.to_owned(), matcher, ir.upstream.clone())

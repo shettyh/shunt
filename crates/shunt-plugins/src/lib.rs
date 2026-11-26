@@ -19,6 +19,7 @@ pub mod otel_trace;
 pub mod rate_limit;
 pub mod redirect;
 pub mod request_id;
+pub mod traffic_split;
 
 use std::sync::Arc;
 
@@ -45,6 +46,7 @@ pub use otel_trace::{OtelTraceFactory, OtelTracePlugin};
 pub use rate_limit::{RateLimitFactory, RateLimitPlugin};
 pub use redirect::{RedirectFactory, RedirectPlugin};
 pub use request_id::{RequestId, RequestIdFactory, RequestIdPlugin};
+pub use traffic_split::{TrafficSplitFactory, TrafficSplitPlugin};
 
 /// Registers all first-party Shunt plugins into `registry`.
 pub fn register_builtin_plugins(registry: &mut PluginRegistry, metrics: Arc<PrometheusMetrics>) {
@@ -58,6 +60,7 @@ pub fn register_builtin_plugins(registry: &mut PluginRegistry, metrics: Arc<Prom
         .register(BodyLimitFactory)
         .register(CompressionFactory)
         .register(RedirectFactory)
+        .register(TrafficSplitFactory)
         .register(RateLimitFactory)
         .register(HeaderRewriteFactory)
         .register(CorsFactory)

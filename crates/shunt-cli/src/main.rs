@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -9,9 +10,9 @@ use shunt_ai::{AiMetrics, inspect_ai_runtime, register_ai_plugins};
 use shunt_config::{
     AdminServer, ConfigProvider, DEFAULT_K8S_CONTROLLER_NAME, FileConfigProvider,
     InspectorCapturePlugin, K8sApiConfigProvider, K8sClientConfig, K8sGatewayOptions,
-    K8sManifestConfigProvider, ReloadController, Severity, SnapshotCompiler, SnapshotInspect,
-    TraceRingBuffer, load_policy_file, start_file_watcher, start_k8s_sync_loop,
-    ui_feature_compiled, verify_bundle,
+    K8sManifestConfigProvider, MultiListenerSupervisor, ReloadController, Severity,
+    SnapshotCompiler, SnapshotInspect, TraceRingBuffer, load_policy_file, start_file_watcher,
+    start_k8s_controller_loop, start_k8s_sync_loop, ui_feature_compiled, verify_bundle,
 };
 use shunt_engine::{DynamicCertResolver, GatewayServer, RuntimeRegistry, TlsListenerConfig};
 use shunt_mcp::{McpMetrics, inspect_mcp_runtime, register_mcp_plugins};
@@ -110,6 +111,9 @@ enum Commands {
         /// Enable live Kubernetes Gateway API sync from cluster API server (in-cluster or `--k8s-api-server`).
         #[arg(long = "k8s-gateway")]
         k8s_gateway: bool,
+        /// Enable full Kubernetes Gateway API `GATEWAY-HTTP` controller mode (multi-listener, `.status` PATCH, per-Gateway Service reconciliation).
+        #[arg(long = "k8s-controller")]
+        k8s_controller: bool,
         /// Explicit Kubernetes API server URL (defaults to in-cluster `KUBERNETES_SERVICE_HOST`).
         #[arg(long = "k8s-api-server")]
         k8s_api_server: Option<String>,
@@ -119,9 +123,21 @@ enum Commands {
         /// Kubernetes GatewayClass controllerName filter.
         #[arg(long = "k8s-controller-name", default_value = DEFAULT_K8S_CONTROLLER_NAME)]
         k8s_controller_name: String,
-        /// Poll interval in milliseconds for live `--k8s-gateway` sync (default: 5000).
-        #[arg(long = "k8s-poll-interval-ms", default_value_t = 5_000)]
-        k8s_poll_interval_ms: u64,
+        /// Kubernetes Service type for managed per-Gateway Services (`ClusterIP`, `LoadBalancer`, `NodePort`).
+        #[arg(long = "k8s-service-type", default_value = "ClusterIP")]
+        k8s_service_type: String,
+        /// Comma-separated pod label selector for managed per-Gateway Services (e.g. `app.kubernetes.io/name=shunt`).
+        #[arg(
+            long = "k8s-pod-selector",
+            default_value = "app.kubernetes.io/name=shunt"
+        )]
+        k8s_pod_selector: String,
+        /// Internal pod port range `<start>-<end>` for multi-Gateway listener isolation in `--k8s-controller` mode.
+        #[arg(long = "k8s-port-range", default_value = "10080-19999")]
+        k8s_port_range: String,
+        /// Poll interval in milliseconds for live `--k8s-gateway` / `--k8s-controller` sync (default: 5000, or 1000 in controller mode).
+        #[arg(long = "k8s-poll-interval-ms")]
+        k8s_poll_interval_ms: Option<u64>,
         /// Gateway listener address override when using `--k8s-manifest` or `--k8s-gateway`.
         #[arg(long = "listen", default_value = "0.0.0.0:8080")]
         listen: String,
@@ -217,17 +233,56 @@ async fn main() -> ExitCode {
             ui,
             k8s_manifest,
             k8s_gateway,
+            k8s_controller,
             k8s_api_server,
             k8s_namespace,
             k8s_controller_name,
+            k8s_service_type,
+            k8s_pod_selector,
+            k8s_port_range,
             k8s_poll_interval_ms,
             listen,
         } => {
             init_tracing("info");
+            if k8s_controller {
+                let pod_selector = match parse_k8s_pod_selector(&k8s_pod_selector) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("error: invalid --k8s-pod-selector: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                let (port_start, port_end) = match parse_port_range(&k8s_port_range) {
+                    Ok(pair) => pair,
+                    Err(msg) => {
+                        eprintln!("error: {msg}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                let opts = K8sGatewayOptions {
+                    controller_name: k8s_controller_name,
+                    namespace: k8s_namespace,
+                    listen,
+                    admin_ui: ui,
+                    write_status: true,
+                    manage_services: true,
+                    service_type: k8s_service_type,
+                    pod_selector,
+                    port_range_start: port_start,
+                    port_range_end: port_end,
+                    ..K8sGatewayOptions::default()
+                };
+                return run_k8s_controller(
+                    k8s_api_server,
+                    k8s_poll_interval_ms.unwrap_or(1_000),
+                    opts,
+                )
+                .await;
+            }
             let source = if k8s_gateway {
                 ServerSource::K8sApi {
                     api_server: k8s_api_server,
-                    poll_interval_ms: k8s_poll_interval_ms,
+                    poll_interval_ms: k8s_poll_interval_ms.unwrap_or(5_000),
                     options: K8sGatewayOptions {
                         controller_name: k8s_controller_name,
                         namespace: k8s_namespace,
@@ -277,6 +332,129 @@ async fn main() -> ExitCode {
     }
 }
 
+fn parse_k8s_pod_selector(raw: &str) -> Result<BTreeMap<String, String>, String> {
+    let mut map = BTreeMap::new();
+    for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (k, v) = entry
+            .split_once('=')
+            .ok_or_else(|| format!("expected `key=value` pair, got `{entry}`"))?;
+        let key = k.trim();
+        let val = v.trim();
+        if key.is_empty() || val.is_empty() {
+            return Err(format!("empty key or value in `{entry}`"));
+        }
+        map.insert(key.to_owned(), val.to_owned());
+    }
+    if map.is_empty() {
+        return Err("pod selector must contain at least one `key=value` label".to_owned());
+    }
+    Ok(map)
+}
+
+fn parse_port_range(raw: &str) -> Result<(u16, u16), String> {
+    let (a, b) = raw
+        .split_once('-')
+        .ok_or_else(|| format!("invalid --k8s-port-range `{raw}` (expected `<start>-<end>`)"))?;
+    let start: u16 = a
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid --k8s-port-range start `{a}`"))?;
+    let end: u16 = b
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid --k8s-port-range end `{b}`"))?;
+    if start == 0 || end == 0 || start > end {
+        return Err(format!(
+            "invalid --k8s-port-range `{raw}`: start must be >= 1 and <= end"
+        ));
+    }
+    Ok((start, end))
+}
+
+async fn run_k8s_controller(
+    api_server: Option<String>,
+    poll_interval_ms: u64,
+    options: K8sGatewayOptions,
+) -> ExitCode {
+    let mut client_cfg = match api_server {
+        Some(url) => K8sClientConfig {
+            api_server: url,
+            bearer_token: std::env::var("K8S_BEARER_TOKEN").ok(),
+            token_path: None,
+            ca_cert_pem: None,
+            insecure_skip_verify: false,
+            request_timeout: Duration::from_secs(10),
+            poll_interval: Duration::from_millis(poll_interval_ms.max(200)),
+        },
+        None => match K8sClientConfig::from_in_cluster() {
+            Ok(mut cfg) => {
+                cfg.poll_interval = Duration::from_millis(poll_interval_ms.max(200));
+                cfg
+            }
+            Err(err) => {
+                eprintln!("error: {err}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    if let Ok(tok) = std::env::var("K8S_BEARER_TOKEN")
+        && !tok.is_empty()
+    {
+        client_cfg.bearer_token = Some(tok);
+    }
+
+    let api_prov = match K8sApiConfigProvider::new(client_cfg, options.clone()) {
+        Ok(p) => Arc::new(p),
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let GatewayRegistries {
+        plugins, runtime, ..
+    } = build_registries();
+    let compiler = Arc::new(SnapshotCompiler::new(plugins, Arc::clone(&runtime)));
+    let supervisor = MultiListenerSupervisor::new(compiler);
+
+    let ctrl_handle = match start_k8s_controller_loop(api_prov, supervisor).await {
+        Ok(h) => h,
+        Err(err) => {
+            eprintln!("error: failed to start Kubernetes Gateway API controller: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    info!(
+        controller_name = %options.controller_name,
+        service_type = %options.service_type,
+        port_range = %format!("{}-{}", options.port_range_start, options.port_range_end),
+        "shunt Kubernetes Gateway API controller ready"
+    );
+
+    wait_for_shutdown_only().await;
+    info!("shutdown signal received; draining Gateway listeners");
+    ctrl_handle.shutdown().await;
+    runtime.flush_telemetry(Duration::from_secs(2)).await;
+    info!("graceful controller shutdown complete");
+    ExitCode::SUCCESS
+}
+
+async fn wait_for_shutdown_only() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
 fn init_tracing(default_filter: &str) {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
@@ -492,6 +670,7 @@ async fn run_server(
                 Some(url) => K8sClientConfig {
                     api_server: url,
                     bearer_token: std::env::var("K8S_BEARER_TOKEN").ok(),
+                    token_path: None,
                     ca_cert_pem: None,
                     insecure_skip_verify: false,
                     request_timeout: Duration::from_secs(10),
