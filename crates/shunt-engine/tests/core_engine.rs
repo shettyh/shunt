@@ -1445,7 +1445,7 @@ async fn websocket_upgrade_bidirectional_tunnel() {
             "ws",
             vec![format!("http://{upstream}")],
         ))
-        .route(RouteSpec::new("ws", RouteMatch::prefix("/ws"), "ws"))
+        .route(RouteSpec::new("ws", RouteMatch::prefix("/ws"), "ws").allow_websockets(true))
         .build(&registry, true)
         .unwrap();
 

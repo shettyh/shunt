@@ -13,21 +13,23 @@ use crate::bearer_auth::AuthSubject;
 struct MtlsAuthConfig {
     /// Reject requests without a verified client certificate (default: `true`).
     require_cert: bool,
-    /// Allowed Subject Common Names (supports exact match or `*` glob, e.g. `*.svc.internal`).
+    /// Allowed Subject Common Names (supports exact match or single-label `*` glob excluding `.`).
     allowed_cns: Vec<String>,
-    /// Allowed SAN DNS names (supports exact match or `*` glob).
+    /// Allowed SAN DNS names (supports exact match or leftmost single-label `*.suffix` wildcard).
     allowed_san_dns: Vec<String>,
-    /// Allowed SAN URIs (supports exact match or `*` glob, e.g. `spiffe://prod/ns/payments/*`).
+    /// Allowed SAN URIs (supports exact match, single-segment `*` excluding `/`, or multi-segment `**`).
     allowed_san_uris: Vec<String>,
     /// Allowed lowercase or uppercase SHA-256 hex fingerprints of the leaf certificate.
     allowed_fingerprints: Vec<String>,
-    /// Optional header injected with Subject CN (or DN fallback). Incoming values are always stripped first.
+    /// Explicitly revoked/denied SHA-256 hex fingerprints (checked before allowlists).
+    denied_fingerprints: Vec<String>,
+    /// Optional header injected with Subject CN (or matched SAN URI / DN fallback). Incoming values are always stripped first.
     subject_header: Option<String>,
     /// Optional header injected with full Subject DN.
     dn_header: Option<String>,
     /// Optional header injected with leaf certificate SHA-256 hex fingerprint.
     fingerprint_header: Option<String>,
-    /// Optional header injected with the first SAN URI (e.g., SPIFFE ID).
+    /// Optional header injected with the matched SAN URI (or first SAN URI when no allowlist is set).
     san_uri_header: Option<String>,
 }
 
@@ -39,6 +41,7 @@ impl Default for MtlsAuthConfig {
             allowed_san_dns: Vec::new(),
             allowed_san_uris: Vec::new(),
             allowed_fingerprints: Vec::new(),
+            denied_fingerprints: Vec::new(),
             subject_header: None,
             dn_header: None,
             fingerprint_header: None,
@@ -74,21 +77,26 @@ impl PluginFactory for MtlsAuthFactory {
                 }
             };
 
-        let allowed_fingerprints: Vec<String> = cfg
-            .allowed_fingerprints
-            .into_iter()
-            .map(|fp| fp.trim().replace(':', "").to_ascii_lowercase())
-            .collect();
-        for fp in &allowed_fingerprints {
-            if fp.len() != 64 || !fp.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err(PluginBuildError::BuildFailed {
-                    plugin: self.name().to_owned(),
-                    message: format!(
-                        "invalid SHA-256 fingerprint `{fp}` (expected 64 hex characters)"
-                    ),
-                });
+        let normalize_fps = |raw: Vec<String>| -> Result<Vec<String>, PluginBuildError> {
+            let fps: Vec<String> = raw
+                .into_iter()
+                .map(|fp| fp.trim().replace(':', "").to_ascii_lowercase())
+                .collect();
+            for fp in &fps {
+                if fp.len() != 64 || !fp.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(PluginBuildError::BuildFailed {
+                        plugin: self.name().to_owned(),
+                        message: format!(
+                            "invalid SHA-256 fingerprint `{fp}` (expected 64 hex characters)"
+                        ),
+                    });
+                }
             }
-        }
+            Ok(fps)
+        };
+
+        let allowed_fingerprints = normalize_fps(cfg.allowed_fingerprints)?;
+        let denied_fingerprints = normalize_fps(cfg.denied_fingerprints)?;
 
         Ok(Arc::new(MtlsAuthPlugin {
             require_cert: cfg.require_cert,
@@ -96,6 +104,7 @@ impl PluginFactory for MtlsAuthFactory {
             allowed_san_dns: cfg.allowed_san_dns,
             allowed_san_uris: cfg.allowed_san_uris,
             allowed_fingerprints,
+            denied_fingerprints,
             subject_header: parse_opt_hdr("subject_header", cfg.subject_header)?,
             dn_header: parse_opt_hdr("dn_header", cfg.dn_header)?,
             fingerprint_header: parse_opt_hdr("fingerprint_header", cfg.fingerprint_header)?,
@@ -110,6 +119,7 @@ pub struct MtlsAuthPlugin {
     allowed_san_dns: Vec<String>,
     allowed_san_uris: Vec<String>,
     allowed_fingerprints: Vec<String>,
+    denied_fingerprints: Vec<String>,
     subject_header: Option<HeaderName>,
     dn_header: Option<HeaderName>,
     fingerprint_header: Option<HeaderName>,
@@ -160,11 +170,22 @@ impl HttpPlugin for MtlsAuthPlugin {
             return HookResult::Ready(Flow::Continue);
         };
 
+        if self
+            .denied_fingerprints
+            .iter()
+            .any(|fp| fp == &cert.sha256_fingerprint)
+        {
+            return HookResult::Ready(Flow::Respond(BufferedResponse::json(
+                StatusCode::FORBIDDEN,
+                r#"{"error":"client_certificate_revoked"}"#,
+            )));
+        }
+
         if !self.allowed_cns.is_empty() {
             let ok = cert
                 .subject_cn
                 .as_deref()
-                .map(|cn| self.allowed_cns.iter().any(|p| wildcard_match(p, cn)))
+                .map(|cn| self.allowed_cns.iter().any(|p| cn_wildcard_match(p, cn)))
                 .unwrap_or(false);
             if !ok {
                 return HookResult::Ready(Flow::Respond(BufferedResponse::json(
@@ -178,7 +199,7 @@ impl HttpPlugin for MtlsAuthPlugin {
             let ok = cert.san_dns.iter().any(|dns| {
                 self.allowed_san_dns
                     .iter()
-                    .any(|p| wildcard_match_ascii_ci(p, dns))
+                    .any(|p| dns_wildcard_match(p, dns))
             });
             if !ok {
                 return HookResult::Ready(Flow::Respond(BufferedResponse::json(
@@ -188,18 +209,26 @@ impl HttpPlugin for MtlsAuthPlugin {
             }
         }
 
-        if !self.allowed_san_uris.is_empty() {
-            let ok = cert
+        let matched_san_uri: Option<&str> = if !self.allowed_san_uris.is_empty() {
+            let found = cert
                 .san_uris
                 .iter()
-                .any(|uri| self.allowed_san_uris.iter().any(|p| wildcard_match(p, uri)));
-            if !ok {
+                .find(|uri| {
+                    self.allowed_san_uris
+                        .iter()
+                        .any(|p| uri_wildcard_match(p, uri))
+                })
+                .map(String::as_str);
+            if found.is_none() {
                 return HookResult::Ready(Flow::Respond(BufferedResponse::json(
                     StatusCode::FORBIDDEN,
                     r#"{"error":"client_certificate_san_uri_forbidden"}"#,
                 )));
             }
-        }
+            found
+        } else {
+            cert.san_uris.first().map(String::as_str)
+        };
 
         if !self.allowed_fingerprints.is_empty()
             && !self
@@ -216,7 +245,7 @@ impl HttpPlugin for MtlsAuthPlugin {
         let subject = cert
             .subject_cn
             .clone()
-            .or_else(|| cert.san_uris.first().cloned())
+            .or_else(|| matched_san_uri.map(str::to_owned))
             .unwrap_or_else(|| cert.subject_dn.clone());
 
         if let Some(h) = &self.subject_header
@@ -236,8 +265,8 @@ impl HttpPlugin for MtlsAuthPlugin {
             req.headers.insert(h.clone(), val);
         }
         if let Some(h) = &self.san_uri_header
-            && let Some(first_uri) = cert.san_uris.first()
-            && let Ok(val) = HeaderValue::from_str(first_uri)
+            && let Some(uri) = matched_san_uri
+            && let Ok(val) = HeaderValue::from_str(uri)
         {
             req.headers.insert(h.clone(), val);
         }
@@ -249,15 +278,105 @@ impl HttpPlugin for MtlsAuthPlugin {
     }
 }
 
-fn wildcard_match(pattern: &str, value: &str) -> bool {
-    wildcard_match_bytes(pattern.as_bytes(), value.as_bytes(), false)
+/// Single-label DNS wildcard matching (RFC 6125 / RFC 9525, ASCII case-insensitive):
+/// - Exact match when `pattern` contains no `*`
+/// - Leftmost single-label wildcard `*.suffix` matching a single non-empty DNS label containing no `.`
+pub(crate) fn dns_wildcard_match(pattern: &str, dns: &str) -> bool {
+    if dns.is_empty() || dns.bytes().any(|b| b < 0x20 || b == 0x7F) {
+        return false;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        if suffix.is_empty() || suffix.contains('*') {
+            return false;
+        }
+        if dns.len() <= suffix.len() + 1 {
+            return false;
+        }
+        let split_at = dns.len() - suffix.len() - 1;
+        if dns.as_bytes()[split_at] != b'.' {
+            return false;
+        }
+        let label = &dns[..split_at];
+        let rest = &dns[split_at + 1..];
+        !label.is_empty() && !label.contains('.') && rest.eq_ignore_ascii_case(suffix)
+    } else if pattern.contains('*') {
+        // Non-leading `*` in DNS patterns is disallowed per RFC 6125.
+        false
+    } else {
+        pattern.eq_ignore_ascii_case(dns)
+    }
 }
 
-fn wildcard_match_ascii_ci(pattern: &str, value: &str) -> bool {
-    wildcard_match_bytes(pattern.as_bytes(), value.as_bytes(), true)
+/// Common Name wildcard matching: `*` matches zero or more characters excluding `.`
+/// (and rejects control characters).
+pub(crate) fn cn_wildcard_match(pattern: &str, value: &str) -> bool {
+    if value.bytes().any(|b| b < 0x20 || b == 0x7F) {
+        return false;
+    }
+    wildcard_match_excluding(pattern.as_bytes(), value.as_bytes(), false, b".")
 }
 
-fn wildcard_match_bytes(pat: &[u8], val: &[u8], ascii_ci: bool) -> bool {
+/// URI / SPIFFE wildcard matching:
+/// - Single `*` matches within a single path segment (excludes `/`, `?`, `#`).
+/// - Double `**` matches across multiple path segments (still excludes `?` and `#`).
+pub(crate) fn uri_wildcard_match(pattern: &str, uri: &str) -> bool {
+    if uri.bytes().any(|b| b < 0x20 || b == 0x7F) {
+        return false;
+    }
+    uri_wildcard_match_bytes(pattern.as_bytes(), uri.as_bytes())
+}
+
+fn uri_wildcard_match_bytes(pat: &[u8], val: &[u8]) -> bool {
+    let mut pi = 0usize;
+    let mut vi = 0usize;
+    let mut star_pi: Option<usize> = None;
+    let mut star_is_double = false;
+    let mut star_vi = 0usize;
+
+    while vi < val.len() {
+        if pi < pat.len() && pat[pi] == b'*' {
+            let is_double = pi + 1 < pat.len() && pat[pi + 1] == b'*';
+            star_is_double = is_double;
+            pi += if is_double { 2 } else { 1 };
+            // Collapse redundant consecutive stars of the same class.
+            while pi < pat.len() && pat[pi] == b'*' {
+                star_is_double = true;
+                pi += 1;
+            }
+            star_pi = Some(pi);
+            star_vi = vi;
+            continue;
+        }
+        if pi < pat.len() && pat[pi] == val[vi] {
+            pi += 1;
+            vi += 1;
+            continue;
+        }
+        if let Some(sp) = star_pi {
+            let consumed = val[star_vi];
+            let blocked = if star_is_double {
+                matches!(consumed, b'?' | b'#')
+            } else {
+                matches!(consumed, b'/' | b'?' | b'#')
+            };
+            if blocked {
+                return false;
+            }
+            star_vi += 1;
+            vi = star_vi;
+            pi = sp;
+            continue;
+        }
+        return false;
+    }
+
+    while pi < pat.len() && pat[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pat.len()
+}
+
+fn wildcard_match_excluding(pat: &[u8], val: &[u8], ascii_ci: bool, excluded: &[u8]) -> bool {
     let (mut p, mut v) = (0usize, 0usize);
     let (mut star_idx, mut match_idx) = (None, 0usize);
 
@@ -276,6 +395,9 @@ fn wildcard_match_bytes(pat: &[u8], val: &[u8], ascii_ci: bool) -> bool {
             match_idx = v;
             p += 1;
         } else if let Some(si) = star_idx {
+            if excluded.contains(&val[match_idx]) {
+                return false;
+            }
             p = si + 1;
             match_idx += 1;
             v = match_idx;
@@ -313,7 +435,7 @@ mod tests {
     async fn mtls_auth_enforces_spiffe_and_strips_spoofed_headers() {
         let plugin = build_plugin(json!({
             "require_cert": true,
-            "allowed_san_uris": ["spiffe://prod.cluster/ns/payments/*"],
+            "allowed_san_uris": ["spiffe://prod.cluster/ns/payments/**"],
             "subject_header": "x-client-cn",
             "san_uri_header": "x-client-spiffe",
             "fingerprint_header": "x-client-fp"

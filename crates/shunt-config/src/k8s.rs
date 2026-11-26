@@ -909,6 +909,7 @@ pub fn compile_k8s_gateway_snapshot(
                         response_headers_timeout_ms,
                         idle_chunk_timeout_ms: Some(60_000),
                         allow_websockets: Some(true),
+                        allow_raw_path: None,
                         mirrors: mirrors.clone(),
                         plugins: route_plugins,
                     },
@@ -943,6 +944,7 @@ pub fn compile_k8s_gateway_snapshot(
             listen: opts.listen.clone(),
             drain_timeout_ms: 30_000,
             tls: server_tls,
+            ..ServerConfig::default()
         },
         admin: AdminConfig {
             enabled: opts.admin_enabled,

@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use shunt_plugin_sdk::{
-    BuildContext, Flow, HeaderMap, HeaderName, HeaderValue, HookMask, HookResult, HttpPlugin,
-    PathParams, PluginBuildError, PluginConfig, PluginFactory, RequestCtx, RequestHead,
-    ResponseHead, UpstreamRequest,
+    BufferedResponse, BuildContext, Flow, HeaderMap, HeaderName, HeaderValue, HookMask, HookResult,
+    HttpPlugin, PathParams, PluginBuildError, PluginConfig, PluginFactory, RequestCtx, RequestHead,
+    ResponseHead, StatusCode, UpstreamRequest,
 };
 
 #[derive(Debug, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct HeaderRewriteConfig {
     request_set: HashMap<String, String>,
     request_add: HashMap<String, String>,
@@ -270,22 +270,46 @@ impl HttpPlugin for HeaderRewritePlugin {
             } else {
                 full.clone()
             };
+            if !is_safe_rewritten_path(&expanded_full) {
+                return HookResult::Ready(Flow::Respond(BufferedResponse::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid rewritten path",
+                )));
+            }
             let next_pq = match req.uri.query() {
                 Some(q) => format!("{expanded_full}?{q}"),
                 None => expanded_full,
             };
-            if let Ok(parsed) = next_pq.parse() {
-                req.uri = parsed;
+            match next_pq.parse() {
+                Ok(parsed) => req.uri = parsed,
+                Err(_) => {
+                    return HookResult::Ready(Flow::Respond(BufferedResponse::new(
+                        StatusCode::BAD_REQUEST,
+                        "invalid rewritten path",
+                    )));
+                }
             }
         } else if let Some(rep) = &self.path_replace_prefix {
             let match_pfx = self.path_match_prefix.as_deref().unwrap_or("/");
             let rewritten = crate::redirect::replace_path_prefix(req.uri.path(), match_pfx, rep);
+            if !is_safe_rewritten_path(&rewritten) {
+                return HookResult::Ready(Flow::Respond(BufferedResponse::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid rewritten path",
+                )));
+            }
             let next_pq = match req.uri.query() {
                 Some(q) => format!("{rewritten}?{q}"),
                 None => rewritten,
             };
-            if let Ok(parsed) = next_pq.parse() {
-                req.uri = parsed;
+            match next_pq.parse() {
+                Ok(parsed) => req.uri = parsed,
+                Err(_) => {
+                    return HookResult::Ready(Flow::Respond(BufferedResponse::new(
+                        StatusCode::BAD_REQUEST,
+                        "invalid rewritten path",
+                    )));
+                }
             }
         }
         HookResult::Ready(Flow::Continue)
@@ -298,6 +322,77 @@ impl HttpPlugin for HeaderRewritePlugin {
     ) -> HookResult<'a, Flow> {
         self.res_ops.apply(&mut res.headers, &ctx.path_params);
         HookResult::Ready(Flow::Continue)
+    }
+}
+
+/// Validates a rewritten path so interpolated `{param}` / `{*wildcard}` values cannot inject
+/// traversal segments, query/fragment delimiters, encoded slashes/dots, or control characters.
+fn is_safe_rewritten_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    if bytes.first() != Some(&b'/') {
+        return false;
+    }
+    if bytes
+        .iter()
+        .any(|&b| b < 0x20 || b == 0x7F || matches!(b, b'\\' | b'?' | b'#'))
+    {
+        return false;
+    }
+    shunt_engine_validate_path_segments(bytes)
+}
+
+fn shunt_engine_validate_path_segments(bytes: &[u8]) -> bool {
+    let len = bytes.len();
+    let mut i = 0usize;
+    let mut seg_start = 1usize;
+    while i < len {
+        let b = bytes[i];
+        if b == b'/' {
+            if i > 0 {
+                if bytes[i - 1] == b'/' {
+                    return false;
+                }
+                let seg = &bytes[seg_start..i];
+                if seg == b"." || seg == b".." {
+                    return false;
+                }
+                seg_start = i + 1;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'%' {
+            if i + 2 >= len {
+                return false;
+            }
+            let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) else {
+                return false;
+            };
+            let decoded = (hi << 4) | lo;
+            if matches!(decoded, 0x00..=0x1F | 0x7F | b'.' | b'/' | b'\\') {
+                return false;
+            }
+            i += 3;
+            continue;
+        }
+        i += 1;
+    }
+    if seg_start < len {
+        let last_seg = &bytes[seg_start..len];
+        if last_seg == b"." || last_seg == b".." {
+            return false;
+        }
+    }
+    true
+}
+
+#[inline]
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 

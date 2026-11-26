@@ -5,7 +5,7 @@ use bytes::Bytes;
 use http::Request;
 use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::{TokioExecutor, TokioTimer};
 use shunt_plugin_sdk::{BoxFuture, HttpClient, HttpClientError, HttpRequest, HttpResponse};
 
 use crate::error::CoreError;
@@ -73,6 +73,7 @@ impl CoreHttpClient {
         };
         let connector = ShuntConnector::new(config.connect_timeout, &tls_cfg)?;
         let client = Client::builder(TokioExecutor::new())
+            .pool_timer(TokioTimer::new())
             .pool_idle_timeout(config.pool_idle_timeout)
             .pool_max_idle_per_host(config.pool_max_idle_per_host)
             .build(connector);

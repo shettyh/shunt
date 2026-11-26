@@ -602,6 +602,7 @@ fn compile_resolved_route(ir: &ResolvedRoute<'_>) -> Result<RouteSpec, ConfigErr
     let mut spec = RouteSpec::new(ir.id.to_owned(), matcher, ir.upstream.clone())
         .with_max_attempts(ir.max_attempts)
         .allow_websockets(ir.allow_websockets)
+        .allow_raw_path(ir.allow_raw_path)
         .with_timeouts(TimeoutConfig {
             response_headers_timeout: ir.response_headers_timeout_ms.map(Duration::from_millis),
             idle_chunk_timeout: ir.idle_chunk_timeout_ms.map(Duration::from_millis),

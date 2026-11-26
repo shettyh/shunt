@@ -91,8 +91,14 @@ Controls the public proxy listener, graceful draining, SNI TLS, and mutual TLS (
 
 ```toml
 [server]
-listen = "0.0.0.0:8080"     # Default: "0.0.0.0:8080"
-drain_timeout_ms = 30000    # Default: 30000 (graceful shutdown / reload drain)
+listen = "0.0.0.0:8080"             # Default: "0.0.0.0:8080"
+drain_timeout_ms = 30000            # Default: 30000 (graceful shutdown / reload drain)
+max_connections = 10000             # Default: 10000 (concurrent TCP connection cap)
+tls_handshake_timeout_ms = 10000    # Default: 10000 (downstream TLS handshake timeout)
+header_read_timeout_ms = 30000      # Default: 30000 (HTTP/1.1 Slowloris header timeout)
+request_body_timeout_ms = 60000     # Default: 60000 (buffered request body timeout; 0 disables)
+http2_max_concurrent_streams = 256  # Default: 256
+http2_max_header_list_size = 65536  # Default: 65536 (64 KiB)
 
 [server.tls]
 cert = "certs/server.crt"           # Default PEM cert chain (relative paths resolve from config dir)

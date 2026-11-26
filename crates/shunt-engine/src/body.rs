@@ -216,8 +216,9 @@ where
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         match Pin::new(&mut self.inner).poll_frame(cx) {
             Poll::Ready(Some(Ok(frame))) => {
-                let next_deadline = Instant::now() + self.idle_timeout;
-                self.sleep.as_mut().reset(next_deadline);
+                if let Some(next_deadline) = Instant::now().checked_add(self.idle_timeout) {
+                    self.sleep.as_mut().reset(next_deadline);
+                }
                 Poll::Ready(Some(Ok(frame)))
             }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e.into()))),
@@ -371,26 +372,56 @@ impl Body for ChannelBody {
 /// Buffers an incoming body up to `max_bytes`, failing immediately with
 /// [`CoreError::BodyTooLarge`] if the size hint or streamed bytes exceed `max_bytes`.
 pub async fn collect_body_limited(
+    incoming: hyper::body::Incoming,
+    max_bytes: usize,
+) -> Result<Bytes, CoreError> {
+    collect_body_limited_with_timeouts(incoming, max_bytes, None, None).await
+}
+
+/// Buffers an incoming body up to `max_bytes` while optionally enforcing a per-chunk
+/// `idle_timeout` (`IdleChunkTimeout`) and/or overall `total_timeout` (`RequestBodyTimeout`).
+pub async fn collect_body_limited_with_timeouts(
     mut incoming: hyper::body::Incoming,
     max_bytes: usize,
+    idle_timeout: Option<Duration>,
+    total_timeout: Option<Duration>,
 ) -> Result<Bytes, CoreError> {
     let hint = incoming.size_hint();
     if hint.lower() > max_bytes as u64 {
         return Err(CoreError::BodyTooLarge(max_bytes));
     }
 
-    let initial_cap = (hint.lower() as usize).min(max_bytes).min(64 * 1024);
-    let mut buf = BytesMut::with_capacity(initial_cap);
+    let read_fut = async {
+        let initial_cap = (hint.lower() as usize).min(max_bytes).min(64 * 1024);
+        let mut buf = BytesMut::with_capacity(initial_cap);
 
-    while let Some(frame_res) = incoming.frame().await {
-        let frame = frame_res.map_err(CoreError::Hyper)?;
-        if let Some(data) = frame.data_ref() {
-            if buf.len().saturating_add(data.len()) > max_bytes {
-                return Err(CoreError::BodyTooLarge(max_bytes));
+        loop {
+            let next_frame = match idle_timeout {
+                Some(dur) => match tokio::time::timeout(dur, incoming.frame()).await {
+                    Ok(frame) => frame,
+                    Err(_) => return Err(CoreError::IdleChunkTimeout(dur)),
+                },
+                None => incoming.frame().await,
+            };
+            let Some(frame_res) = next_frame else {
+                break;
+            };
+            let frame = frame_res.map_err(CoreError::Hyper)?;
+            if let Some(data) = frame.data_ref() {
+                if buf.len().saturating_add(data.len()) > max_bytes {
+                    return Err(CoreError::BodyTooLarge(max_bytes));
+                }
+                buf.extend_from_slice(data);
             }
-            buf.extend_from_slice(data);
         }
-    }
 
-    Ok(buf.freeze())
+        Ok(buf.freeze())
+    };
+
+    match total_timeout {
+        Some(dur) => tokio::time::timeout(dur, read_fut)
+            .await
+            .map_err(|_| CoreError::RequestBodyTimeout(dur))?,
+        None => read_fut.await,
+    }
 }

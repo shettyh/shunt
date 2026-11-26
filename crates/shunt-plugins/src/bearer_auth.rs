@@ -18,7 +18,7 @@ enum TokenSpec {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct BearerAuthConfig {
     tokens: Vec<TokenSpec>,
     realm: String,
@@ -30,7 +30,7 @@ impl Default for BearerAuthConfig {
         Self {
             tokens: Vec::new(),
             realm: "shunt".to_owned(),
-            strip_header: false,
+            strip_header: true,
         }
     }
 }
@@ -83,7 +83,8 @@ impl PluginFactory for BearerAuthFactory {
             });
         }
 
-        let www_authenticate = HeaderValue::from_str(&format!("Bearer realm=\"{}\"", cfg.realm))
+        let escaped_realm = cfg.realm.replace('\\', "\\\\").replace('"', "\\\"");
+        let www_authenticate = HeaderValue::from_str(&format!("Bearer realm=\"{escaped_realm}\""))
             .unwrap_or_else(|_| HeaderValue::from_static("Bearer"));
 
         Ok(Arc::new(BearerAuthPlugin {
@@ -134,15 +135,26 @@ impl HttpPlugin for BearerAuthPlugin {
         ctx: &'a mut RequestCtx,
         req: &'a mut RequestHead,
     ) -> HookResult<'a, Flow> {
-        let presented = req
-            .headers
-            .get(header::AUTHORIZATION)
+        let mut auth_headers = req.headers.get_all(header::AUTHORIZATION).iter();
+        let first_auth = auth_headers.next();
+        if auth_headers.next().is_some() {
+            return HookResult::Ready(Flow::Respond(BufferedResponse::json(
+                StatusCode::BAD_REQUEST,
+                r#"{"error":"multiple_authorization_headers"}"#,
+            )));
+        }
+
+        let presented = first_auth
             .and_then(|v| v.to_str().ok())
             .and_then(|s| {
-                s.strip_prefix("Bearer ")
-                    .or_else(|| s.strip_prefix("bearer "))
+                let prefix = s.get(..7)?;
+                if prefix.eq_ignore_ascii_case("bearer ") {
+                    Some(s[7..].trim())
+                } else {
+                    None
+                }
             })
-            .map(str::trim);
+            .filter(|s| !s.is_empty());
 
         if let Some(token) = presented {
             let token_bytes = token.as_bytes();

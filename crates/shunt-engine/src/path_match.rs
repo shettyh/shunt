@@ -7,6 +7,133 @@ use shunt_plugin_sdk::PathParams;
 /// Default compiled regex size limit (1 MiB) to guard against pathological patterns on reload.
 pub const DEFAULT_PATH_REGEX_SIZE_LIMIT: usize = 1024 * 1024;
 
+/// Validates an incoming HTTP request path in a single zero-allocation linear scan.
+///
+/// Rejects ambiguous and path-traversal sequences that cause gateway-vs-backend routing
+/// differentials:
+/// - non-`/` leading byte (except RFC 9110 asterisk-form `"*"`)
+/// - ASCII control characters (`0x00..=0x1F`, `0x7F`) or raw backslashes (`\`)
+/// - empty path segments (`//`)
+/// - dot-segments (`.` or `..`)
+/// - malformed `%` escapes or percent-encoded control bytes (`%00..%1F`, `%7F`),
+///   dots (`%2e`/`%2E`), slashes (`%2f`/`%2F`), or backslashes (`%5c`/`%5C`)
+#[inline]
+pub fn validate_request_path(path: &str) -> Result<(), &'static str> {
+    if path == "*" {
+        return Ok(());
+    }
+    let bytes = path.as_bytes();
+    if bytes.first() != Some(&b'/') {
+        return Err("request path must start with `/`");
+    }
+
+    let len = bytes.len();
+    let mut i = 0usize;
+    let mut seg_start = 1usize;
+
+    while i < len {
+        let b = bytes[i];
+        if b < 0x20 || b == 0x7F {
+            return Err("control character in request path");
+        }
+        if b == b'\\' {
+            return Err("backslash in request path");
+        }
+        if b == b'/' {
+            if i > 0 {
+                if bytes[i - 1] == b'/' {
+                    return Err("empty path segment (`//`) in request path");
+                }
+                let seg = &bytes[seg_start..i];
+                if seg == b"." || seg == b".." {
+                    return Err("dot-segment in request path");
+                }
+                seg_start = i + 1;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'%' {
+            if i + 2 >= len {
+                return Err("malformed percent-encoding in request path");
+            }
+            let Some(hi) = decode_hex_nibble(bytes[i + 1]) else {
+                return Err("malformed percent-encoding in request path");
+            };
+            let Some(lo) = decode_hex_nibble(bytes[i + 2]) else {
+                return Err("malformed percent-encoding in request path");
+            };
+            let decoded = (hi << 4) | lo;
+            match decoded {
+                0x00..=0x1F | 0x7F => return Err("encoded control character in request path"),
+                b'.' => return Err("encoded dot (`%2e`) in request path"),
+                b'/' => return Err("encoded slash (`%2f`) in request path"),
+                b'\\' => return Err("encoded backslash (`%5c`) in request path"),
+                _ => {}
+            }
+            i += 3;
+            continue;
+        }
+        i += 1;
+    }
+
+    if seg_start < len {
+        let last_seg = &bytes[seg_start..len];
+        if last_seg == b"." || last_seg == b".." {
+            return Err("dot-segment in request path");
+        }
+    }
+
+    Ok(())
+}
+
+/// Minimal safety validation applied even on routes with `allow_raw_path = true`
+/// (always rejects NUL bytes and ASCII control characters).
+#[inline]
+pub fn validate_request_path_control_only(path: &str) -> Result<(), &'static str> {
+    if path == "*" {
+        return Ok(());
+    }
+    let bytes = path.as_bytes();
+    if bytes.first() != Some(&b'/') {
+        return Err("request path must start with `/`");
+    }
+    let len = bytes.len();
+    let mut i = 0usize;
+    while i < len {
+        let b = bytes[i];
+        if b < 0x20 || b == 0x7F {
+            return Err("control character in request path");
+        }
+        if b == b'%'
+            && i + 2 < len
+            && let (Some(hi), Some(lo)) = (
+                decode_hex_nibble(bytes[i + 1]),
+                decode_hex_nibble(bytes[i + 2]),
+            )
+        {
+            let decoded = (hi << 4) | lo;
+            if decoded == 0x00 || decoded == b'\r' || decoded == b'\n' {
+                return Err("encoded control character in request path");
+            }
+            i += 3;
+            continue;
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+#[inline]
+fn decode_hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// A single compiled segment of a [`CompiledPathTemplate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemplateSegment {

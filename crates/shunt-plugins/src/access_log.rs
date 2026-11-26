@@ -16,7 +16,7 @@ struct RequestMeta {
 }
 
 #[derive(Debug, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct AccessLogConfig {
     include_timings: bool,
 }

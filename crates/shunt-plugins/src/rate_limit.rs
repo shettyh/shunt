@@ -29,7 +29,7 @@ enum KeyStrategy {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct RateLimitConfig {
     requests_per_second: f64,
     burst: u32,

@@ -394,6 +394,9 @@ fn parse_x509_name(mut body: &[u8]) -> (String, Option<String>) {
             let Some(val_str) = decode_der_string(val_tag, val_bytes) else {
                 continue;
             };
+            if contains_disallowed_x509_control(&val_str) {
+                continue;
+            }
             let attr_name = match oid_bytes {
                 [0x55, 0x04, 0x03] => {
                     if cn.is_none() {
@@ -409,11 +412,35 @@ fn parse_x509_name(mut body: &[u8]) -> (String, Option<String>) {
                 [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x01] => "emailAddress",
                 _ => continue,
             };
-            parts.push(format!("{attr_name}={val_str}"));
+            let escaped = escape_rfc4514_value(&val_str);
+            parts.push(format!("{attr_name}={escaped}"));
         }
     }
 
     (parts.join(","), cn)
+}
+
+fn contains_disallowed_x509_control(s: &str) -> bool {
+    s.bytes().any(|b| b < 0x20 || b == 0x7F)
+}
+
+/// Escapes an X.509 RDN attribute value per RFC 4514 §2.4 so values like `O="Evil,CN=admin"`
+/// cannot forge adjacent DN attributes.
+fn escape_rfc4514_value(val: &str) -> String {
+    let mut out = String::with_capacity(val.len());
+    let chars: Vec<char> = val.chars().collect();
+    for (idx, &ch) in chars.iter().enumerate() {
+        let is_first = idx == 0;
+        let is_last = idx + 1 == chars.len();
+        let needs_escape = matches!(ch, ',' | '+' | '"' | '\\' | '<' | '>' | ';')
+            || (is_first && (ch == ' ' || ch == '#'))
+            || (is_last && ch == ' ');
+        if needs_escape {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn decode_der_string(tag: u8, bytes: &[u8]) -> Option<String> {
@@ -487,6 +514,9 @@ fn parse_x509_extensions(
             let Ok(s) = std::str::from_utf8(gn_val) else {
                 continue;
             };
+            if contains_disallowed_x509_control(s) {
+                continue;
+            }
             match gn_tag {
                 0x81 => san_emails.push(s.to_owned()),
                 0x82 => san_dns.push(s.to_owned()),

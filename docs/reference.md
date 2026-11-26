@@ -14,9 +14,9 @@ Every first-party plugin depends strictly on `shunt-plugin-sdk`—never on `shun
 | --- | --- |
 | `request-id` | Generates or propagates `x-request-id` across request/response headers and `RequestCtx` |
 | `access-log` | Structured `tracing` access logging in `on_complete` |
-| `bearer-auth` | Bearer token verification with subject injection into `RequestCtx` |
+| `bearer-auth` | Bearer token verification with subject injection into `RequestCtx` (`strip_header = true` by default; rejects duplicate `Authorization` headers) |
 | `jwt-auth` | Pure-Rust JWT/JWKS/OIDC verification (`HS*`/`RS*`/`PS*`/`ES*`/`EdDSA`), cached JWKS auto-refresh, scope/claim assertions, and anti-spoofing claim header forwarding |
-| `mtls-auth` | Mutual TLS client certificate authorization (CN, SAN DNS, SPIFFE SAN URI, SHA-256 fingerprint) and verified identity header injection |
+| `mtls-auth` | Mutual TLS client certificate authorization (single-label CN/SAN DNS, segment-aware SPIFFE SAN URI `*`/`**`, SHA-256 allow/deny fingerprints) and verified identity header injection |
 | `ip-filter` | IPv4/IPv6 CIDR allow/deny filtering with trusted-proxy right-to-left `X-Forwarded-For` resolution |
 | `body-limit` | Synchronous `Content-Length` and zero-copy streaming request body size enforcement (`413 Payload Too Large`) |
 | `compression` | Streaming-safe, SSE-aware response compression (`zstd`, `br`, `gzip`, `deflate`) with `Vary` and RFC 9110 `ETag` weakening |
@@ -53,6 +53,14 @@ Every first-party plugin depends strictly on `shunt-plugin-sdk`—never on `shun
 | `mcp-guardrails` | Tool allow/deny policies, approval gates (`x-shunt-approved` / `_meta.approved`), per-tool JSON argument regex/schema rules, outbound PII/secret redaction, inbound indirect prompt-injection & secret scanning (JSON + SSE), and OPA/HTTP policy webhooks |
 | `mcp-rate-limit` | Per-principal RPM & `tools/call` RPM, per-tool quotas, per-session call caps, identical-call agent loop breaker, and RAII `max_parallel_calls` concurrency caps (local or Redis/Valkey) |
 | `mcp-telemetry` | `shunt_mcp_*` Prometheus metrics, OTLP `mcp.*` span enrichment, structured SHA-256 audit logs, and `/api/status` (`"mcp"`) runtime inspection |
+
+---
+
+## Security & Transport Defaults
+
+- **Strict request path validation (default):** `shunt-engine` rejects ambiguous or traversal request paths (`..`, `.`, `//`, `\`, control bytes, malformed `%`, and percent-encoded `%00`–`%1f`/`%7f`/`%2e`/`%2f`/`%5c`) with `400 Bad Request` prior to route matching. Narrowly scoped routes that legitimately require encoded slashes (e.g., `/objects/foo%2Fbar`) can explicitly opt in with `allow_raw_path = true` on `[[routes]]` or `[[route_groups]]`.
+- **WebSockets opt-in (default):** `allow_websockets` defaults to `false` on routes and route groups. Set `allow_websockets = true` explicitly on routes that proxy WebSocket upgrades (such as `/v1/realtime`).
+- **Connection & Slowloris bounds (`[server]`):** `max_connections = 10000`, `tls_handshake_timeout_ms = 10000`, `header_read_timeout_ms = 30000`, `request_body_timeout_ms = 60000`, `http2_max_concurrent_streams = 256`, `http2_max_header_list_size = 65536`.
 
 ---
 

@@ -146,6 +146,18 @@ impl Default for StateConfig {
 pub struct ServerConfig {
     pub listen: String,
     pub drain_timeout_ms: u64,
+    /// Maximum concurrent accepted client TCP connections (default: `10_000`).
+    pub max_connections: usize,
+    /// Downstream TLS handshake timeout in milliseconds (default: `10_000`).
+    pub tls_handshake_timeout_ms: u64,
+    /// HTTP/1.1 request header read timeout in milliseconds (Slowloris guard; default: `30_000`).
+    pub header_read_timeout_ms: u64,
+    /// Maximum time to buffer a request body in milliseconds (`0` disables; default: `60_000`).
+    pub request_body_timeout_ms: u64,
+    /// Maximum concurrent HTTP/2 streams per client connection (default: `256`).
+    pub http2_max_concurrent_streams: u32,
+    /// Maximum HTTP/2 header list size in bytes (default: `65_536`).
+    pub http2_max_header_list_size: u32,
     pub tls: Option<ServerTlsConfig>,
 }
 
@@ -154,7 +166,35 @@ impl Default for ServerConfig {
         Self {
             listen: "0.0.0.0:8080".to_owned(),
             drain_timeout_ms: 30_000,
+            max_connections: shunt_engine::DEFAULT_MAX_CONNECTIONS,
+            tls_handshake_timeout_ms: shunt_engine::DEFAULT_TLS_HANDSHAKE_TIMEOUT.as_millis()
+                as u64,
+            header_read_timeout_ms: shunt_engine::DEFAULT_HEADER_READ_TIMEOUT.as_millis() as u64,
+            request_body_timeout_ms: shunt_engine::pipeline::DEFAULT_REQUEST_BODY_TIMEOUT
+                .as_millis() as u64,
+            http2_max_concurrent_streams: shunt_engine::DEFAULT_HTTP2_MAX_CONCURRENT_STREAMS,
+            http2_max_header_list_size: shunt_engine::DEFAULT_HTTP2_MAX_HEADER_LIST_SIZE,
             tls: None,
+        }
+    }
+}
+
+impl ServerConfig {
+    /// Builds [`shunt_engine::ServerLimits`] from this `[server]` configuration.
+    pub fn server_limits(&self) -> shunt_engine::ServerLimits {
+        shunt_engine::ServerLimits {
+            max_connections: self.max_connections.max(1),
+            tls_handshake_timeout: std::time::Duration::from_millis(
+                self.tls_handshake_timeout_ms.max(1),
+            ),
+            header_read_timeout: std::time::Duration::from_millis(
+                self.header_read_timeout_ms.max(1),
+            ),
+            request_body_timeout: (self.request_body_timeout_ms > 0)
+                .then(|| std::time::Duration::from_millis(self.request_body_timeout_ms)),
+            http2_max_concurrent_streams: self.http2_max_concurrent_streams.max(1),
+            http2_max_header_list_size: self.http2_max_header_list_size.max(1024),
+            ..shunt_engine::ServerLimits::default()
         }
     }
 }
@@ -436,8 +476,10 @@ pub const DEFAULT_ROUTE_MAX_ATTEMPTS: usize = 1;
 pub const DEFAULT_ROUTE_RESPONSE_HEADERS_TIMEOUT_MS: u64 = 30_000;
 /// Default idle chunk timeout in milliseconds when neither route nor group overrides it.
 pub const DEFAULT_ROUTE_IDLE_CHUNK_TIMEOUT_MS: u64 = 60_000;
-/// Default WebSocket upgrade policy when neither route nor group overrides it.
-pub const DEFAULT_ROUTE_ALLOW_WEBSOCKETS: bool = true;
+/// Default WebSocket upgrade policy when neither route nor group overrides it (opt-in).
+pub const DEFAULT_ROUTE_ALLOW_WEBSOCKETS: bool = false;
+/// Default raw/unnormalized request path policy when neither route nor group overrides it (strict).
+pub const DEFAULT_ROUTE_ALLOW_RAW_PATH: bool = false;
 
 /// Reusable compile-time route group defining shared match defaults, execution defaults,
 /// and a shared plugin chain instantiated once per group (`group:<id>:<plugin>`).
@@ -459,6 +501,8 @@ pub struct RouteGroupIr {
     pub response_headers_timeout_ms: Option<u64>,
     pub idle_chunk_timeout_ms: Option<u64>,
     pub allow_websockets: Option<bool>,
+    /// Opt-in to allow ambiguous/encoded-slash paths (`%2f`, `//`, etc.) on routes in this group.
+    pub allow_raw_path: Option<bool>,
     pub mirrors: Vec<RouteMirrorIr>,
     pub plugins: Vec<PluginAttachment>,
 }
@@ -497,6 +541,9 @@ pub struct RouteIr {
     pub idle_chunk_timeout_ms: Option<u64>,
     #[serde(default)]
     pub allow_websockets: Option<bool>,
+    /// Opt-in to allow ambiguous/encoded-slash paths (`%2f`, `//`, etc.) on this route (default: `false`).
+    #[serde(default)]
+    pub allow_raw_path: Option<bool>,
     #[serde(default)]
     pub mirrors: Vec<RouteMirrorIr>,
     #[serde(default)]
@@ -523,6 +570,7 @@ pub struct ResolvedRoute<'a> {
     pub response_headers_timeout_ms: Option<u64>,
     pub idle_chunk_timeout_ms: Option<u64>,
     pub allow_websockets: bool,
+    pub allow_raw_path: bool,
     pub mirrors: Vec<RouteMirrorIr>,
     pub effective_plugins: Vec<&'a PluginAttachment>,
 }
@@ -649,6 +697,10 @@ impl GatewayConfig {
             .allow_websockets
             .or_else(|| group.and_then(|g| g.allow_websockets))
             .unwrap_or(DEFAULT_ROUTE_ALLOW_WEBSOCKETS);
+        let allow_raw_path = route
+            .allow_raw_path
+            .or_else(|| group.and_then(|g| g.allow_raw_path))
+            .unwrap_or(DEFAULT_ROUTE_ALLOW_RAW_PATH);
 
         let mut mirrors = group.map(|g| g.mirrors.clone()).unwrap_or_default();
         mirrors.extend(route.mirrors.iter().cloned());
@@ -677,6 +729,7 @@ impl GatewayConfig {
             response_headers_timeout_ms,
             idle_chunk_timeout_ms,
             allow_websockets,
+            allow_raw_path,
             mirrors,
             effective_plugins,
         })

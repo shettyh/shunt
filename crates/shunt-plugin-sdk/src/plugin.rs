@@ -26,6 +26,12 @@ pub trait HttpPlugin: Send + Sync + 'static {
         None
     }
 
+    /// Optional 4xx status code returned when the engine enforces [`HttpPlugin::max_request_body_bytes`]
+    /// (defaults to `413 Payload Too Large`).
+    fn max_request_body_status_code(&self) -> Option<http::StatusCode> {
+        None
+    }
+
     /// Stage 1: Inspect or mutate incoming request headers, or short-circuit with [`Flow::Respond`].
     fn on_request_headers<'a>(
         &'a self,

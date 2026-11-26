@@ -11,7 +11,7 @@ use shunt_plugin_sdk::{
 struct MatchedCorsOrigin(String);
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct CorsConfig {
     allow_origins: Vec<String>,
     allow_methods: Vec<String>,

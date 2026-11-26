@@ -767,62 +767,92 @@ enum VerifyKeyOutcome {
     UnknownKid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenSource {
+    Header,
+    Cookie,
+    Query,
+}
+
 impl JwtAuthPlugin {
-    fn extract_token(&self, req: &RequestHead) -> Option<String> {
+    fn extract_token(
+        &self,
+        req: &RequestHead,
+    ) -> Result<Option<(String, TokenSource)>, &'static str> {
         if let Some(hdr) = &self.header_name {
-            if let Some(raw) = req.headers.get(hdr).and_then(|v| v.to_str().ok()) {
-                let trimmed = raw.trim();
-                let tok = trimmed
-                    .strip_prefix("Bearer ")
-                    .or_else(|| trimmed.strip_prefix("bearer "))
-                    .unwrap_or(trimmed)
-                    .trim();
-                if !tok.is_empty() {
-                    return Some(tok.to_owned());
+            let mut vals = req.headers.get_all(hdr).iter();
+            if let Some(first) = vals.next() {
+                if vals.next().is_some() {
+                    return Err("multiple_authorization_headers");
+                }
+                if let Ok(raw) = first.to_str() {
+                    let trimmed = raw.trim();
+                    let tok = strip_bearer_prefix(trimmed).unwrap_or(trimmed).trim();
+                    if !tok.is_empty() {
+                        return Ok(Some((tok.to_owned(), TokenSource::Header)));
+                    }
                 }
             }
-        } else if let Some(raw) = req
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            && let Some(tok) = raw
-                .strip_prefix("Bearer ")
-                .or_else(|| raw.strip_prefix("bearer "))
-                .map(str::trim)
-            && !tok.is_empty()
-        {
-            return Some(tok.to_owned());
+        } else {
+            let mut vals = req.headers.get_all(header::AUTHORIZATION).iter();
+            if let Some(first) = vals.next() {
+                if vals.next().is_some() {
+                    return Err("multiple_authorization_headers");
+                }
+                if let Ok(raw) = first.to_str()
+                    && let Some(tok) = strip_bearer_prefix(raw).map(str::trim)
+                    && !tok.is_empty()
+                {
+                    return Ok(Some((tok.to_owned(), TokenSource::Header)));
+                }
+            }
         }
 
         if let Some(cookie_name) = &self.cookie_name {
+            let mut found: Option<String> = None;
             for val in req.headers.get_all(header::COOKIE) {
                 if let Ok(s) = val.to_str() {
                     for pair in s.split(';') {
                         if let Some((k, v)) = pair.trim().split_once('=')
                             && k.trim() == cookie_name
-                            && !v.trim().is_empty()
                         {
-                            return Some(v.trim().to_owned());
+                            let trimmed = v.trim();
+                            if !trimmed.is_empty() {
+                                if found.is_some() {
+                                    return Err("multiple_auth_cookies");
+                                }
+                                found = Some(trimmed.to_owned());
+                            }
                         }
                     }
                 }
+            }
+            if let Some(tok) = found {
+                return Ok(Some((tok, TokenSource::Cookie)));
             }
         }
 
         if let Some(qp) = &self.query_param
             && let Some(query) = req.uri.query()
         {
+            let mut found: Option<String> = None;
             for pair in query.split('&') {
                 if let Some((k, v)) = pair.split_once('=')
                     && k == qp
                     && !v.is_empty()
                 {
-                    return Some(v.to_owned());
+                    if found.is_some() {
+                        return Err("multiple_auth_query_params");
+                    }
+                    found = Some(v.to_owned());
                 }
+            }
+            if let Some(tok) = found {
+                return Ok(Some((tok, TokenSource::Query)));
             }
         }
 
-        None
+        Ok(None)
     }
 
     fn strip_forwarded_claim_headers(&self, req: &mut RequestHead) {
@@ -983,6 +1013,7 @@ impl JwtAuthPlugin {
         ctx: &mut RequestCtx,
         req: &mut RequestHead,
         claims: Map<String, Value>,
+        source: TokenSource,
     ) {
         let jwt_claims = JwtClaims(claims);
         for (claim_path, hdr_name) in &self.forward_claims {
@@ -995,10 +1026,24 @@ impl JwtAuthPlugin {
         }
 
         if self.strip_header {
-            if let Some(hdr) = &self.header_name {
-                req.headers.remove(hdr);
-            } else {
-                req.headers.remove(header::AUTHORIZATION);
+            match source {
+                TokenSource::Header => {
+                    if let Some(hdr) = &self.header_name {
+                        req.headers.remove(hdr);
+                    } else {
+                        req.headers.remove(header::AUTHORIZATION);
+                    }
+                }
+                TokenSource::Cookie => {
+                    if let Some(cookie_name) = &self.cookie_name {
+                        strip_cookie_from_headers(&mut req.headers, cookie_name);
+                    }
+                }
+                TokenSource::Query => {
+                    if let Some(qp) = &self.query_param {
+                        strip_query_param_from_uri(&mut req.uri, qp);
+                    }
+                }
             }
         }
 
@@ -1131,11 +1176,20 @@ impl HttpPlugin for JwtAuthPlugin {
         // Always strip client-supplied claim-forwarding headers before auth.
         self.strip_forwarded_claim_headers(req);
 
-        let Some(token) = self.extract_token(req) else {
-            if self.allow_missing {
-                return HookResult::Ready(Flow::Continue);
+        let (token, token_source) = match self.extract_token(req) {
+            Ok(Some(pair)) => pair,
+            Ok(None) => {
+                if self.allow_missing {
+                    return HookResult::Ready(Flow::Continue);
+                }
+                return HookResult::Ready(Flow::Respond(self.unauthorized("missing_token")));
             }
-            return HookResult::Ready(Flow::Respond(self.unauthorized("missing_token")));
+            Err(code) => {
+                return HookResult::Ready(Flow::Respond(BufferedResponse::json(
+                    StatusCode::BAD_REQUEST,
+                    format!(r#"{{"error":"{code}"}}"#),
+                )));
+            }
         };
 
         let parsed = match parse_jwt_unverified(&token) {
@@ -1152,7 +1206,7 @@ impl HttpPlugin for JwtAuthPlugin {
             return match self.verify_signature_against(&parsed, &[]) {
                 VerifyKeyOutcome::Verified => match self.validate_claims(&parsed.claims) {
                     Ok(()) => {
-                        self.apply_authenticated(ctx, req, parsed.claims);
+                        self.apply_authenticated(ctx, req, parsed.claims, token_source);
                         HookResult::Ready(Flow::Continue)
                     }
                     Err((StatusCode::FORBIDDEN, code)) => {
@@ -1191,7 +1245,7 @@ impl HttpPlugin for JwtAuthPlugin {
                 Some(VerifyKeyOutcome::Verified) => {
                     return match self.validate_claims(&parsed.claims) {
                         Ok(()) => {
-                            self.apply_authenticated(ctx, req, parsed.claims);
+                            self.apply_authenticated(ctx, req, parsed.claims, token_source);
                             HookResult::Ready(Flow::Continue)
                         }
                         Err((StatusCode::FORBIDDEN, code)) => {
@@ -1240,7 +1294,7 @@ impl HttpPlugin for JwtAuthPlugin {
             match self.verify_signature_against(&parsed, &keys) {
                 VerifyKeyOutcome::Verified => match self.validate_claims(&parsed.claims) {
                     Ok(()) => {
-                        self.apply_authenticated(ctx, req, parsed.claims);
+                        self.apply_authenticated(ctx, req, parsed.claims, token_source);
                         Flow::Continue
                     }
                     Err((StatusCode::FORBIDDEN, code)) => Flow::Respond(self.forbidden(code)),
@@ -1252,6 +1306,62 @@ impl HttpPlugin for JwtAuthPlugin {
                 }
             }
         })
+    }
+}
+
+fn strip_bearer_prefix(s: &str) -> Option<&str> {
+    let prefix = s.get(..7)?;
+    if prefix.eq_ignore_ascii_case("bearer ") {
+        Some(&s[7..])
+    } else {
+        None
+    }
+}
+
+fn strip_cookie_from_headers(headers: &mut shunt_plugin_sdk::HeaderMap, cookie_name: &str) {
+    let remaining: Vec<String> = headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|s| s.split(';'))
+        .map(str::trim)
+        .filter(|pair| {
+            !pair.is_empty()
+                && pair
+                    .split_once('=')
+                    .map(|(k, _)| k.trim() != cookie_name)
+                    .unwrap_or(true)
+        })
+        .map(str::to_owned)
+        .collect();
+    headers.remove(header::COOKIE);
+    if !remaining.is_empty()
+        && let Ok(val) = HeaderValue::from_str(&remaining.join("; "))
+    {
+        headers.insert(header::COOKIE, val);
+    }
+}
+
+fn strip_query_param_from_uri(uri: &mut Uri, param: &str) {
+    let Some(query) = uri.query() else {
+        return;
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| {
+            pair.split_once('=')
+                .map(|(k, _)| k != param)
+                .unwrap_or(*pair != param)
+        })
+        .collect();
+    let path = uri.path();
+    let next_pq = if kept.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{path}?{}", kept.join("&"))
+    };
+    if let Ok(parsed) = next_pq.parse() {
+        *uri = parsed;
     }
 }
 

@@ -39,9 +39,11 @@ fuzz_target!(|data: &[u8]| {
     }
 
     if let Ok(uri) = path_str.parse::<Uri>() {
-        let stripped = strip_uri_prefix(&uri, prefix);
-        if uri.path().starts_with('/') {
+        if let Ok(stripped) = strip_uri_prefix(&uri, prefix)
+            && uri.path().starts_with('/')
+        {
             assert!(stripped.path().starts_with('/'));
+            assert!(!stripped.path().starts_with("//"));
         }
 
         if let Ok(req) = Request::builder()

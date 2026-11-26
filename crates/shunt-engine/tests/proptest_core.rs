@@ -78,7 +78,7 @@ proptest! {
             None => path.clone(),
         };
         let uri: Uri = raw_uri.parse().unwrap();
-        let stripped = strip_uri_prefix(&uri, &prefix);
+        let stripped = strip_uri_prefix(&uri, &prefix).unwrap();
 
         prop_assert!(stripped.path().starts_with('/'));
         prop_assert_eq!(stripped.query(), query.as_deref());
