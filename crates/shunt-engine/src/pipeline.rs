@@ -26,16 +26,20 @@ use crate::ws::{handle_websocket_upgrade, is_websocket_upgrade};
 const STREAM_CHANNEL_CAPACITY: usize = 16;
 
 /// Executes a single incoming HTTP request end-to-end against an immutable [`GatewaySnapshot`].
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_request(
     snapshot: Arc<GatewaySnapshot>,
     mut req: Request<hyper::body::Incoming>,
     request_id: u64,
     client_addr: SocketAddr,
+    is_tls: bool,
     tls_sni: Option<String>,
     client_cert: Option<Arc<ClientCertInfo>>,
     trace_enabled: bool,
 ) -> Response<ShuntBody> {
-    let mut ctx = RequestCtx::new(request_id, client_addr, tls_sni).with_client_cert(client_cert);
+    let mut ctx = RequestCtx::new(request_id, client_addr, tls_sni)
+        .with_tls(is_tls)
+        .with_client_cert(client_cert);
     ctx.trace_enabled = trace_enabled;
 
     let Some(route) = snapshot.match_route(&req).cloned() else {

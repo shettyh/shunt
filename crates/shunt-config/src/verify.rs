@@ -713,12 +713,19 @@ pub fn route_subsumes(earlier: &RouteMatch, later: &RouteMatch) -> bool {
         && hosts_subsume(&earlier.hosts, &later.hosts)
         && path_subsumes(&earlier.path, &later.path)
         && headers_subsume(&earlier.headers, &later.headers)
+        && query_params_subsume(&earlier.query_params, &later.query_params)
 }
 
 fn headers_subsume(
     earlier: &[(http::header::HeaderName, String)],
     later: &[(http::header::HeaderName, String)],
 ) -> bool {
+    earlier
+        .iter()
+        .all(|(ek, ev)| later.iter().any(|(lk, lv)| lk == ek && lv == ev))
+}
+
+fn query_params_subsume(earlier: &[(String, String)], later: &[(String, String)]) -> bool {
     earlier
         .iter()
         .all(|(ek, ev)| later.iter().any(|(lk, lv)| lk == ek && lv == ev))

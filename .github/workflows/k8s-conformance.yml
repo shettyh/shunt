@@ -1,0 +1,102 @@
+name: K8s Gateway API Conformance
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/shunt-config/src/k8s/**'
+      - 'crates/shunt-config/tests/k8s_gateway_api.rs'
+      - 'crates/shunt-engine/**'
+      - 'crates/shunt-plugins/src/header_rewrite.rs'
+      - 'crates/shunt-plugins/src/redirect.rs'
+      - 'crates/shunt-plugins/src/traffic_split.rs'
+      - 'crates/shunt-cli/src/main.rs'
+      - 'deploy/k8s/**'
+      - 'tests/k8s-conformance/**'
+      - '.github/workflows/k8s-conformance.yml'
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  GATEWAY_API_VERSION: v1.2.1
+
+jobs:
+  gateway-http-conformance:
+    name: GATEWAY-HTTP Conformance (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build Shunt container image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: shunt:conformance
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build official SIG-Network conformance runner image
+        run: |
+          docker build -t shunt-conformance-runner:local tests/k8s-conformance
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: shunt-conformance
+          wait: 120s
+
+      - name: Load images into kind
+        run: |
+          kind load docker-image shunt:conformance --name shunt-conformance
+          kind load docker-image shunt-conformance-runner:local --name shunt-conformance
+
+      - name: Install Kubernetes Gateway API CRDs (${{ env.GATEWAY_API_VERSION }})
+        run: |
+          kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
+          kubectl wait --for=condition=Established --timeout=60s \
+            crd/gatewayclasses.gateway.networking.k8s.io \
+            crd/gateways.gateway.networking.k8s.io \
+            crd/httproutes.gateway.networking.k8s.io \
+            crd/referencegrants.gateway.networking.k8s.io
+
+      - name: Deploy Shunt Gateway API controller
+        run: |
+          sed 's|image: ghcr.io/shettyh/shunt:latest|image: shunt:conformance|g' \
+            deploy/k8s/shunt-gateway-controller.yaml | kubectl apply -f -
+          kubectl -n shunt-system rollout status deployment/shunt --timeout=120s
+          kubectl wait --for=condition=Accepted --timeout=60s gatewayclass/shunt
+
+      - name: Run official GATEWAY-HTTP conformance suite
+        id: conformance
+        run: |
+          kubectl apply -f tests/k8s-conformance/runner-pod.yaml
+          echo "Waiting for conformance runner pod to start..."
+          for _ in $(seq 1 60); do
+            phase="$(kubectl -n shunt-system get pod shunt-conformance-runner -o jsonpath='{.status.phase}')"
+            if [ "$phase" = "Running" ] || [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; then
+              break
+            fi
+            sleep 2
+          done
+          kubectl -n shunt-system logs -f pod/shunt-conformance-runner || true
+          phase="$(kubectl -n shunt-system get pod shunt-conformance-runner -o jsonpath='{.status.phase}')"
+          echo "Conformance runner pod phase: $phase"
+          if [ "$phase" != "Succeeded" ]; then
+            echo "::error::Gateway API conformance suite failed (pod phase: $phase)"
+            kubectl -n shunt-system logs deployment/shunt --tail=200 || true
+            exit 1
+          fi

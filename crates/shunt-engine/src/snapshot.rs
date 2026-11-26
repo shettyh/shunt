@@ -51,6 +51,8 @@ pub struct RouteMatch {
     pub methods: Vec<Method>,
     /// Optional exact HTTP header matchers (all must match). Empty matches any headers.
     pub headers: Vec<(HeaderName, String)>,
+    /// Optional exact URL query-parameter matchers (all must match; case-sensitive; first occurrence wins).
+    pub query_params: Vec<(String, String)>,
 }
 
 impl RouteMatch {
@@ -101,13 +103,18 @@ impl RouteMatch {
         self
     }
 
-    /// Checks non-path match dimensions (`methods`, `hosts`, `headers`).
+    pub fn with_query_param(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.query_params.push((name.into(), value.into()));
+        self
+    }
+
+    /// Checks non-path match dimensions (`methods`, `hosts`, `headers`, `query_params`).
     pub fn matches_non_path<B>(&self, req: &Request<B>) -> bool {
         let mut cached_host = None;
         self.matches_non_path_cached(req, &mut cached_host)
     }
 
-    /// Checks non-path match dimensions (`methods`, `hosts`, `headers`) with lazy request-host caching.
+    /// Checks non-path match dimensions (`methods`, `hosts`, `headers`, `query_params`) with lazy request-host caching.
     #[inline]
     pub(crate) fn matches_non_path_cached<'a, B>(
         &self,
@@ -139,6 +146,12 @@ impl RouteMatch {
                     return false;
                 }
             }
+        }
+
+        if !self.query_params.is_empty()
+            && !query_params_match(req.uri().query(), &self.query_params)
+        {
+            return false;
         }
 
         true
@@ -189,8 +202,42 @@ impl RouteMatch {
             }
         }
 
+        if !self.query_params.is_empty()
+            && !query_params_match(req.uri().query(), &self.query_params)
+        {
+            return false;
+        }
+
         true
     }
+}
+
+/// Checks exact case-sensitive query parameter matchers against a raw URL query string.
+///
+/// Per Kubernetes Gateway API v1 semantics, when a query parameter name appears multiple times
+/// in the request URL, only the **first** occurrence is considered for matching.
+#[inline]
+fn query_params_match(raw_query: Option<&str>, matchers: &[(String, String)]) -> bool {
+    let Some(query) = raw_query else {
+        return false;
+    };
+    for (expected_name, expected_val) in matchers {
+        let mut found_first: Option<&str> = None;
+        for part in query.split('&') {
+            if part.is_empty() {
+                continue;
+            }
+            let (k, v) = part.split_once('=').unwrap_or((part, ""));
+            if k == expected_name {
+                found_first = Some(v);
+                break;
+            }
+        }
+        if found_first != Some(expected_val.as_str()) {
+            return false;
+        }
+    }
+    true
 }
 
 #[inline]
@@ -848,6 +895,40 @@ mod tests {
         assert!(host_matches("*.example.com", "api.example.com"));
         assert!(host_matches("*.example.com", "a.b.example.com"));
         assert!(!host_matches("*.example.com", "example.com"));
+    }
+
+    #[test]
+    fn query_param_matching_case_sensitive_and_first_occurrence_only() {
+        let m = RouteMatch::prefix("/")
+            .with_query_param("animal", "whale")
+            .with_query_param("color", "blue");
+
+        let ok = Request::builder()
+            .uri("/?animal=whale&color=blue")
+            .body(())
+            .unwrap();
+        assert!(m.matches(&ok));
+
+        // First occurrence of `animal` is `whale` -> matches even with duplicate later value.
+        let dup_first_ok = Request::builder()
+            .uri("/?animal=whale&animal=dolphin&color=blue")
+            .body(())
+            .unwrap();
+        assert!(m.matches(&dup_first_ok));
+
+        // First occurrence of `animal` is `dolphin` -> must NOT match `whale`.
+        let dup_first_wrong = Request::builder()
+            .uri("/?animal=dolphin&animal=whale&color=blue")
+            .body(())
+            .unwrap();
+        assert!(!m.matches(&dup_first_wrong));
+
+        // Case-sensitive on both key and value.
+        let wrong_case = Request::builder()
+            .uri("/?ANIMAL=whale&color=blue")
+            .body(())
+            .unwrap();
+        assert!(!m.matches(&wrong_case));
     }
 }
 

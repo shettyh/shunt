@@ -1,0 +1,44 @@
+# Ephemeral in-cluster conformance runner RBAC + Pod for CI (`kind` only).
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: conformance-runner
+  namespace: shunt-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: conformance-runner-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: conformance-runner
+    namespace: shunt-system
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: shunt-conformance-runner
+  namespace: shunt-system
+spec:
+  serviceAccountName: conformance-runner
+  restartPolicy: Never
+  containers:
+    - name: conformance
+      image: shunt-conformance-runner:local
+      imagePullPolicy: Never
+      args:
+        - -test.v
+        - -test.timeout=20m
+        - --gateway-class=shunt
+        - --conformance-profiles=GATEWAY-HTTP
+        - --organization=shunt
+        - --project=shunt
+        - --url=https://github.com/shettyh/shunt
+        - --version=0.3.0
+        - --contact=https://github.com/shettyh/shunt/issues
+        - --report-output=/tmp/conformance-report.yaml

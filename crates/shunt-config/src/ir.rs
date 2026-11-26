@@ -484,6 +484,9 @@ pub struct RouteIr {
     /// Optional exact HTTP header matchers (all must match).
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    /// Optional exact URL query-parameter matchers (all must match; case-sensitive).
+    #[serde(default)]
+    pub query_params: BTreeMap<String, String>,
     /// Target upstream name (may be omitted when inherited from `group.upstream`).
     #[serde(default)]
     pub upstream: Option<String>,
@@ -516,6 +519,7 @@ pub struct ResolvedRoute<'a> {
     pub path_regex: Option<String>,
     pub methods: Vec<String>,
     pub headers: BTreeMap<String, String>,
+    pub query_params: BTreeMap<String, String>,
     pub upstream: String,
     pub strip_prefix: Option<String>,
     pub max_body_bytes: Option<usize>,
@@ -670,6 +674,7 @@ impl GatewayConfig {
             path_regex,
             methods,
             headers,
+            query_params: route.query_params.clone(),
             upstream,
             strip_prefix,
             max_body_bytes,

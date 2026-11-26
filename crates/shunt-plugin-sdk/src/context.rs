@@ -103,6 +103,8 @@ impl PathParams {
 pub struct RequestCtx {
     pub request_id: u64,
     pub client_addr: SocketAddr,
+    /// `true` when the client connection terminated TLS on the gateway listener.
+    pub is_tls: bool,
     pub tls_sni: Option<String>,
     /// Verified peer client certificate metadata when presented over an mTLS listener.
     pub client_cert: Option<Arc<ClientCertInfo>>,
@@ -120,9 +122,11 @@ pub struct RequestCtx {
 
 impl RequestCtx {
     pub fn new(request_id: u64, client_addr: SocketAddr, tls_sni: Option<String>) -> Self {
+        let is_tls = tls_sni.is_some();
         Self {
             request_id,
             client_addr,
+            is_tls,
             tls_sni,
             client_cert: None,
             route_id: None,
@@ -135,6 +139,13 @@ impl RequestCtx {
             last_upstream_error: None,
             last_upstream_status: None,
         }
+    }
+
+    /// Marks whether the client connection terminated TLS on the listener.
+    #[inline]
+    pub fn with_tls(mut self, is_tls: bool) -> Self {
+        self.is_tls = is_tls;
+        self
     }
 
     /// Returns the value of a captured path parameter by name (e.g., `"order_id"`).

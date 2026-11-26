@@ -393,6 +393,7 @@ fn arb_route_match() -> impl Strategy<Value = RouteMatch> {
             path,
             methods,
             headers: Vec::new(),
+            query_params: Vec::new(),
         }
     })
 }
@@ -627,6 +628,7 @@ proptest! {
                 path_regex: r_path.3,
                 methods: r_methods.iter().map(|s| (*s).to_owned()).collect(),
                 headers: BTreeMap::new(),
+                query_params: BTreeMap::new(),
                 upstream: None,
                 strip_prefix: None,
                 max_body_bytes: None,
@@ -650,6 +652,7 @@ proptest! {
                     .map(|m| http::Method::from_bytes(m.as_bytes()).unwrap())
                     .collect(),
                 headers: Vec::new(),
+                query_params: Vec::new(),
             };
             let route_matcher = RouteMatch {
                 hosts: resolved.hosts.iter().map(|h| h.to_ascii_lowercase()).collect(),
@@ -670,6 +673,7 @@ proptest! {
                     .map(|m| http::Method::from_bytes(m.as_bytes()).unwrap())
                     .collect(),
                 headers: Vec::new(),
+                query_params: Vec::new(),
             };
 
             let req = http::Request::builder()

@@ -152,6 +152,7 @@ impl GatewayServer {
                                         serve_connection(
                                             TokioIo::new(tls_stream),
                                             peer_addr,
+                                            true,
                                             tls_sni,
                                             client_cert,
                                             snapshot_conn,
@@ -169,6 +170,7 @@ impl GatewayServer {
                                 serve_connection(
                                     TokioIo::new(tcp),
                                     peer_addr,
+                                    false,
                                     None,
                                     None,
                                     snapshot_conn,
@@ -205,6 +207,7 @@ impl GatewayServer {
 async fn serve_connection<I>(
     io: TokioIo<I>,
     peer_addr: SocketAddr,
+    is_tls: bool,
     tls_sni: Option<String>,
     client_cert: Option<Arc<ClientCertInfo>>,
     snapshot_swap: Arc<ArcSwap<GatewaySnapshot>>,
@@ -224,7 +227,8 @@ async fn serve_connection<I>(
         let trace = trace_enabled.load(Ordering::Relaxed);
 
         async move {
-            let resp = execute_request(snapshot, req, req_id, peer_addr, sni, cert, trace).await;
+            let resp =
+                execute_request(snapshot, req, req_id, peer_addr, is_tls, sni, cert, trace).await;
             Ok::<_, Infallible>(resp)
         }
     });
