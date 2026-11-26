@@ -12,6 +12,7 @@ pub mod http_types;
 pub mod mask;
 pub mod plugin;
 pub mod state;
+pub mod sync;
 pub mod telemetry;
 
 pub use bytes::Bytes;
@@ -32,6 +33,10 @@ pub use plugin::HttpPlugin;
 pub use state::{
     BuildContext, PluginBuildError, PluginConfig, PluginFactory, PluginRegistry, StateHandle,
     StateStore,
+};
+pub use sync::{
+    SyncedDelta, SyncedDeltaOp, SyncedTable, SyncedTableRegistry, SyncedTableSnapshot,
+    SyncedTableSubscriber,
 };
 pub use telemetry::{
     InMemoryTelemetrySink, ParsedTraceparent, SpanEvent, SpanHandle, SpanKind, SpanRecord,

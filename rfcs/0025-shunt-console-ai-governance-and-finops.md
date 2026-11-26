@@ -20,7 +20,7 @@ Teams adopting Shunt as a self-hosted replacement for LiteLLM or SaaS AI routers
 ## 3. Goals & Non-Goals
 
 ### Goals
-- **Instant fleet-wide virtual key & budget sync (Channel 2):** Mint, update, rotate (with configurable overlap grace window), disable, or revoke virtual keys and budget ceilings across 100% of nodes in ~20–50 ms via `SyncedTable` namespaces (`ai.virtual_keys`, `ai.budgets`, `ai.pricing`).
+- **Instant fleet-wide virtual key & budget sync (Channel 2):** Mint, update, rotate (with configurable overlap grace window), disable, or revoke virtual keys and budget ceilings across 100% of nodes in ~20–50 ms via `SyncedTable` namespaces (`ai.virtual_keys`, `ai.budgets`, `ai.pricing`). In the Web UI ([RFC 0023 §4.8](./0023-shunt-console-architecture-and-control-plane.md#48-web-console-ux-principles)), these appear as native **Virtual Keys**, **Budgets**, and **Model Pricing** pages marked with an `Instant Sync` badge rather than raw Channel 2 tables.
 - **Zero plaintext key storage or transit:** Plaintext virtual keys (`sk-shunt-...`) are displayed once at creation and stored/synced strictly as `sha256:<64-hex>` hashes.
 - **Seamless `shunt-ai` integration:** `ai-virtual-keys` and `ai-budget` read an optional `SyncedTable` handle from `BuildContext::synced_table(...)`, rebuilding a pre-indexed `ArcSwap` lookup table on delta updates while preserving exact compatibility with static `shunt.toml` keys.
 - **Complete Provider & Model Catalog UI:** Manage all 5 upstream dialects (`openai_compatible`, `anthropic`, `azure_openai`, `gemini`, `bedrock`), 17+ presets, multi-key pools, Cloud IAM bindings, BYOK passthrough, smart-routing policies (`priority`, `weighted`, `latency`, `cost`, `throughput`, `headroom`), failover rules, and cache settings.

@@ -9,6 +9,7 @@ use crate::clock::{Clock, SystemClock};
 use crate::distributed::DistributedStore;
 use crate::http_client::HttpClient;
 use crate::plugin::HttpPlugin;
+use crate::sync::{SyncedTable, SyncedTableRegistry};
 use crate::telemetry::TelemetrySink;
 
 /// Type-erased map used to stage newly created plugin state during transactional builds.
@@ -267,6 +268,7 @@ pub struct BuildContext {
     distributed_store: Option<Arc<dyn DistributedStore>>,
     telemetry_sink: Option<Arc<dyn TelemetrySink>>,
     http_client: Option<Arc<dyn HttpClient>>,
+    synced_tables: Option<Arc<SyncedTableRegistry>>,
 }
 
 impl BuildContext {
@@ -284,6 +286,7 @@ impl BuildContext {
             distributed_store: None,
             telemetry_sink: None,
             http_client: None,
+            synced_tables: None,
         }
     }
 
@@ -304,6 +307,7 @@ impl BuildContext {
             distributed_store: None,
             telemetry_sink: None,
             http_client: None,
+            synced_tables: None,
         }
     }
 
@@ -334,6 +338,12 @@ impl BuildContext {
         self
     }
 
+    /// Attaches an optional control-plane [`SyncedTableRegistry`] (Channel 2 dynamic state).
+    pub fn with_synced_tables(mut self, synced_tables: Option<Arc<SyncedTableRegistry>>) -> Self {
+        self.synced_tables = synced_tables;
+        self
+    }
+
     /// Stable identifier for this plugin attachment (e.g., `route:<id>:plugin:<name>`).
     pub fn scope_id(&self) -> &str {
         &self.scope_id
@@ -361,6 +371,16 @@ impl BuildContext {
     /// (e.g., cloud IAM token exchange, JWKS fetches, webhooks).
     pub fn http_client(&self) -> Option<Arc<dyn HttpClient>> {
         self.http_client.as_ref().map(Arc::clone)
+    }
+
+    /// Optional control-plane [`SyncedTable`] handle for `namespace` (Channel 2).
+    ///
+    /// Returns `None` in standalone `shunt.toml` mode so plugins incur zero overhead and run
+    /// strictly from static configuration.
+    pub fn synced_table(&self, namespace: &str) -> Option<Arc<SyncedTable>> {
+        self.synced_tables
+            .as_ref()
+            .map(|reg| reg.get_or_create(namespace))
     }
 
     /// Requests a scoped [`StateHandle`] whose entries will survive snapshot reloads

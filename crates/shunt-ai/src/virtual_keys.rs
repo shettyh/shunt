@@ -1,12 +1,14 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use shunt_plugin_sdk::{
     BuildContext, Clock, Flow, HeaderName, HookMask, HookResult, HttpPlugin, PluginBuildError,
-    PluginConfig, PluginFactory, RequestCtx, RequestHead, StatusCode, header,
+    PluginConfig, PluginFactory, RequestCtx, RequestHead, StatusCode, SyncedTableSnapshot, header,
 };
+use tracing::warn;
 
 use crate::cloud_auth::parse_rfc3339_utc_secs;
 use crate::model_router::TargetSpec;
@@ -112,7 +114,11 @@ struct AiVirtualKeysConfig {
     /// Optional custom header name to extract the virtual key from (e.g., `"x-shunt-key"`).
     #[serde(default)]
     custom_header: Option<String>,
-    /// Configured virtual keys.
+    /// Optional Channel 2 `SyncedTable` namespace (e.g., `"ai.virtual_keys"`) supplying live
+    /// fleet-wide virtual keys without reloading topology snapshots.
+    #[serde(default)]
+    sync_namespace: Option<String>,
+    /// Configured static virtual keys (merged with `sync_namespace` when both are set).
     #[serde(default)]
     keys: Vec<VirtualKeyEntryConfig>,
 }
@@ -125,9 +131,145 @@ impl Default for AiVirtualKeysConfig {
             accept_x_api_key: true,
             accept_ws_subprotocol: true,
             custom_header: None,
+            sync_namespace: None,
             keys: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct SyncedVirtualKeyPayload {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    key_hashes: Vec<String>,
+    #[serde(default)]
+    org: Option<String>,
+    #[serde(default)]
+    team: Option<String>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    expires_at: Option<ExpiresAtConfig>,
+    #[serde(default)]
+    allowed_models: Vec<String>,
+    #[serde(default)]
+    allowed_providers: Vec<String>,
+    #[serde(default)]
+    provider_overrides: HashMap<String, Vec<TargetSpec>>,
+    #[serde(default)]
+    rpm: Option<u64>,
+    #[serde(default)]
+    tpm: Option<u64>,
+    #[serde(default)]
+    max_parallel_requests: Option<u64>,
+    #[serde(default)]
+    budget_usd: Option<f64>,
+    #[serde(default)]
+    budget_soft_limit_usd: Option<f64>,
+    #[serde(default)]
+    budget_window: Option<BudgetWindow>,
+    #[serde(default)]
+    model_limits: HashMap<String, ModelLimitOverride>,
+    #[serde(default)]
+    metadata: BTreeMap<String, String>,
+}
+
+fn compile_synced_virtual_keys(snapshot: &SyncedTableSnapshot) -> Vec<CompiledVirtualKey> {
+    let mut compiled = Vec::with_capacity(snapshot.len());
+    for (item_key, raw_val) in snapshot.iter() {
+        let entry: SyncedVirtualKeyPayload = match serde_json::from_value((**raw_val).clone()) {
+            Ok(e) => e,
+            Err(err) => {
+                warn!(
+                    key = %item_key,
+                    error = %err,
+                    "ignoring malformed synced ai.virtual_keys entry"
+                );
+                continue;
+            }
+        };
+
+        let key_id = entry
+            .id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(item_key.as_ref())
+            .to_owned();
+
+        let expires_at_unix_secs = match &entry.expires_at {
+            Some(exp) => match exp.to_unix_secs() {
+                Ok(ts) => Some(ts),
+                Err(msg) => {
+                    warn!(key = %key_id, error = %msg, "ignoring synced virtual key with invalid expires_at");
+                    continue;
+                }
+            },
+            None => None,
+        };
+
+        let mut digests = Vec::new();
+        for hash_spec in &entry.key_hashes {
+            match compile_key_digest(hash_spec) {
+                Ok(d) => digests.push(d),
+                Err(msg) => {
+                    warn!(key = %key_id, error = %msg, "skipping invalid hash in synced virtual key");
+                }
+            }
+        }
+        if let Some(ref single) = entry.api_key {
+            match compile_key_digest(single) {
+                Ok(d) => digests.push(d),
+                Err(msg) => {
+                    warn!(key = %key_id, error = %msg, "skipping invalid api_key in synced virtual key");
+                }
+            }
+        }
+        if digests.is_empty() {
+            continue;
+        }
+
+        let mut overrides = HashMap::with_capacity(entry.provider_overrides.len());
+        for (model_pat, specs) in entry.provider_overrides {
+            if specs.is_empty() {
+                continue;
+            }
+            let targets: Vec<AiTarget> = specs.into_iter().map(|s| s.resolve(&model_pat)).collect();
+            overrides.insert(model_pat, targets);
+        }
+
+        let policy = AiKeyPolicy {
+            key_id,
+            org: entry.org,
+            team: entry.team,
+            allowed_models: entry.allowed_models,
+            allowed_providers: entry.allowed_providers,
+            provider_overrides: overrides,
+            rpm: entry.rpm.filter(|&v| v > 0),
+            tpm: entry.tpm.filter(|&v| v > 0),
+            max_parallel_requests: entry.max_parallel_requests.filter(|&v| v > 0),
+            budget_usd: entry.budget_usd.filter(|b| b.is_finite() && *b >= 0.0),
+            budget_soft_limit_usd: entry
+                .budget_soft_limit_usd
+                .filter(|b| b.is_finite() && *b >= 0.0),
+            budget_window: entry.budget_window,
+            model_limits: entry.model_limits,
+            metadata: entry.metadata,
+        };
+
+        for digest in digests {
+            compiled.push(CompiledVirtualKey {
+                digest,
+                enabled: entry.enabled,
+                expires_at_unix_secs,
+                policy: policy.clone(),
+            });
+        }
+    }
+    compiled
 }
 
 struct CompiledVirtualKey {
@@ -151,10 +293,18 @@ impl PluginFactory for AiVirtualKeysFactory {
         ctx: &BuildContext,
     ) -> Result<Arc<dyn HttpPlugin>, PluginBuildError> {
         let cfg: AiVirtualKeysConfig = config.deserialize(self.name())?;
-        if cfg.keys.is_empty() {
+        let sync_namespace = cfg
+            .sync_namespace
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        if cfg.keys.is_empty() && sync_namespace.is_none() {
             return Err(PluginBuildError::BuildFailed {
                 plugin: self.name().to_owned(),
-                message: "ai-virtual-keys requires at least one entry in `keys`".to_owned(),
+                message:
+                    "ai-virtual-keys requires at least one entry in `keys` or a `sync_namespace`"
+                        .to_owned(),
             });
         }
         if !cfg.accept_bearer
@@ -345,6 +495,17 @@ impl PluginFactory for AiVirtualKeysFactory {
             });
         }
 
+        let synced_keys = sync_namespace.and_then(|ns| {
+            ctx.synced_table(&ns).map(|table| {
+                let store = Arc::new(ArcSwap::from_pointee(Vec::<CompiledVirtualKey>::new()));
+                let store_sub = Arc::clone(&store);
+                table.subscribe(Arc::new(move |snap| {
+                    store_sub.store(Arc::new(compile_synced_virtual_keys(snap)));
+                }));
+                store
+            })
+        });
+
         Ok(Arc::new(AiVirtualKeysPlugin {
             strip_key_header: cfg.strip_key_header,
             accept_bearer: cfg.accept_bearer,
@@ -353,6 +514,7 @@ impl PluginFactory for AiVirtualKeysFactory {
             custom_header,
             clock: ctx.clock(),
             keys: compiled,
+            synced_keys,
         }))
     }
 }
@@ -450,6 +612,7 @@ pub struct AiVirtualKeysPlugin {
     custom_header: Option<HeaderName>,
     clock: Arc<dyn Clock>,
     keys: Vec<CompiledVirtualKey>,
+    synced_keys: Option<Arc<ArcSwap<Vec<CompiledVirtualKey>>>>,
 }
 
 impl AiVirtualKeysPlugin {
@@ -531,6 +694,14 @@ impl HttpPlugin for AiVirtualKeysPlugin {
                 matched = Some(candidate);
             }
         }
+        let synced_guard = self.synced_keys.as_ref().map(|s| s.load());
+        if let Some(ref synced) = synced_guard {
+            for candidate in synced.iter() {
+                if constant_time_eq_32(&presented_digest, &candidate.digest) {
+                    matched = Some(candidate);
+                }
+            }
+        }
 
         match matched {
             Some(key) if !key.enabled => {
@@ -592,6 +763,14 @@ impl HttpPlugin for AiVirtualKeysPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
+    use std::sync::RwLock;
+
+    use serde_json::json;
+    use shunt_plugin_sdk::{
+        HeaderMap, HeaderValue, Method, StateStore, SyncedDeltaOp, SyncedTableRegistry, Uri,
+        Version,
+    };
 
     #[test]
     fn sha256_digest_parsing_and_matching() {
@@ -601,5 +780,125 @@ mod tests {
         let d2 = compile_key_digest(&format!("sha256:{hex}")).unwrap();
         assert!(constant_time_eq_32(&d1, &d2));
         assert!(compile_key_digest("sha256:short").is_err());
+    }
+
+    fn test_req(bearer: &str) -> RequestHead {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {bearer}")).unwrap(),
+        );
+        RequestHead {
+            method: Method::POST,
+            uri: Uri::from_static("/v1/chat/completions"),
+            version: Version::HTTP_11,
+            headers,
+        }
+    }
+
+    fn test_ctx(id: u64) -> RequestCtx {
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        RequestCtx::new(id, addr, None)
+    }
+
+    fn sha256_prefixed(raw: &str) -> String {
+        let d = sha256_bytes(raw.as_bytes());
+        let hex: String = d.iter().map(|b| format!("{b:02x}")).collect();
+        format!("sha256:{hex}")
+    }
+
+    #[test]
+    fn sync_namespace_builds_without_registry_for_dry_run_validation() {
+        let state = Arc::new(StateStore::new());
+        let touched = Arc::new(RwLock::new(HashSet::new()));
+        let ctx = BuildContext::new("ai-gateway", state, touched);
+        let cfg = PluginConfig::new(json!({ "sync_namespace": "ai.virtual_keys" }));
+        let plugin = AiVirtualKeysFactory.build(&cfg, &ctx).unwrap();
+        assert_eq!(plugin.hook_mask(), HookMask::ON_REQUEST_HEADERS);
+    }
+
+    #[test]
+    fn synced_virtual_keys_upsert_rotate_disable_and_revoke_live() {
+        let state = Arc::new(StateStore::new());
+        let touched = Arc::new(RwLock::new(HashSet::new()));
+        let synced = Arc::new(SyncedTableRegistry::new());
+        let ctx = BuildContext::new("ai-gateway", state, touched)
+            .with_synced_tables(Some(Arc::clone(&synced)));
+        let cfg = PluginConfig::new(json!({ "sync_namespace": "ai.virtual_keys" }));
+        let plugin = AiVirtualKeysFactory.build(&cfg, &ctx).unwrap();
+
+        let table = synced.get_or_create("ai.virtual_keys");
+        let k1 = "sk-shunt-live-primary-1";
+        let k2 = "sk-shunt-live-rotated-2";
+
+        // Before upsert, key is rejected.
+        let mut rctx = test_ctx(1);
+        let mut req = test_req(k1);
+        match plugin.on_request_headers(&mut rctx, &mut req) {
+            HookResult::Ready(Flow::Respond(resp)) => {
+                assert_eq!(resp.status, StatusCode::UNAUTHORIZED)
+            }
+            _ => panic!("expected 401 before upsert"),
+        }
+
+        // Live Channel 2 upsert with dual hashes (rotation grace window).
+        table.apply_delta(
+            1,
+            "vk_search",
+            SyncedDeltaOp::Upsert(json!({
+                "enabled": true,
+                "org": "acme",
+                "team": "search",
+                "key_hashes": [sha256_prefixed(k1), sha256_prefixed(k2)],
+                "allowed_models": ["smart", "gpt-4o*"],
+                "rpm": 120,
+                "budget_usd": 250.0
+            })),
+        );
+
+        for (i, candidate) in [k1, k2].into_iter().enumerate() {
+            let mut rctx = test_ctx(10 + i as u64);
+            let mut req = test_req(candidate);
+            let ok = matches!(
+                plugin.on_request_headers(&mut rctx, &mut req),
+                HookResult::Ready(Flow::Continue)
+            );
+            assert!(ok, "expected Continue for synced key");
+            let pol = rctx.get_ext::<AiKeyPolicy>().expect("policy attached");
+            assert_eq!(pol.key_id, "vk_search");
+            assert_eq!(pol.team.as_deref(), Some("search"));
+            assert_eq!(pol.rpm, Some(120));
+            assert_eq!(pol.budget_usd, Some(250.0));
+            assert!(req.headers.get(header::AUTHORIZATION).is_none());
+        }
+
+        // Disable via delta -> 403 Forbidden.
+        table.apply_delta(
+            2,
+            "vk_search",
+            SyncedDeltaOp::Upsert(json!({
+                "enabled": false,
+                "key_hashes": [sha256_prefixed(k1)]
+            })),
+        );
+        let mut rctx = test_ctx(20);
+        let mut req = test_req(k1);
+        match plugin.on_request_headers(&mut rctx, &mut req) {
+            HookResult::Ready(Flow::Respond(resp)) => {
+                assert_eq!(resp.status, StatusCode::FORBIDDEN)
+            }
+            _ => panic!("expected 403 for disabled synced key"),
+        }
+
+        // Delete via delta -> immediate 401 revocation.
+        table.apply_delta(3, "vk_search", SyncedDeltaOp::Delete);
+        let mut rctx = test_ctx(30);
+        let mut req = test_req(k1);
+        match plugin.on_request_headers(&mut rctx, &mut req) {
+            HookResult::Ready(Flow::Respond(resp)) => {
+                assert_eq!(resp.status, StatusCode::UNAUTHORIZED)
+            }
+            _ => panic!("expected 401 after revocation"),
+        }
     }
 }

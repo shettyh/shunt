@@ -24,6 +24,7 @@ Managing a fleet of `shunt` gateways across dev, staging, and production introdu
 - **Schema-driven Visual Config Studio:** Typed forms generated from a canonical `PluginSchemaRegistry` in `shunt-config`, covering Listeners, TLS/mTLS certs, Upstreams, Route Groups ([RFC 0021](./0021-route-groups.md)), ordered Routes with `path_template`/`path_regex` ([RFC 0022](./0022-path-templates-and-regex-routing.md)), and Plugin Chains across `shunt-plugins`, `shunt-ai`, and `shunt-mcp`.
 - **Live `HookMask` & fast-path transparency:** Display per-plugin and effective route `HookMask` bitmasks and explicitly highlight whether a route stays on Shunt's zero-allocation sync fast path (`HookResult::Ready`) vs. buffered/async hooks.
 - **In-console Route & Policy Simulator:** Dry-run any synthetic request (host, method, path, headers) against draft or published revisions using `shunt-config`'s exact route matcher and verifier.
+- **Unified multi-purpose surface & jargon-free UX:** Following [RFC 0023 §4.8](./0023-shunt-console-architecture-and-control-plane.md#48-web-console-ux-principles), Config Studio treats HTTP API, AI, and MCP topology entities as composable on the same cluster (no per-cluster gateway-type lock-in) and presents **Config & Releases** vs. **Live Policies** rather than exposing internal "Channel 1 / Channel 2" terminology.
 - **Lossless `shunt.toml` import & export:** Import an existing `shunt.toml` into a cluster draft and export any revision as a standalone `shunt.toml` (secrets redacted or mapped to `env:` refs).
 
 ### Non-Goals

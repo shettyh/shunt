@@ -51,4 +51,7 @@ pub enum ConfigError {
 
     #[error("Kubernetes Gateway API error: {0}")]
     K8s(String),
+
+    #[error("control plane error: {0}")]
+    ControlPlane(String),
 }
