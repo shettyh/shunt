@@ -2,14 +2,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use shunt_plugin_sdk::{
     BufferedResponse, BuildContext, Clock, Flow, HeaderName, HeaderValue, HookMask, HookResult,
     HttpPlugin, Method, PluginBuildError, PluginConfig, PluginFactory, RequestCtx, RequestHead,
-    ResponseHead, StatusCode, header,
+    ResponseHead, StatusCode, SyncedTableSnapshot, header,
 };
+use tracing::warn;
 
 use crate::types::{
     MCP_ERR_FORBIDDEN, MCP_ERR_UNAUTHORIZED, MCP_SESSION_HEADER, McpPrincipal, get_header_str,
@@ -131,6 +133,14 @@ struct McpAuthConfig {
     /// Optional RFC 9728 OAuth Protected Resource Metadata endpoint.
     #[serde(default)]
     oauth_protected_resource: Option<OAuthProtectedResourceConfig>,
+    /// Optional Channel 2 `SyncedTable` namespace (e.g. `"mcp.agent_acls"`) supplying live
+    /// fleet-wide agent keys & ACLs without reloading topology.
+    #[serde(default)]
+    sync_namespace: Option<String>,
+    /// Optional Channel 2 `SyncedTable` namespace (e.g. `"mcp.kill_switch"`) supplying instant
+    /// fleet-wide principal/session emergency blocks.
+    #[serde(default)]
+    kill_switch_namespace: Option<String>,
     /// Configured virtual keys / principal policies.
     #[serde(default)]
     keys: Vec<McpPrincipalEntryConfig>,
@@ -149,9 +159,137 @@ impl Default for McpAuthConfig {
             session_bind_ttl_secs: DEFAULT_SESSION_BIND_TTL_SECS,
             max_session_bindings: DEFAULT_MAX_SESSION_BINDINGS,
             oauth_protected_resource: None,
+            sync_namespace: None,
+            kill_switch_namespace: None,
             keys: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct SyncedMcpAgentPayload {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    key_hashes: Vec<String>,
+    #[serde(default)]
+    team: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    allowed_servers: Vec<String>,
+    #[serde(default)]
+    allowed_tools: Vec<String>,
+    #[serde(default)]
+    denied_tools: Vec<String>,
+    #[serde(default)]
+    allowed_resources: Vec<String>,
+    #[serde(default)]
+    allowed_prompts: Vec<String>,
+    #[serde(default)]
+    allowed_methods: Vec<String>,
+    #[serde(default)]
+    rpm: Option<u64>,
+    #[serde(default)]
+    tool_rpm: Option<u64>,
+    #[serde(default)]
+    max_calls_per_session: Option<u64>,
+    #[serde(default)]
+    max_parallel_calls: Option<u64>,
+    #[serde(default)]
+    metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default)]
+struct SyncedMcpAuthIndex {
+    keys: Vec<CompiledKey>,
+    by_id: HashMap<String, McpPrincipal>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct KillSwitchRule {
+    scope: String,
+    target: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+fn compile_synced_mcp_agents(snapshot: &SyncedTableSnapshot) -> SyncedMcpAuthIndex {
+    let mut index = SyncedMcpAuthIndex::default();
+    for (item_key, raw_val) in snapshot.iter() {
+        let entry: SyncedMcpAgentPayload = match serde_json::from_value((**raw_val).clone()) {
+            Ok(e) => e,
+            Err(err) => {
+                warn!(key = %item_key, error = %err, "ignoring malformed synced mcp.agent_acls entry");
+                continue;
+            }
+        };
+        let id = entry
+            .id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(item_key.as_ref())
+            .to_owned();
+        let principal = McpPrincipal {
+            id: id.clone(),
+            team: entry.team,
+            agent_id: entry.agent_id,
+            allowed_servers: entry.allowed_servers,
+            allowed_tools: entry.allowed_tools,
+            denied_tools: entry.denied_tools,
+            allowed_resources: entry.allowed_resources,
+            allowed_prompts: entry.allowed_prompts,
+            allowed_methods: entry.allowed_methods,
+            rpm: entry.rpm,
+            tool_rpm: entry.tool_rpm,
+            max_calls_per_session: entry.max_calls_per_session,
+            max_parallel_calls: entry.max_parallel_calls,
+            metadata: entry.metadata,
+        };
+        for raw in &entry.key_hashes {
+            if let Ok(hash) = compile_key_hash(raw) {
+                index.keys.push(CompiledKey {
+                    hash,
+                    enabled: entry.enabled,
+                    principal: principal.clone(),
+                });
+            }
+        }
+        if let Some(ref single) = entry.api_key
+            && let Ok(hash) = compile_key_hash(single)
+        {
+            index.keys.push(CompiledKey {
+                hash,
+                enabled: entry.enabled,
+                principal: principal.clone(),
+            });
+        }
+        if entry.enabled {
+            index.by_id.insert(id, principal);
+        }
+    }
+    index
+}
+
+fn compile_kill_switches(snapshot: &SyncedTableSnapshot) -> Vec<KillSwitchRule> {
+    let mut rules = Vec::with_capacity(snapshot.len());
+    for (item_key, raw_val) in snapshot.iter() {
+        match serde_json::from_value::<KillSwitchRule>((**raw_val).clone()) {
+            Ok(rule) if !rule.scope.trim().is_empty() && !rule.target.trim().is_empty() => {
+                rules.push(rule);
+            }
+            Ok(_) => {}
+            Err(err) => {
+                warn!(key = %item_key, error = %err, "ignoring malformed synced mcp.kill_switch entry");
+            }
+        }
+    }
+    rules
 }
 
 #[derive(Debug, Clone)]
@@ -232,6 +370,7 @@ impl McpSessionBindingTable {
     }
 }
 
+#[derive(Debug)]
 struct CompiledKey {
     hash: [u8; 32],
     enabled: bool,
@@ -258,11 +397,23 @@ impl PluginFactory for McpAuthFactory {
         ctx: &BuildContext,
     ) -> Result<Arc<dyn HttpPlugin>, PluginBuildError> {
         let cfg: McpAuthConfig = config.deserialize(self.name())?;
+        let sync_namespace = cfg
+            .sync_namespace
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let kill_switch_namespace = cfg
+            .kill_switch_namespace
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
 
-        if cfg.keys.is_empty() && cfg.identity_header.is_none() {
+        if cfg.keys.is_empty() && cfg.identity_header.is_none() && sync_namespace.is_none() {
             return Err(PluginBuildError::BuildFailed {
                 plugin: self.name().to_owned(),
-                message: "mcp-auth requires at least one entry in `keys` or an `identity_header`"
+                message: "mcp-auth requires at least one entry in `keys`, an `identity_header`, or a `sync_namespace`"
                     .to_owned(),
             });
         }
@@ -385,6 +536,28 @@ impl PluginFactory for McpAuthFactory {
             .state_handle()
             .get_or_init("mcp-session-bindings", McpSessionBindingTable::default);
 
+        let synced_index = sync_namespace.and_then(|ns| {
+            ctx.synced_table(&ns).map(|table| {
+                let store = Arc::new(ArcSwap::from_pointee(SyncedMcpAuthIndex::default()));
+                let store_sub = Arc::clone(&store);
+                table.subscribe(Arc::new(move |snap| {
+                    store_sub.store(Arc::new(compile_synced_mcp_agents(snap)));
+                }));
+                store
+            })
+        });
+
+        let kill_switches = kill_switch_namespace.and_then(|ns| {
+            ctx.synced_table(&ns).map(|table| {
+                let store = Arc::new(ArcSwap::from_pointee(Vec::<KillSwitchRule>::new()));
+                let store_sub = Arc::clone(&store);
+                table.subscribe(Arc::new(move |snap| {
+                    store_sub.store(Arc::new(compile_kill_switches(snap)));
+                }));
+                store
+            })
+        });
+
         Ok(Arc::new(McpAuthPlugin {
             strip_key_header: cfg.strip_key_header,
             accept_bearer: cfg.accept_bearer,
@@ -398,6 +571,8 @@ impl PluginFactory for McpAuthFactory {
             oauth_metadata,
             keys: compiled_keys,
             by_id,
+            synced_index,
+            kill_switches,
             bindings,
             clock: ctx.clock(),
         }))
@@ -418,6 +593,8 @@ pub struct McpAuthPlugin {
     oauth_metadata: Option<CompiledOAuthMetadata>,
     keys: Vec<CompiledKey>,
     by_id: HashMap<String, McpPrincipal>,
+    synced_index: Option<Arc<ArcSwap<SyncedMcpAuthIndex>>>,
+    kill_switches: Option<Arc<ArcSwap<Vec<KillSwitchRule>>>>,
     bindings: Arc<McpSessionBindingTable>,
     clock: Arc<dyn Clock>,
 }
@@ -483,7 +660,44 @@ impl McpAuthPlugin {
                 matched = Some((entry.enabled, entry.principal.clone()));
             }
         }
+        if let Some(ref synced) = self.synced_index {
+            let guard = synced.load();
+            for entry in &guard.keys {
+                if constant_time_eq_32(&digest, &entry.hash) {
+                    matched = Some((entry.enabled, entry.principal.clone()));
+                }
+            }
+        }
         matched
+    }
+
+    fn lookup_by_id(&self, subject: &str) -> Option<McpPrincipal> {
+        if let Some(ref synced) = self.synced_index
+            && let Some(policy) = synced.load().by_id.get(subject)
+        {
+            return Some(policy.clone());
+        }
+        self.by_id.get(subject).cloned()
+    }
+
+    fn check_kill_switch(&self, principal_id: &str, session_id: Option<&str>) -> Option<String> {
+        let ks = self.kill_switches.as_ref()?;
+        let rules = ks.load();
+        for rule in rules.iter() {
+            let hit = match rule.scope.as_str() {
+                "principal" => rule.target == "*" || rule.target == principal_id,
+                "session" => session_id.is_some_and(|sid| rule.target == "*" || rule.target == sid),
+                _ => false,
+            };
+            if hit {
+                return Some(
+                    rule.reason
+                        .clone()
+                        .unwrap_or_else(|| "blocked by security kill-switch".to_owned()),
+                );
+            }
+        }
+        None
     }
 
     fn unauthorized(&self, msg: &str) -> BufferedResponse {
@@ -545,8 +759,8 @@ impl HttpPlugin for McpAuthPlugin {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
         {
-            if let Some(policy) = self.by_id.get(subject) {
-                policy.clone()
+            if let Some(policy) = self.lookup_by_id(subject) {
+                policy
             } else if self.allow_unlisted_identities {
                 McpPrincipal {
                     id: subject.to_owned(),
@@ -597,6 +811,18 @@ impl HttpPlugin for McpAuthPlugin {
                 }
             }
         };
+
+        // 2b. Check instant Channel 2 kill-switch rules for principal or session
+        let incoming_session = get_header_str(&req.headers, MCP_SESSION_HEADER);
+        if let Some(reason) = self.check_kill_switch(&principal.id, incoming_session) {
+            return HookResult::Ready(Flow::Respond(jsonrpc_error_response(
+                StatusCode::FORBIDDEN,
+                None,
+                MCP_ERR_FORBIDDEN,
+                format!("MCP access halted by kill-switch: {reason}"),
+                None,
+            )));
+        }
 
         // 3. Enforce session-to-principal binding on incoming `Mcp-Session-Id`
         if self.bind_session_to_principal
@@ -711,4 +937,113 @@ fn constant_time_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
         diff |= a[i] ^ b[i];
     }
     diff == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::net::SocketAddr;
+    use std::sync::RwLock;
+
+    use shunt_plugin_sdk::{
+        HeaderMap, StateStore, SyncedDeltaOp, SyncedTableRegistry, Uri, Version,
+    };
+
+    fn sha256_prefixed(raw: &str) -> String {
+        let digest: [u8; 32] = Sha256::digest(raw.as_bytes()).into();
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        format!("sha256:{hex}")
+    }
+
+    fn mcp_req(token: &str) -> RequestHead {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        RequestHead {
+            method: Method::POST,
+            uri: Uri::from_static("/mcp"),
+            version: Version::HTTP_11,
+            headers,
+        }
+    }
+
+    fn test_ctx(id: u64) -> RequestCtx {
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        RequestCtx::new(id, addr, None)
+    }
+
+    #[test]
+    fn synced_mcp_agents_and_kill_switch_apply_live() {
+        let state = Arc::new(StateStore::new());
+        let touched = Arc::new(RwLock::new(HashSet::new()));
+        let synced = Arc::new(SyncedTableRegistry::new());
+        let ctx = BuildContext::new("mcp-gateway", state, touched)
+            .with_synced_tables(Some(Arc::clone(&synced)));
+        let cfg = PluginConfig::new(json!({
+            "sync_namespace": "mcp.agent_acls",
+            "kill_switch_namespace": "mcp.kill_switch"
+        }));
+        let plugin = McpAuthFactory.build(&cfg, &ctx).unwrap();
+
+        let agents = synced.get_or_create("mcp.agent_acls");
+        let kill = synced.get_or_create("mcp.kill_switch");
+        let token = "sk-mcp-live-agent-1";
+
+        // Live agent upsert
+        agents.apply_delta(
+            1,
+            "agent_ci",
+            SyncedDeltaOp::Upsert(json!({
+                "enabled": true,
+                "team": "platform",
+                "key_hashes": [sha256_prefixed(token)],
+                "allowed_servers": ["github"],
+                "allowed_tools": ["github__list_*"],
+                "denied_tools": ["github__delete_*"]
+            })),
+        );
+
+        let mut rctx = test_ctx(1);
+        let mut req = mcp_req(token);
+        let ok = matches!(
+            plugin.on_request_headers(&mut rctx, &mut req),
+            HookResult::Ready(Flow::Continue)
+        );
+        assert!(ok, "expected Continue for synced agent");
+        let p = rctx.get_ext::<McpPrincipal>().expect("principal attached");
+        assert_eq!(p.id, "agent_ci");
+        assert_eq!(p.allowed_servers, vec!["github"]);
+
+        // Trigger instant kill-switch for principal
+        kill.apply_delta(
+            1,
+            "ks_1",
+            SyncedDeltaOp::Upsert(json!({
+                "scope": "principal",
+                "target": "agent_ci",
+                "reason": "runaway tool loop"
+            })),
+        );
+
+        let mut rctx = test_ctx(2);
+        let mut req = mcp_req(token);
+        match plugin.on_request_headers(&mut rctx, &mut req) {
+            HookResult::Ready(Flow::Respond(resp)) => {
+                assert_eq!(resp.status, StatusCode::FORBIDDEN)
+            }
+            _ => panic!("expected 403 from kill-switch"),
+        }
+
+        // Lift kill-switch -> access restored immediately
+        kill.apply_delta(2, "ks_1", SyncedDeltaOp::Delete);
+        let mut rctx = test_ctx(3);
+        let mut req = mcp_req(token);
+        assert!(matches!(
+            plugin.on_request_headers(&mut rctx, &mut req),
+            HookResult::Ready(Flow::Continue)
+        ));
+    }
 }

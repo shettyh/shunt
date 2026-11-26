@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
   AlertTriangle,
-  CheckCircle2,
   KeyRound,
   Plus,
   RefreshCw,
@@ -9,7 +8,6 @@ import {
   Tag,
   Terminal,
   Trash2,
-  XCircle,
 } from 'lucide-react';
 import {
   api,
@@ -18,116 +16,81 @@ import {
   Cluster,
   CreatedBootstrapToken,
   formatRelativeTime,
-  NamespaceStateSummary,
   NodeRecord,
   NodeStatus,
   shortDigest,
 } from '../lib/api';
-import { ConnectCommandBox, Modal, useToast } from '../components/ui';
+import { ClusterHeaderContext, PageHeader } from '../components/PageHeader';
+import {
+  ConnectCommandBox,
+  EmptyState,
+  Modal,
+  SearchField,
+  SegmentedTabs,
+  StatusIndicator,
+  TagPill,
+  useToast,
+} from '../components/ui';
 
-function NodeStatusBadge({ status }: { status: NodeStatus }) {
-  const map: Record<NodeStatus, { cls: string; label: string }> = {
-    synced: { cls: 'badge badge-ok', label: 'Synced' },
-    converging: { cls: 'badge badge-accent', label: 'Converging' },
-    drifted: { cls: 'badge badge-danger', label: 'Drifted' },
-    lagging: { cls: 'badge badge-warn', label: 'Policy Lag' },
-    offline: { cls: 'badge', label: 'Offline' },
-  };
-  const cfg = map[status] || map.offline;
-  return (
-    <span className={cfg.cls}>
-      <span
-        className="inline-block w-1.5 h-1.5 rounded-full"
-        style={{ background: 'currentColor' }}
-      />
-      <span>{cfg.label}</span>
-    </span>
-  );
-}
+type FleetTab = 'nodes' | 'tokens';
 
-function PolicySyncCell({
-  node,
-  namespaces,
-}: {
-  node: NodeRecord;
-  namespaces: NamespaceStateSummary[];
-}) {
-  if (node.status === 'offline') {
-    return (
-      <span className="text-sm" style={{ color: 'var(--text-muted)' }}>
-        Offline
-      </span>
-    );
+function statusTone(status: NodeStatus): { tone: 'ok' | 'warn' | 'danger' | 'neutral'; label: string } {
+  switch (status) {
+    case 'synced':
+      return { tone: 'ok', label: 'Synced' };
+    case 'converging':
+      return { tone: 'warn', label: 'Converging' };
+    case 'lagging':
+      return { tone: 'warn', label: 'Policy Lag' };
+    case 'drifted':
+      return { tone: 'danger', label: 'Drifted' };
+    default:
+      return { tone: 'neutral', label: 'Offline' };
   }
-  const activeNamespaces = namespaces.filter((ns) => ns.head_seq > 0);
-  const behind = activeNamespaces.filter((ns) => (node.synced_seqs[ns.namespace] ?? 0) < ns.head_seq);
-  const detailsTooltip =
-    activeNamespaces.length === 0
-      ? 'No live policies configured yet'
-      : activeNamespaces
-          .map((ns) => `${ns.namespace}: v${node.synced_seqs[ns.namespace] ?? 0} / v${ns.head_seq}`)
-          .join('\n');
-
-  if (behind.length === 0) {
-    return (
-      <span className="badge badge-ok" title={detailsTooltip}>
-        <CheckCircle2 size={12} />
-        <span>Up to date</span>
-      </span>
-    );
-  }
-
-  return (
-    <span className="badge badge-warn" title={detailsTooltip}>
-      <span>
-        {behind.length} {behind.length === 1 ? 'group' : 'groups'} syncing
-      </span>
-    </span>
-  );
 }
 
 export function FleetPage({
   cluster,
+  headerCtx,
   openConnectModal,
   onConnectModalClose,
+  onOpenConnectModal,
 }: {
   cluster: Cluster;
+  headerCtx: ClusterHeaderContext;
   openConnectModal: boolean;
   onConnectModalClose: () => void;
+  onOpenConnectModal: () => void;
 }) {
   const toast = useToast();
+  const [tab, setTab] = useState<FleetTab>('nodes');
+  const [search, setSearch] = useState('');
   const [nodes, setNodes] = useState<NodeRecord[]>([]);
   const [tokens, setTokens] = useState<BootstrapTokenMeta[]>([]);
-  const [namespaces, setNamespaces] = useState<NamespaceStateSummary[]>([]);
   const [loading, setLoading] = useState(true);
-  const [autoRefresh, setAutoRefresh] = useState(true);
 
-  // Connect Node / Bootstrap Token creation modal state
+  // Connect Node modal
   const [tokenName, setTokenName] = useState('fleet-enrollment');
   const [tokenLabels, setTokenLabels] = useState('ring=stable');
   const [tokenHours, setTokenHours] = useState('720');
   const [createdToken, setCreatedToken] = useState<CreatedBootstrapToken | null>(null);
   const [creatingToken, setCreatingToken] = useState(false);
 
-  // Edit Node Labels modal
+  // Labels modal
   const [editingNode, setEditingNode] = useState<NodeRecord | null>(null);
   const [editLabelsStr, setEditLabelsStr] = useState('');
 
   const load = async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      const [n, t, ns] = await Promise.all([
+      const [n, t] = await Promise.all([
         api.listNodes(cluster.slug),
         api.listBootstrapTokens(cluster.slug).catch(() => []),
-        api.listStateNamespaces(cluster.slug).catch(() => []),
       ]);
       setNodes(n);
       setTokens(t);
-      setNamespaces(ns);
     } catch (err) {
-      if (!silent) {
-        toast.push(err instanceof ApiProblemError ? err.message : 'Failed to load fleet', 'error');
-      }
+      if (!silent) toast.push(err instanceof ApiProblemError ? err.message : 'Failed to load fleet', 'error');
     } finally {
       if (!silent) setLoading(false);
     }
@@ -135,21 +98,15 @@ export function FleetPage({
 
   useEffect(() => {
     load();
+    const id = window.setInterval(() => load(true), 5000);
+    return () => window.clearInterval(id);
   }, [cluster.slug]);
 
-  useEffect(() => {
-    if (!autoRefresh) return;
-    const id = window.setInterval(() => load(true), 4000);
-    return () => window.clearInterval(id);
-  }, [autoRefresh, cluster.slug]);
-
-  const parseLabelsString = (raw: string): Record<string, string> => {
+  const parseLabels = (raw: string): Record<string, string> => {
     const out: Record<string, string> = {};
     for (const part of raw.split(',').map((s) => s.trim()).filter(Boolean)) {
       const idx = part.indexOf('=');
-      if (idx > 0) {
-        out[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
-      }
+      if (idx > 0) out[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
     }
     return out;
   };
@@ -160,11 +117,11 @@ export function FleetPage({
     try {
       const res = await api.createBootstrapToken(cluster.slug, {
         name: tokenName.trim() || 'node-enrollment',
-        default_labels: parseLabelsString(tokenLabels),
+        default_labels: parseLabels(tokenLabels),
         expires_in_hours: Number(tokenHours) > 0 ? Number(tokenHours) : null,
       });
       setCreatedToken(res);
-      toast.push('Bootstrap token generated — copy the command below');
+      toast.push('Bootstrap token generated');
       load(true);
     } catch (err) {
       toast.push(err instanceof ApiProblemError ? err.message : String(err), 'error');
@@ -173,20 +130,10 @@ export function FleetPage({
     }
   };
 
-  const handleRevokeToken = async (id: string) => {
-    try {
-      await api.revokeBootstrapToken(cluster.slug, id);
-      toast.push('Bootstrap token revoked');
-      load(true);
-    } catch (err) {
-      toast.push(err instanceof ApiProblemError ? err.message : String(err), 'error');
-    }
-  };
-
   const handleSaveLabels = async () => {
     if (!editingNode) return;
     try {
-      await api.updateNodeLabels(cluster.slug, editingNode.id, parseLabelsString(editLabelsStr));
+      await api.updateNodeLabels(cluster.slug, editingNode.id, parseLabels(editLabelsStr));
       toast.push(`Updated labels for ${editingNode.name}`);
       setEditingNode(null);
       load(true);
@@ -197,278 +144,212 @@ export function FleetPage({
 
   const handleDeleteNode = async (node: NodeRecord) => {
     if (!window.confirm(`Deregister node "${node.name}" from ${cluster.slug}?`)) return;
-    try {
-      await api.deleteNode(cluster.slug, node.id);
-      toast.push(`Removed ${node.name}`);
-      load(true);
-    } catch (err) {
-      toast.push(err instanceof ApiProblemError ? err.message : String(err), 'error');
-    }
+    await api.deleteNode(cluster.slug, node.id);
+    toast.push(`Removed ${node.name}`);
+    load(true);
   };
 
-  const syncedCount = nodes.filter((n) => n.status === 'synced').length;
+  const handleRevokeToken = async (id: string) => {
+    await api.revokeBootstrapToken(cluster.slug, id);
+    toast.push('Enrollment token revoked');
+    load(true);
+  };
+
+  const q = search.trim().toLowerCase();
+  const filteredNodes = nodes.filter(
+    (n) => !q || n.name.toLowerCase().includes(q) || n.id.toLowerCase().includes(q)
+  );
+  const filteredTokens = tokens.filter(
+    (t) => !q || t.name.toLowerCase().includes(q) || t.prefix.toLowerCase().includes(q)
+  );
 
   return (
-    <div className="space-y-5">
-      {/* Page Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2.5">
-            <h1 className="m-0 text-[22px] font-semibold tracking-tight">Fleet &amp; Nodes</h1>
-            <span className="badge mono tabular">{nodes.length} nodes</span>
-            {nodes.length > 0 && (
-              <span className={syncedCount === nodes.length ? 'badge badge-ok tabular' : 'badge badge-warn tabular'}>
-                {syncedCount}/{nodes.length} synced
-              </span>
-            )}
-          </div>
-          <p className="m-0 mt-1 text-sm" style={{ color: 'var(--text-muted)' }}>
-            Connected <code>shunt</code> data-plane instances, release convergence, canary labels, and live policy sync health.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2.5 shrink-0">
-          <label
-            className="flex items-center gap-2 text-sm cursor-pointer select-none px-3 py-2 rounded-lg surface"
-          >
-            <input
-              type="checkbox"
-              checked={autoRefresh}
-              onChange={(e) => setAutoRefresh(e.target.checked)}
-            />
-            <span>Auto-poll</span>
-          </label>
-          <button type="button" className="btn" onClick={() => load()}>
-            <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
-            <span>Refresh</span>
+    <div>
+      <PageHeader
+        title="Fleet"
+        ctx={headerCtx}
+        secondaryAction={
+          <button type="button" className="btn h-8 px-2.5" onClick={() => load()} title="Refresh">
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
           </button>
+        }
+        primaryAction={
           <button
             type="button"
-            className="btn btn-primary"
+            className="btn btn-primary h-8"
             onClick={() => {
               setCreatedToken(null);
-              window.dispatchEvent(new CustomEvent('shunt-open-connect-node'));
+              onOpenConnectModal();
             }}
           >
-            <Plus size={15} />
-            <span>Connect Node</span>
+            <Plus size={14} />
+            <span>Connect node</span>
           </button>
-        </div>
-      </div>
+        }
+        controlsLeft={
+          <SegmentedTabs
+            value={tab}
+            onChange={setTab}
+            items={[
+              { id: 'nodes', label: 'Nodes', count: nodes.length },
+              { id: 'tokens', label: 'Enrollment Tokens', count: tokens.length },
+            ]}
+          />
+        }
+        controlsRight={<SearchField value={search} onChange={setSearch} placeholder="Search fleet" />}
+      />
 
-      {/* Main Split */}
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
-        <div className="surface overflow-hidden xl:col-span-8">
-          <div
-            className="px-5 py-3.5 flex items-center justify-between"
-            style={{ borderBottom: '1px solid var(--border)' }}
-          >
-            <h2 className="m-0 text-sm font-semibold flex items-center gap-2">
-              <Server size={15} style={{ color: 'var(--text-muted)' }} />
-              <span>Enrolled Data-Plane Nodes</span>
-            </h2>
-            <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
-              Outbound-only connections
-            </span>
-          </div>
-
-          {nodes.length === 0 ? (
-            <div className="p-12 text-center space-y-3">
-              <Server size={28} style={{ color: 'var(--text-muted)' }} className="mx-auto" />
-              <div className="font-semibold text-base">No nodes enrolled in {cluster.slug}</div>
-              <p className="m-0 text-sm max-w-md mx-auto" style={{ color: 'var(--text-muted)' }}>
-                Generate a cluster bootstrap token and start any <code>shunt</code> binary with{' '}
-                <code>--control-plane</code>. No local config file needed.
-              </p>
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => window.dispatchEvent(new CustomEvent('shunt-open-connect-node'))}
-              >
-                <Terminal size={15} />
-                <span>Connect First Node</span>
-              </button>
-            </div>
+      {tab === 'nodes' && (
+        <div>
+          {filteredNodes.length === 0 ? (
+            <EmptyState
+              icon={<Server size={17} />}
+              title={`No nodes enrolled in ${cluster.slug}`}
+              description="Start any stateless shunt binary with --control-plane. Nodes connect outbound-only and pull signed releases automatically."
+              action={
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setCreatedToken(null);
+                    onOpenConnectModal();
+                  }}
+                >
+                  <Terminal size={14} />
+                  <span>Connect First Node</span>
+                </button>
+              }
+            />
           ) : (
-            <div className="overflow-x-auto">
-              <table className="swiss-table">
-                <thead>
-                  <tr>
-                    <th>Node</th>
-                    <th>Status</th>
-                    <th>Config Release</th>
-                    <th>Live Policies</th>
-                    <th>Labels</th>
-                    <th>Heartbeat</th>
-                    <th className="text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {nodes.map((node) => (
-                    <React.Fragment key={node.id}>
-                      <tr>
-                        <td className="whitespace-nowrap">
-                          <div className="font-semibold">{node.name}</div>
-                          <div className="mono text-xs" style={{ color: 'var(--text-muted)' }}>
-                            {node.id} · v{node.shunt_version}
-                          </div>
-                        </td>
-                        <td className="whitespace-nowrap">
-                          <NodeStatusBadge status={node.status} />
-                        </td>
-                        <td className="mono whitespace-nowrap">
-                          <div>
-                            <strong>v{node.active_revision}</strong>
-                            {node.target_revision != null && node.target_revision !== node.active_revision && (
-                              <span style={{ color: 'var(--warn)' }}> → v{node.target_revision}</span>
-                            )}
-                          </div>
-                          <div className="text-xs" style={{ color: 'var(--text-muted)' }}>
-                            {shortDigest(node.active_digest)}
-                          </div>
-                        </td>
-                        <td className="whitespace-nowrap">
-                          <PolicySyncCell node={node} namespaces={namespaces} />
-                        </td>
-                        <td>
-                          <div className="flex flex-wrap gap-1">
-                            {Object.entries(node.labels).length === 0 ? (
-                              <span style={{ color: 'var(--text-muted)' }}>—</span>
-                            ) : (
-                              Object.entries(node.labels).map(([k, v]) => (
-                                <span key={k} className="badge mono">
-                                  {k}={v}
-                                </span>
-                              ))
-                            )}
-                          </div>
-                        </td>
-                        <td className="text-xs whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
-                          {formatRelativeTime(node.last_heartbeat_at)}
-                        </td>
-                        <td className="text-right whitespace-nowrap">
-                          <div className="inline-flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              className="btn btn-sm"
-                              title="Edit labels (canary rings)"
-                              onClick={() => {
-                                setEditingNode(node);
-                                setEditLabelsStr(
-                                  Object.entries(node.labels)
-                                    .map(([k, v]) => `${k}=${v}`)
-                                    .join(',')
-                                );
-                              }}
-                            >
-                              <Tag size={13} />
-                              <span>Labels</span>
-                            </button>
-                            <button
-                              type="button"
-                              className="btn-ghost p-1.5 rounded-md cursor-pointer border-0"
-                              style={{ color: 'var(--danger)' }}
-                              title="Deregister node"
-                              onClick={() => handleDeleteNode(node)}
-                            >
-                              <Trash2 size={15} />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                      {node.last_reload_error && (
-                        <tr>
-                          <td colSpan={7} style={{ background: 'var(--danger-soft)' }}>
-                            <div className="flex items-start gap-2 text-sm" style={{ color: 'var(--danger)' }}>
-                              <AlertTriangle size={16} className="shrink-0 mt-0.5" />
-                              <div>
-                                <strong>Last reload failed (previous snapshot preserved):</strong>{' '}
-                                <code className="mono">{node.last_reload_error}</code>
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </React.Fragment>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        {/* Enrollment Tokens */}
-        <div className="surface overflow-hidden xl:col-span-4">
-          <div
-            className="px-5 py-3.5 flex items-center justify-between"
-            style={{ borderBottom: '1px solid var(--border)' }}
-          >
-            <h2 className="m-0 text-sm font-semibold flex items-center gap-2">
-              <KeyRound size={15} style={{ color: 'var(--text-muted)' }} />
-              <span>Enrollment Tokens ({tokens.length})</span>
-            </h2>
-          </div>
-
-          {tokens.length === 0 ? (
-            <div className="p-8 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
-              No enrollment tokens created yet.
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="swiss-table">
-                <thead>
-                  <tr>
-                    <th>Token</th>
-                    <th>Uses</th>
-                    <th>Status</th>
-                    <th className="text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {tokens.map((t) => (
-                    <tr key={t.id}>
-                      <td>
-                        <div className="font-medium">{t.name}</div>
-                        <div className="mono text-xs" style={{ color: 'var(--text-muted)' }}>
-                          {t.prefix}
+            <div>
+              {filteredNodes.map((node) => {
+                const st = statusTone(node.status);
+                return (
+                  <div key={node.id} style={{ borderBottom: '1px solid var(--border-row)' }} className="last:border-b-0">
+                    <div className="row-item" style={{ borderBottom: 'none' }}>
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="icon-tile">
+                          <Server size={14} />
                         </div>
-                      </td>
-                      <td className="mono whitespace-nowrap">
-                        {t.uses_count}
-                        {t.max_uses ? `/${t.max_uses}` : ''}
-                      </td>
-                      <td className="whitespace-nowrap">
-                        {t.revoked_at ? (
-                          <span className="badge badge-danger">
-                            <XCircle size={12} />
-                            Revoked
-                          </span>
-                        ) : (
-                          <span className="badge badge-ok">
-                            <CheckCircle2 size={12} />
-                            Active
-                          </span>
-                        )}
-                      </td>
-                      <td className="text-right whitespace-nowrap">
-                        {!t.revoked_at && (
-                          <button
-                            type="button"
-                            className="btn btn-sm btn-danger"
-                            onClick={() => handleRevokeToken(t.id)}
-                          >
-                            Revoke
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                        <span className="text-[14px] font-medium truncate">{node.name}</span>
+                        <TagPill mono dot={node.target_revision && node.target_revision !== node.active_revision ? 'warn' : 'ok'}>
+                          v{node.active_revision}
+                          {node.target_revision != null && node.target_revision !== node.active_revision
+                            ? ` → v${node.target_revision}`
+                            : ''}
+                        </TagPill>
+                        <span className="hidden xl:inline mono text-[11.5px]" style={{ color: 'var(--ink-muted)' }}>
+                          {shortDigest(node.active_digest)}
+                        </span>
+                        {Object.entries(node.labels).map(([k, v]) => (
+                          <TagPill key={k} mono dot={k === 'ring' && v === 'canary' ? 'brand' : undefined}>
+                            {k}={v}
+                          </TagPill>
+                        ))}
+                      </div>
+
+                      <div className="flex items-center gap-3 shrink-0">
+                        <StatusIndicator tone={st.tone} label={st.label} />
+                        <span className="hidden md:inline text-[12px] tabular w-16 text-right" style={{ color: 'var(--ink-muted)' }}>
+                          {formatRelativeTime(node.last_heartbeat_at)}
+                        </span>
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() => {
+                            setEditingNode(node);
+                            setEditLabelsStr(
+                              Object.entries(node.labels)
+                                .map(([k, v]) => `${k}=${v}`)
+                                .join(',')
+                            );
+                          }}
+                        >
+                          <Tag size={12} />
+                          <span>Labels</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-ghost p-1.5"
+                          style={{ color: 'var(--ink-muted)' }}
+                          onClick={() => handleDeleteNode(node)}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </div>
+
+                    {node.last_reload_error && (
+                      <div
+                        className="mx-6 mb-3 px-3.5 py-2 rounded-lg text-[12.5px] flex items-start gap-2"
+                        style={{
+                          background: 'var(--danger-soft)',
+                          border: '1px solid var(--danger-border)',
+                          color: 'var(--danger)',
+                        }}
+                      >
+                        <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                        <span className="mono break-all">{node.last_reload_error}</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
-      </div>
+      )}
+
+      {tab === 'tokens' && (
+        <div>
+          {filteredTokens.length === 0 ? (
+            <EmptyState
+              icon={<KeyRound size={17} />}
+              title="No enrollment tokens"
+              description="Generate a scoped bootstrap token to enroll Shunt data-plane instances into this cluster."
+              action={
+                <button type="button" className="btn btn-primary" onClick={onOpenConnectModal}>
+                  <Plus size={14} />
+                  <span>Generate Token</span>
+                </button>
+              }
+            />
+          ) : (
+            <div>
+              {filteredTokens.map((t) => (
+                <div key={t.id} className="row-item">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="icon-tile">
+                      <KeyRound size={14} />
+                    </div>
+                    <span className="text-[14px] font-medium truncate">{t.name}</span>
+                    <TagPill mono>{t.prefix}</TagPill>
+                    <span className="mono text-[12px]" style={{ color: 'var(--ink-muted)' }}>
+                      {t.uses_count}
+                      {t.max_uses ? `/${t.max_uses}` : ''} uses
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-4 shrink-0">
+                    <StatusIndicator
+                      tone={t.revoked_at ? 'danger' : 'ok'}
+                      label={t.revoked_at ? 'Revoked' : 'Active'}
+                    />
+                    {!t.revoked_at && (
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-danger"
+                        onClick={() => handleRevokeToken(t.id)}
+                      >
+                        Revoke
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Connect Node Modal */}
       <Modal
@@ -478,55 +359,44 @@ export function FleetPage({
           onConnectModalClose();
         }}
         title={`Connect a Shunt node to ${cluster.slug}`}
-        subtitle="Generate a cluster bootstrap token and copy the ready-to-run command."
+        subtitle="Generate an enrollment token and copy the ready-to-run command."
         maxWidth="max-w-2xl"
       >
         {!createdToken ? (
           <form onSubmit={handleCreateToken} className="space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
               <div>
-                <label className="block text-sm font-medium mb-1.5">Token Name</label>
+                <label className="block text-[12.5px] font-medium mb-1">Token Name</label>
                 <input
                   className="input-base"
                   value={tokenName}
                   onChange={(e) => setTokenName(e.target.value)}
-                  placeholder="prod-us-asg"
                   required
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1.5">Expiry (hours, 0 = none)</label>
+                <label className="block text-[12.5px] font-medium mb-1">Expiry (hours, 0 = none)</label>
                 <input
-                  className="input-base mono"
                   type="number"
+                  className="input-base mono"
                   value={tokenHours}
                   onChange={(e) => setTokenHours(e.target.value)}
                 />
               </div>
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1.5">
-                Default Node Labels (comma-separated)
-              </label>
+              <label className="block text-[12.5px] font-medium mb-1">Default Node Labels</label>
               <input
                 className="input-base mono"
                 value={tokenLabels}
                 onChange={(e) => setTokenLabels(e.target.value)}
                 placeholder="ring=stable,region=us-east-1"
               />
-              <div className="mt-2 flex gap-2">
-                <button
-                  type="button"
-                  className="btn btn-sm"
-                  onClick={() => setTokenLabels('ring=stable')}
-                >
+              <div className="flex gap-2 mt-2">
+                <button type="button" className="btn btn-sm" onClick={() => setTokenLabels('ring=stable')}>
                   ring=stable
                 </button>
-                <button
-                  type="button"
-                  className="btn btn-sm"
-                  onClick={() => setTokenLabels('ring=canary')}
-                >
+                <button type="button" className="btn btn-sm" onClick={() => setTokenLabels('ring=canary')}>
                   ring=canary
                 </button>
               </div>
@@ -536,23 +406,13 @@ export function FleetPage({
                 Cancel
               </button>
               <button type="submit" className="btn btn-primary" disabled={creatingToken}>
-                <Terminal size={15} />
-                <span>{creatingToken ? 'Generating…' : 'Generate Token & Command'}</span>
+                <Terminal size={14} />
+                <span>{creatingToken ? 'Generating…' : 'Generate Command'}</span>
               </button>
             </div>
           </form>
         ) : (
           <div className="space-y-4">
-            <div
-              className="p-3.5 rounded-lg text-sm"
-              style={{
-                background: 'var(--ok-soft)',
-                border: '1px solid var(--ok-border)',
-                color: 'var(--ok)',
-              }}
-            >
-              Bootstrap token created! Copy it now — the plaintext secret is never stored or displayed again.
-            </div>
             <ConnectCommandBox
               controlPlaneUrl={window.location.origin}
               clusterSlug={cluster.slug}
@@ -579,28 +439,23 @@ export function FleetPage({
       <Modal
         open={Boolean(editingNode)}
         onClose={() => setEditingNode(null)}
-        title={`Edit labels for ${editingNode?.name || ''}`}
-        subtitle="Changing labels immediately re-evaluates canary ring assignments for this node."
+        title={`Edit labels · ${editingNode?.name || ''}`}
+        subtitle="Changing labels immediately re-evaluates canary ring assignments."
       >
         <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-1.5">
-              Labels (<code>key=value,key2=value2</code>)
-            </label>
-            <input
-              className="input-base mono"
-              value={editLabelsStr}
-              onChange={(e) => setEditLabelsStr(e.target.value)}
-              placeholder="ring=canary,region=us-east-1"
-              autoFocus
-            />
-          </div>
-          <div className="flex justify-end gap-2.5">
+          <input
+            className="input-base mono"
+            value={editLabelsStr}
+            onChange={(e) => setEditLabelsStr(e.target.value)}
+            placeholder="ring=canary,region=us-east-1"
+            autoFocus
+          />
+          <div className="flex justify-end gap-2">
             <button type="button" className="btn" onClick={() => setEditingNode(null)}>
               Cancel
             </button>
             <button type="button" className="btn btn-primary" onClick={handleSaveLabels}>
-              Save &amp; Re-evaluate Ring
+              Save Labels
             </button>
           </div>
         </div>

@@ -1,21 +1,24 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Activity,
-  FileCode2,
-  KeyRound,
-  Layers,
+  Blocks,
+  Code2,
+  ExternalLink,
+  GitBranch,
+  History,
+  Home,
   Moon,
+  Rocket,
   Search,
   Server,
   Shield,
+  Sparkles,
   Sun,
   Terminal,
-  ExternalLink,
 } from 'lucide-react';
 import { Cluster } from '../lib/api';
 import { useTheme } from './ui';
 
-export type NavSection = 'overview' | 'fleet' | 'topology' | 'state' | 'secrets' | 'access';
+export type NavSection = 'overview' | 'ai' | 'mcp' | 'routes' | 'fleet' | 'releases' | 'security';
 
 export interface CommandAction {
   id: string;
@@ -33,6 +36,8 @@ export function CommandPalette({
   clusters,
   onSelectCluster,
   onQuickConnectNode,
+  onOpenApi,
+  onOpenPublish,
 }: {
   open: boolean;
   onClose: () => void;
@@ -40,6 +45,8 @@ export function CommandPalette({
   clusters: Cluster[];
   onSelectCluster: (slug: string) => void;
   onQuickConnectNode: () => void;
+  onOpenApi: () => void;
+  onOpenPublish: () => void;
 }) {
   const [query, setQuery] = useState('');
   const [idx, setIdx] = useState(0);
@@ -47,92 +54,31 @@ export function CommandPalette({
 
   const actions = useMemo<CommandAction[]>(() => {
     const base: CommandAction[] = [
-      {
-        id: 'nav-overview',
-        group: 'Navigate',
-        label: 'Cluster Overview',
-        hint: 'Health, active revision, convergence',
-        icon: <Activity size={15} />,
-        run: () => onNavigate('overview'),
-      },
-      {
-        id: 'nav-fleet',
-        group: 'Navigate',
-        label: 'Fleet & Nodes',
-        hint: 'Enrolled nodes, drift status, labels',
-        icon: <Server size={15} />,
-        run: () => onNavigate('fleet'),
-      },
-      {
-        id: 'nav-topology',
-        group: 'Navigate',
-        label: 'Config & Releases',
-        hint: 'Routes, upstreams, plugins, verify & rollback',
-        icon: <FileCode2 size={15} />,
-        run: () => onNavigate('topology'),
-      },
-      {
-        id: 'nav-state',
-        group: 'Navigate',
-        label: 'Live Policies',
-        hint: 'Instant fleet-wide keys, budgets, ACLs & kill-switches',
-        icon: <Layers size={15} />,
-        run: () => onNavigate('state'),
-      },
-      {
-        id: 'nav-secrets',
-        group: 'Navigate',
-        label: 'Secrets Vault',
-        hint: 'AES-256-GCM envelope vault & env refs',
-        icon: <KeyRound size={15} />,
-        run: () => onNavigate('secrets'),
-      },
-      {
-        id: 'nav-access',
-        group: 'Navigate',
-        label: 'Access, API Tokens & Audit Log',
-        hint: 'RBAC, OIDC, hash-chain verification',
-        icon: <Shield size={15} />,
-        run: () => onNavigate('access'),
-      },
-      {
-        id: 'act-connect',
-        group: 'Quick Actions',
-        label: 'Connect a Shunt Node',
-        hint: 'Generate bootstrap token & CLI snippet',
-        icon: <Terminal size={15} />,
-        run: onQuickConnectNode,
-      },
-      {
-        id: 'act-theme',
-        group: 'Preferences',
-        label: `Cycle Theme (current: ${theme.pref})`,
-        hint: 'System / Light / Dark',
-        icon: theme.resolved === 'dark' ? <Sun size={15} /> : <Moon size={15} />,
-        run: () => theme.cycle(),
-      },
-      {
-        id: 'act-openapi',
-        group: 'Developer',
-        label: 'Open OpenAPI 3.1 Specification JSON',
-        hint: '/api/v1/openapi.json',
-        icon: <ExternalLink size={15} />,
-        run: () => window.open('/api/v1/openapi.json', '_blank'),
-      },
+      { id: 'nav-overview', group: 'Navigate', label: 'Overview', hint: 'Quickstart & live pulse', icon: <Home size={14} />, run: () => onNavigate('overview') },
+      { id: 'nav-ai', group: 'Navigate', label: 'AI Gateway', hint: 'Providers, models, virtual keys, guardrails', icon: <Sparkles size={14} />, run: () => onNavigate('ai') },
+      { id: 'nav-mcp', group: 'Navigate', label: 'MCP Gateway', hint: 'MCP servers, agents & kill-switch', icon: <Blocks size={14} />, run: () => onNavigate('mcp') },
+      { id: 'nav-routes', group: 'Navigate', label: 'HTTP Routes & Upstreams', hint: 'API routes, pools & shunt.toml', icon: <GitBranch size={14} />, run: () => onNavigate('routes') },
+      { id: 'nav-fleet', group: 'Navigate', label: 'Fleet & Nodes', hint: 'Connected shunt nodes & tokens', icon: <Server size={14} />, run: () => onNavigate('fleet') },
+      { id: 'nav-releases', group: 'Navigate', label: 'Releases & Rollback', hint: 'Signed revisions & canary rings', icon: <History size={14} />, run: () => onNavigate('releases') },
+      { id: 'nav-security', group: 'Navigate', label: 'Security & Audit', hint: 'Secrets vault, RBAC, SSO & audit chain', icon: <Shield size={14} />, run: () => onNavigate('security') },
+      { id: 'act-api', group: 'Quick Actions', label: 'Use Gateway (API & SDK Snippets)', hint: 'Python, TypeScript, Claude Code, cURL, MCP', icon: <Code2 size={14} />, run: onOpenApi },
+      { id: 'act-publish', group: 'Quick Actions', label: 'Publish Signed Release', hint: 'Validate and roll out draft', icon: <Rocket size={14} />, run: onOpenPublish },
+      { id: 'act-connect', group: 'Quick Actions', label: 'Connect a Shunt Node', hint: 'Mint bootstrap token & CLI snippet', icon: <Terminal size={14} />, run: onQuickConnectNode },
+      { id: 'act-theme', group: 'Preferences', label: `Switch Theme (${theme.pref})`, hint: 'Light / Dark / System', icon: theme.resolved === 'dark' ? <Sun size={14} /> : <Moon size={14} />, run: () => theme.cycle() },
+      { id: 'act-openapi', group: 'Developer', label: 'OpenAPI 3.1 Spec', hint: '/api/v1/openapi.json', icon: <ExternalLink size={14} />, run: () => window.open('/api/v1/openapi.json', '_blank') },
     ];
-
     for (const c of clusters) {
       base.push({
         id: `cluster-${c.slug}`,
-        group: 'Switch Cluster',
-        label: `${c.name} (${c.slug})`,
-        hint: c.environment,
-        icon: <Server size={15} />,
+        group: 'Clusters',
+        label: c.name,
+        hint: `${c.slug} · ${c.environment}`,
+        icon: <Server size={14} />,
         run: () => onSelectCluster(c.slug),
       });
     }
     return base;
-  }, [clusters, onNavigate, onSelectCluster, onQuickConnectNode, theme]);
+  }, [clusters, onNavigate, onSelectCluster, onQuickConnectNode, onOpenApi, onOpenPublish, theme]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -152,9 +98,7 @@ export function CommandPalette({
     }
   }, [open]);
 
-  useEffect(() => {
-    setIdx(0);
-  }, [query]);
+  useEffect(() => setIdx(0), [query]);
 
   useEffect(() => {
     if (!open) return;
@@ -183,36 +127,34 @@ export function CommandPalette({
   return (
     <div
       className="fixed inset-0 z-50 flex items-start justify-center pt-[14vh] p-4"
-      style={{ background: 'rgba(0, 0, 0, 0.42)', backdropFilter: 'blur(3px)' }}
+      style={{ background: 'rgba(17, 17, 19, 0.35)', backdropFilter: 'blur(3px)' }}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="surface w-full max-w-lg shadow-2xl overflow-hidden">
+      <div
+        className="w-full max-w-lg shadow-2xl overflow-hidden"
+        style={{ background: 'var(--sheet)', border: '1px solid var(--border)', borderRadius: 14 }}
+      >
         <div
           className="flex items-center gap-2.5 px-4 py-3"
-          style={{ borderBottom: '1px solid var(--border)' }}
+          style={{ borderBottom: '1px solid var(--border-row)' }}
         >
-          <Search size={16} style={{ color: 'var(--text-muted)' }} />
+          <Search size={15} style={{ color: 'var(--ink-muted)' }} />
           <input
-            className="flex-1 bg-transparent border-0 outline-none text-sm"
-            style={{ color: 'var(--text-primary)' }}
-            placeholder="Jump to view, switch cluster, or run action…"
+            className="flex-1 bg-transparent border-0 outline-none text-[13.5px]"
+            style={{ color: 'var(--ink)' }}
+            placeholder="Jump to AI Gateway, models, fleet, or actions…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             autoFocus
           />
-          <kbd
-            className="text-[11px] mono px-1.5 py-0.5 rounded"
-            style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border)', color: 'var(--text-muted)' }}
-          >
-            ESC
-          </kbd>
+          <kbd className="tag-pill mono text-[11px]">ESC</kbd>
         </div>
 
         <div className="max-h-80 overflow-y-auto py-1.5">
           {filtered.length === 0 ? (
-            <div className="px-4 py-8 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
+            <div className="px-4 py-8 text-center text-[12.5px]" style={{ color: 'var(--ink-muted)' }}>
               No matching commands
             </div>
           ) : (
@@ -227,15 +169,15 @@ export function CommandPalette({
                 }}
                 className="w-full text-left px-4 py-2.5 flex items-center justify-between gap-3 cursor-pointer border-0 transition-colors"
                 style={{
-                  background: i === idx ? 'var(--bg-hover)' : 'transparent',
-                  color: 'var(--text-primary)',
+                  background: i === idx ? 'var(--surface-subtle)' : 'transparent',
+                  color: 'var(--ink)',
                 }}
               >
                 <div className="flex items-center gap-2.5 min-w-0">
-                  <span style={{ color: 'var(--text-muted)' }}>{item.icon}</span>
-                  <span className="text-sm font-medium truncate">{item.label}</span>
+                  <span style={{ color: i === idx ? 'var(--brand)' : 'var(--ink-muted)' }}>{item.icon}</span>
+                  <span className="text-[13.5px] font-medium truncate">{item.label}</span>
                 </div>
-                <span className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>
+                <span className="text-[12px] truncate" style={{ color: 'var(--ink-muted)' }}>
                   {item.hint || item.group}
                 </span>
               </button>

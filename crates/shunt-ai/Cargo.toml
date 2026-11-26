@@ -10,6 +10,7 @@ description = "Generalized multi-provider AI router & gateway plugin pack for Sh
 [dependencies]
 shunt-plugin-sdk.workspace = true
 
+arc-swap.workspace = true
 regex.workspace = true
 ring.workspace = true
 serde.workspace = true

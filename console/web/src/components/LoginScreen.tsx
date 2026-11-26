@@ -32,27 +32,27 @@ export function LoginScreen({
   return (
     <div
       className="min-h-screen flex items-center justify-center p-6"
-      style={{ background: 'var(--bg-subtle)' }}
+      style={{ background: 'var(--shell)' }}
     >
-      <div className="surface w-full max-w-sm p-7 shadow-sm">
-        <div className="flex items-center gap-3 mb-6">
+      <div className="app-sheet w-full max-w-[380px] p-7">
+        <div className="flex items-center gap-3 mb-7">
           <ShuntMark size={30} />
           <div>
-            <div className="font-semibold text-base tracking-tight">Shunt Console</div>
-            <div className="text-xs mono" style={{ color: 'var(--text-muted)' }}>
+            <div className="font-semibold text-[15px] tracking-tight">Shunt Console</div>
+            <div className="text-[11.5px] mono" style={{ color: 'var(--ink-muted)' }}>
               v{status.version} · {status.db_kind}
             </div>
           </div>
         </div>
 
-        <h1 className="m-0 text-lg font-semibold tracking-tight">Sign in</h1>
-        <p className="m-0 mt-1 mb-5 text-xs" style={{ color: 'var(--text-muted)' }}>
-          Manage your HTTP API, AI, and MCP gateway fleets.
+        <h1 className="m-0 text-[18px] font-semibold tracking-[-0.02em]">Sign in</h1>
+        <p className="m-0 mt-1 mb-5 text-[13px]" style={{ color: 'var(--ink-muted)' }}>
+          Control plane for your AI, MCP, and HTTP API gateways.
         </p>
 
         {error && (
           <div
-            className="mb-4 p-3 rounded-lg text-xs"
+            className="mb-4 px-3 py-2.5 rounded-lg text-[12.5px]"
             style={{
               background: 'var(--danger-soft)',
               border: '1px solid var(--danger-border)',
@@ -65,7 +65,7 @@ export function LoginScreen({
 
         <form onSubmit={handleSubmit} className="space-y-3.5">
           <div>
-            <label className="block text-xs font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>
+            <label className="block text-[12px] font-medium mb-1" style={{ color: 'var(--ink-secondary)' }}>
               Email
             </label>
             <input
@@ -80,7 +80,7 @@ export function LoginScreen({
           </div>
 
           <div>
-            <label className="block text-xs font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>
+            <label className="block text-[12px] font-medium mb-1" style={{ color: 'var(--ink-secondary)' }}>
               Password
             </label>
             <input
@@ -93,15 +93,15 @@ export function LoginScreen({
             />
           </div>
 
-          <button type="submit" className="btn btn-primary w-full mt-1" disabled={loading}>
-            {loading ? <Loader2 size={15} className="animate-spin" /> : <LogIn size={15} />}
+          <button type="submit" className="btn btn-primary w-full h-9 mt-1" disabled={loading}>
+            {loading ? <Loader2 size={14} className="animate-spin" /> : <LogIn size={14} />}
             <span>{loading ? 'Signing in…' : 'Sign in'}</span>
           </button>
         </form>
 
         {status.oidc_providers.length > 0 && (
-          <div className="mt-5 pt-4" style={{ borderTop: '1px solid var(--border)' }}>
-            <div className="text-xs mb-2.5 text-center" style={{ color: 'var(--text-muted)' }}>
+          <div className="mt-5 pt-4" style={{ borderTop: '1px solid var(--border-row)' }}>
+            <div className="text-[12px] mb-2.5 text-center" style={{ color: 'var(--ink-muted)' }}>
               Or continue with SSO
             </div>
             <div className="space-y-2">
