@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use shunt_plugin_sdk::{
-    BuildContext, Flow, HeaderMap, HeaderName, HeaderValue, HookMask, HookResult, HttpPlugin,
-    PathParams, PluginBuildError, PluginConfig, PluginFactory, RequestCtx, RequestHead,
-    ResponseHead, UpstreamRequest,
+    BufferedResponse, BuildContext, Flow, HeaderMap, HeaderName, HeaderValue, HookMask, HookResult,
+    HttpPlugin, PathParams, PluginBuildError, PluginConfig, PluginFactory, RequestCtx, RequestHead,
+    ResponseHead, StatusCode, UpstreamRequest,
 };
 
 #[derive(Debug, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct HeaderRewriteConfig {
     request_set: HashMap<String, String>,
     request_add: HashMap<String, String>,
@@ -270,22 +270,46 @@ impl HttpPlugin for HeaderRewritePlugin {
             } else {
                 full.clone()
             };
+            if !is_safe_rewritten_path(&expanded_full) {
+                return HookResult::Ready(Flow::Respond(BufferedResponse::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid rewritten path",
+                )));
+            }
             let next_pq = match req.uri.query() {
                 Some(q) => format!("{expanded_full}?{q}"),
                 None => expanded_full,
             };
-            if let Ok(parsed) = next_pq.parse() {
-                req.uri = parsed;
+            match next_pq.parse() {
+                Ok(parsed) => req.uri = parsed,
+                Err(_) => {
+                    return HookResult::Ready(Flow::Respond(BufferedResponse::new(
+                        StatusCode::BAD_REQUEST,
+                        "invalid rewritten path",
+                    )));
+                }
             }
         } else if let Some(rep) = &self.path_replace_prefix {
             let match_pfx = self.path_match_prefix.as_deref().unwrap_or("/");
             let rewritten = crate::redirect::replace_path_prefix(req.uri.path(), match_pfx, rep);
+            if !is_safe_rewritten_path(&rewritten) {
+                return HookResult::Ready(Flow::Respond(BufferedResponse::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid rewritten path",
+                )));
+            }
             let next_pq = match req.uri.query() {
                 Some(q) => format!("{rewritten}?{q}"),
                 None => rewritten,
             };
-            if let Ok(parsed) = next_pq.parse() {
-                req.uri = parsed;
+            match next_pq.parse() {
+                Ok(parsed) => req.uri = parsed,
+                Err(_) => {
+                    return HookResult::Ready(Flow::Respond(BufferedResponse::new(
+                        StatusCode::BAD_REQUEST,
+                        "invalid rewritten path",
+                    )));
+                }
             }
         }
         HookResult::Ready(Flow::Continue)
@@ -299,6 +323,19 @@ impl HttpPlugin for HeaderRewritePlugin {
         self.res_ops.apply(&mut res.headers, &ctx.path_params);
         HookResult::Ready(Flow::Continue)
     }
+}
+
+/// Validates a rewritten path so interpolated `{param}` / `{*wildcard}` values cannot inject
+/// traversal segments, query/fragment delimiters, encoded slashes/dots, or control characters.
+fn is_safe_rewritten_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    if bytes.first() != Some(&b'/') {
+        return false;
+    }
+    if bytes.iter().any(|&b| matches!(b, b'?' | b'#')) {
+        return false;
+    }
+    shunt_plugin_sdk::validate_request_path(path).is_ok()
 }
 
 #[cfg(test)]

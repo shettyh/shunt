@@ -13,6 +13,7 @@ pub mod mask;
 pub mod plugin;
 pub mod state;
 pub mod telemetry;
+pub mod validation;
 
 pub use bytes::Bytes;
 pub use clock::{Clock, ManualClock, SystemClock};
@@ -37,4 +38,8 @@ pub use telemetry::{
     InMemoryTelemetrySink, ParsedTraceparent, SpanEvent, SpanHandle, SpanKind, SpanRecord,
     SpanStatusCode, SpanValue, TelemetrySink, TraceAnnotations, TraceContext, current_unix_nanos,
     encode_hex_lower, generate_span_id, generate_trace_id,
+};
+pub use validation::{
+    ContentLengthError, parse_and_validate_content_length, validate_request_path,
+    validate_request_path_allow_encoded_slashes,
 };

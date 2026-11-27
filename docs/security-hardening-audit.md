@@ -1,7 +1,7 @@
 # Shunt — Security & Hardening Audit
 
-**Status:** Audit Complete (Ready for Remediation Planning)  
-**Scope:** Line-by-line security and hardening audit of all production Rust crates (`shunt-engine`, `shunt-plugin-sdk`, `shunt-plugins`, `shunt-config`, `shunt-cli`, `shunt-ai`, `shunt-mcp`), plus CI workflows (`.github/workflows/{ci,security,verify}.yml`), `deny.toml`, `Dockerfile`, 18 `cargo-fuzz` targets, `proptest` suites, TLA+ specs, Kani bounded proofs, and soak/reload tests. Includes pre-merge security findings for in-progress RFC 0023 Control Plane files (`control_plane.rs`, `sync.rs`), explicitly tagged below.  
+**Status:** Wave 1 Implemented (`hardening/wave1-core-and-auth`); Waves 2–4 Pending (`shunt-console` / RFC 0023 deferred)  
+**Scope:** Line-by-line security and hardening audit of all production Rust crates (`shunt-engine`, `shunt-plugin-sdk`, `shunt-plugins`, `shunt-config`, `shunt-cli`, `shunt-ai`, `shunt-mcp`), plus CI workflows (`.github/workflows/{ci,security,verify}.yml`), `deny.toml`, `Dockerfile`, 18 `cargo-fuzz` targets, `proptest` suites, TLA+ specs, Kani bounded proofs, and soak/reload tests. Pre-merge findings for `shunt-console` / RFC 0023 Control Plane files (`control_plane.rs`, `sync.rs`) are documented for reference but **explicitly deferred for now** (see §8).  
 **Related Docs:** [Product Vision](vision.md) · [Core Design](design.md) · [Reference](reference.md) · [RFC Index](../rfcs/README.md)
 
 > **Policy Alignment:** All remediation recommendations follow Shunt's pre-release and architectural guardrails: clean breaks (no backwards-compatibility shims while pre-release), zero AI/MCP concepts in `shunt-engine` or `shunt-plugin-sdk`, zero-allocation `HookMask` fast paths preserved, and single-binary zero-dependency defaults.
@@ -306,18 +306,28 @@ Existing 18 fuzz targets run 30s each nightly and already cover most raw byte pa
 
 ---
 
-## 8. Phased Remediation Roadmap & Open Design Decisions
+## 8. Phased Remediation Roadmap & Design Decisions
 
-### Phased Waves
-- **Wave 1 — Core Data-Plane & Auth Foundations:** Fix §2 H-1–H-5 (`Connection:` strip order, `InspectResponseBody` fail-closed, path canonicalization, Hyper timers + Slowloris/body/TLS/connection limits, WebSockets opt-in + RFC 6455 + tracked tunnels, `pool_timer`, `SyncedTable` leak/poisoning) and §3 H-1–H-8 (`redirect`, `header-rewrite`, `rate-limit`, `jwt-auth`, `bearer-auth`, `mtls-auth` + `tls.rs`, `cors`, `compression`, `body-limit`, `#[serde(deny_unknown_fields)]`).
-- **Wave 2 — Control Plane, Admin API & Kubernetes Isolation:** Fix §4 C-1–C-4 and H-1–H-8 (`ReferenceGrant`, `Namespace` selectors, `shunt.io/plugins` confinement, LKG plaintext downgrade & Ed25519 sig check, Admin CSRF/DNS-rebinding/auth/non-blocking reload, complete secret redaction & env-var error sanitization, `shunt verify` security rules).
-- **Wave 3 — AI & MCP Gateway Hardening:** Fix §5 C-1–C-3 & H-1–H-6 (`/v1/files/*` traversal, cross-tenant & translated-SSE guardrail cache, shared-key resource isolation, Vertex `gs://`, `models[]` override/cap, missing-`usage`/abort accounting + Redis `1e+14`, guardrail holdback/OOM/coverage/Bedrock SigV4, duplicate JSON/multipart keys, BYOK failover) and §6 C-1–C-3 & H-1–H-6 (MCP batch smuggling, disabled principal escalation, signed approval tokens, CSPRNG/non-evictable sessions, guardrails/rate-limit/method/URI/auth fixes).
-- **Wave 4 — Adversarial Test Suite, Upgraded Fuzzers & Dependency Hygiene:** Add per-crate adversarial security suites, 5 new fuzz targets + upgraded CI assertions with `-rss_limit_mb=512` + corpus caching, and migrate off deprecated `serde_yaml`.
+> **Deferred Scope — `shunt-console` / RFC 0023 Control Plane (Revisit Later):**  
+> All `shunt-console` / RFC 0023 Control Plane findings are intentionally **out of scope for the current hardening waves** and will be revisited when `shunt-console` hardening is prioritized:
+> - `§2 E-M1` (`SyncedTable::subscribe` leak, lock poisoning & `replace_full` `seq` monotonicity in `crates/shunt-plugin-sdk/src/sync.rs`)
+> - `§4 C-4` (LKG cache AES-256-GCM plaintext downgrade & skipped Ed25519 signature check in `control_plane.rs`)
+> - `§4 H-2` (`TopologyRevisionEvent.url` SSRF & `node_token` exfiltration)
+> - `§4 H-7` (Control Plane portion: writing `topology.lkg` / `active_revision` before `controller.reload()` succeeds)
+> - `§4 H-8` (Control Plane `SseParser` OOM / O(N²) / split-UTF-8 corruption & sync per-delta disk checkpoints)
+> - `§4 C-M1` (`0600`/`0700` cache perms & cluster-scoped Ed25519 signature) & `§4 C-M6` (Control Plane CLI flags/warnings)
+> - `§7` (`fuzz_control_plane` & `AtomicReload.tla` Control Plane LKG extension)
 
-### Open Design Decisions
-1. **Path canonicalization default (`shunt-engine`):** Reject ambiguous paths (`..`, `//`, `%2e`, `%2f`, `%5c`, `%00`) with `400 Bad Request` by default (strict/Envoy-style, opt-in raw path mode) vs. normalize-and-forward?
-2. **Secure defaults:** Flip `allow_websockets` to `false` (opt-in per route) and `bearer-auth.strip_header` to `true`?
-3. **Outbound SSRF policy (`CoreHttpClient` / `connect_uri`):** Block private/loopback/cloud-metadata CIDRs by default with an explicit `allow_private_egress = true` opt-in for local dev/in-cluster webhooks?
-4. **Admin API hardening:** Loopback `Host`-header validation + CSRF guard + optional `auth_token` (required for non-loopback), or also split read-only `/metrics` onto its own listener?
-5. **K8s `shunt.io/plugins` trust model:** Disable on `HTTPRoute` by default (admin-owned `Gateway` only, or behind an explicit CLI flag + safe plugin allowlist)?
-6. **MCP batching & approvals:** Remove `allow_batch` cleanly (per MCP `2025-06-18`) vs. full per-item batch policy enforcement; replace self-asserted `x-shunt-approved`/`_meta.approved` with HMAC/JWT signed approval tokens?
+### Phased Waves *(Adversarial regression tests ship alongside each wave)*
+- **Wave 1 — Core Data-Plane & Auth Foundations *(Implemented)*:** Fix §2 H-1–H-4 and §2 H-5's secure default (`Connection:` strip order, `InspectResponseBody` fail-closed, strict path validation + encoded-slash-only `allow_raw_path`, Hyper timers + initial protocol-detection / Slowloris / body / TLS / connection limits, `pool_timer`, default `allow_websockets = false` + pre-Stage-1 WS hop-by-hop stripping; full RFC 6455 `ws.rs` handshake/`101` validation, post-hook upgrade honors, and tracked WS tunnels remain in Wave 4) and high-impact `shunt-plugins` fixes (`redirect`, `header-rewrite`, multi-`Authorization` + cross-source `jwt-auth` + `bearer-auth.strip_header = true`, `mtls-auth` + `tls.rs`, `body-limit`, `#[serde(deny_unknown_fields)]`).
+- **Wave 2 — AI & MCP Gateway Hardening:** Fix §5 C-1–C-3 & H-1–H-6 (`/v1/files/*` traversal, cross-tenant & translated-SSE guardrail cache, shared-key resource isolation / `store: false` default, Vertex `gs://`, `models[]` override/cap, missing-`usage`/abort accounting + Redis `1e+14`, guardrail holdback/OOM/coverage/Bedrock SigV4, duplicate JSON/multipart keys, BYOK failover) and §6 C-1–C-3 & H-1–H-6 (remove `allow_batch`, disabled principal escalation, remove client self-approval, CSPRNG/non-evictable sessions, guardrails/rate-limit/method/URI/auth fixes).
+- **Wave 3 — Admin Plane & Kubernetes Isolation:** Fix §4 C-1–C-3 and H-1, H-3–H-7 (`ReferenceGrant`, `Namespace` selectors, `shunt.io/plugins` trust model, K8s SSRF/fail-open matchers/hostname precedence, Admin `Host`/CSRF/auth/non-blocking reload, complete secret redaction & env-var error sanitization, `shunt verify` security rules).
+- **Wave 4 — Deeper Hardening, Fuzzing & Dependency Hygiene:** Full RFC 6455 WebSocket validation + tracked tunnels, `rate-limit` O(1) eviction & distributed GCRA Lua script, `compression` memory caps & BREACH guard, `CoreHttpClient` SSRF egress policy + OIDC `jwks_uri` hardening, new fuzz targets + upgraded CI assertions with `-rss_limit_mb=512` + corpus caching, Kani/TLA+ extensions, and migrating off deprecated `serde_yaml`.
+
+### Design Decisions
+1. **Path canonicalization default (`shunt-engine`) — *Decided: Yes*:** Reject ambiguous/traversal paths (`..`, `//`, `\`, `%00`, `%2e`, `%2f`, `%5c`) with `400 Bad Request` by default (strict/Envoy-style), with an explicit per-route opt-in raw/allow-encoded-slashes mode, documented clearly in the reference docs.
+2. **Secure defaults — *Decided: Yes*:** Flip `allow_websockets` to `false` (opt-in per route) and `bearer-auth.strip_header` to `true`.
+3. **Outbound SSRF policy (`CoreHttpClient` / `connect_uri`) — *Decided: Yes*:** Block private/loopback/link-local/cloud-metadata CIDRs by default on dynamic/webhook/OIDC fetches, with an explicit `allow_private_egress = true` opt-in (configured static `upstreams` remain exempt).
+4. **Admin API hardening — *Decided: Yes*:** Loopback `Host`-header validation + `Origin`/`Sec-Fetch-Site` CSRF guard on mutating endpoints + optional `auth_token` (required when bound non-loopback).
+5. **K8s `shunt.io/plugins` trust model — *Decided: Yes*:** Keep `shunt.io/plugins` allowed on admin-owned `Gateway` resources; disable on `HTTPRoute` by default, with an explicit CLI opt-in + safe plugin allowlist, clamp `max_body_bytes` via `min(gateway, route)`, and merge annotations across all attached Gateways.
+6. **MCP batching & approvals — *Decided: Yes*:** Cleanly remove `allow_batch` (aligned with MCP `2025-06-18`); remove client self-approval (`x-shunt-approved` / `_meta.approved`) now so `require_approval_tools` fails closed to `policy_webhook`, and align signed approval tokens with RFC 0026 later.

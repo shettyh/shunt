@@ -163,7 +163,7 @@ For each route (with optional resolved `group: Option<&RouteGroupIr>`), lowering
 | **`max_attempts`** | `route.max_attempts` → `group.max_attempts` → `1`. |
 | **`response_headers_timeout_ms`** | `route.response_headers_timeout_ms` → `group.response_headers_timeout_ms` → `Some(30_000)`. |
 | **`idle_chunk_timeout_ms`** | `route.idle_chunk_timeout_ms` → `group.idle_chunk_timeout_ms` → `Some(60_000)`. |
-| **`allow_websockets`** | `route.allow_websockets` → `group.allow_websockets` → `true`. |
+| **`allow_websockets`** | `route.allow_websockets` → `group.allow_websockets` → `false`. |
 | **`mirrors`** | `group.mirrors` followed by `route.mirrors`. |
 | **`plugins`** | `global_plugins` → `group_plugins` (`Arc::clone`) → `route_plugins`. |
 

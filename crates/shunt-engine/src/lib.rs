@@ -28,8 +28,9 @@ pub use http_client::{
 pub use otlp::{OtlpExporterConfig, OtlpExporterStats, OtlpHttpExporter, encode_otlp_traces_json};
 pub use path_match::{
     CompiledPathRegex, CompiledPathTemplate, DEFAULT_PATH_REGEX_SIZE_LIMIT, PathMatch,
-    TemplateSegment,
+    TemplateSegment, validate_request_path, validate_request_path_allow_encoded_slashes,
 };
+pub use pipeline::{DEFAULT_REQUEST_BODY_TIMEOUT, RequestMeta};
 pub use probe::ProbeSupervisor;
 pub use redis::{
     RedisStateStore, RedisStoreConfig, RespError, RespValue, decode_resp_frame,
@@ -37,7 +38,12 @@ pub use redis::{
 };
 pub use registry::{BuildSession, RuntimeRegistry};
 pub use route_index::{ROUTE_INDEX_MIN_ROUTES, RouteIndex};
-pub use server::{GatewayServer, ServerHandle, ServerReloader};
+pub use server::{
+    DEFAULT_HEADER_READ_TIMEOUT, DEFAULT_HTTP2_KEEP_ALIVE_INTERVAL,
+    DEFAULT_HTTP2_KEEP_ALIVE_TIMEOUT, DEFAULT_HTTP2_MAX_CONCURRENT_STREAMS,
+    DEFAULT_HTTP2_MAX_HEADER_LIST_SIZE, DEFAULT_MAX_CONNECTIONS, DEFAULT_TLS_HANDSHAKE_TIMEOUT,
+    GatewayServer, ServerHandle, ServerLimits, ServerReloader,
+};
 pub use snapshot::{
     CompiledMirror, CompiledRoute, DEFAULT_MAX_BODY_BYTES, GatewaySnapshot, RouteMatch, RouteSpec,
     SnapshotBuilder, TimeoutConfig, TrafficMirrorSpec, UpstreamHealthReport, host_matches,

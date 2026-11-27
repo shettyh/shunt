@@ -36,6 +36,9 @@ pub enum CoreError {
     #[error("stream idle chunk timeout after {0:?}")]
     IdleChunkTimeout(std::time::Duration),
 
+    #[error("request body read timeout after {0:?}")]
+    RequestBodyTimeout(std::time::Duration),
+
     #[error("request body exceeded max_body_bytes limit of {0} bytes")]
     BodyTooLarge(usize),
 

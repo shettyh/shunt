@@ -13,7 +13,7 @@ use shunt_plugin_sdk::{
 pub struct RequestId(pub String);
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct RequestIdConfig {
     header_name: String,
     trust_incoming: bool,

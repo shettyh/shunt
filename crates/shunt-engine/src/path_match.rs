@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use regex::{Regex, RegexBuilder};
 use shunt_plugin_sdk::PathParams;
+pub use shunt_plugin_sdk::{validate_request_path, validate_request_path_allow_encoded_slashes};
 
 /// Default compiled regex size limit (1 MiB) to guard against pathological patterns on reload.
 pub const DEFAULT_PATH_REGEX_SIZE_LIMIT: usize = 1024 * 1024;

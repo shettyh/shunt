@@ -59,7 +59,7 @@ upstream = "backend"
 [[routes.plugins]]
 name = "header-rewrite"
 [routes.plugins.config]
-add_response_headers = {{ "x-demo" = "yes" }}
+response_add = {{ "x-demo" = "yes" }}
 "#
     )
 }

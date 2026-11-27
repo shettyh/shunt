@@ -17,7 +17,7 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct OtelTraceConfig {
     /// Sampling ratio in `[0.0, 1.0]` applied to root traces (or all traces when
     /// `respect_parent_sampling = false`). Default: `1.0`.

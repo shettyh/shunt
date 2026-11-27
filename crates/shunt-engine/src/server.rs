@@ -1,22 +1,26 @@
 use std::convert::Infallible;
+use std::future::Future;
+use std::io;
 use std::net::SocketAddr;
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use http::Request;
 use hyper::service::service_fn;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as AutoServerBuilder;
 use shunt_plugin_sdk::ClientCertInfo;
-use tokio::sync::{Notify, watch};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::{Notify, Semaphore, watch};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
 use crate::error::CoreError;
-use crate::pipeline::execute_request;
+use crate::pipeline::{DEFAULT_REQUEST_BODY_TIMEOUT, RequestMeta, execute_request};
 use crate::probe::ProbeSupervisor;
 use crate::snapshot::GatewaySnapshot;
 use crate::tls::{
@@ -24,11 +28,67 @@ use crate::tls::{
     build_server_config_with_auth, parse_client_cert_info,
 };
 
+/// Default maximum concurrent accepted client connections.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 10_000;
+/// Default downstream TLS handshake timeout.
+pub const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default HTTP/1.1 request header read timeout (Slowloris guard).
+pub const DEFAULT_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default HTTP/2 maximum concurrent streams per connection.
+pub const DEFAULT_HTTP2_MAX_CONCURRENT_STREAMS: u32 = 256;
+/// Default HTTP/2 maximum header list size (64 KiB).
+pub const DEFAULT_HTTP2_MAX_HEADER_LIST_SIZE: u32 = 64 * 1024;
+/// Default HTTP/2 keep-alive PING interval.
+pub const DEFAULT_HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// Default HTTP/2 keep-alive PING timeout.
+pub const DEFAULT_HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Backoff duration after a transient TCP accept error (e.g., `EMFILE`/`ENFILE`) to avoid
+/// spinning at 100% CPU under FD exhaustion.
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
+
+/// Connection, handshake, header, body, and HTTP/2 resource limits enforced by [`GatewayServer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerLimits {
+    /// Maximum concurrent accepted client TCP connections (default: `10_000`).
+    pub max_connections: usize,
+    /// Maximum time allowed for a downstream TLS handshake (default: `10s`).
+    pub tls_handshake_timeout: Duration,
+    /// Maximum time to read HTTP/1.1 request headers (default: `30s`).
+    pub header_read_timeout: Duration,
+    /// Maximum total time to buffer a request body when buffering is active (default: `60s`).
+    pub request_body_timeout: Option<Duration>,
+    /// Maximum concurrent HTTP/2 streams per connection (default: `256`).
+    pub http2_max_concurrent_streams: u32,
+    /// Maximum HTTP/2 header list size in bytes (default: `64 KiB`).
+    pub http2_max_header_list_size: u32,
+    /// Optional HTTP/2 keep-alive PING interval (default: `Some(30s)`).
+    pub http2_keep_alive_interval: Option<Duration>,
+    /// HTTP/2 keep-alive PING timeout (default: `10s`).
+    pub http2_keep_alive_timeout: Duration,
+}
+
+impl Default for ServerLimits {
+    fn default() -> Self {
+        Self {
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            tls_handshake_timeout: DEFAULT_TLS_HANDSHAKE_TIMEOUT,
+            header_read_timeout: DEFAULT_HEADER_READ_TIMEOUT,
+            request_body_timeout: Some(DEFAULT_REQUEST_BODY_TIMEOUT),
+            http2_max_concurrent_streams: DEFAULT_HTTP2_MAX_CONCURRENT_STREAMS,
+            http2_max_header_list_size: DEFAULT_HTTP2_MAX_HEADER_LIST_SIZE,
+            http2_keep_alive_interval: Some(DEFAULT_HTTP2_KEEP_ALIVE_INTERVAL),
+            http2_keep_alive_timeout: DEFAULT_HTTP2_KEEP_ALIVE_TIMEOUT,
+        }
+    }
+}
+
 /// Core HTTP/1.1 + HTTP/2 + TLS + WebSocket gateway server backed by `ArcSwap<GatewaySnapshot>`.
 pub struct GatewayServer {
     snapshot: Arc<ArcSwap<GatewaySnapshot>>,
     tls: Option<TlsListenerConfig>,
     drain_timeout: Duration,
+    limits: ServerLimits,
     trace_enabled: Arc<AtomicBool>,
 }
 
@@ -38,6 +98,7 @@ impl GatewayServer {
             snapshot: Arc::new(ArcSwap::from(initial_snapshot)),
             tls: None,
             drain_timeout: Duration::from_secs(30),
+            limits: ServerLimits::default(),
             trace_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -49,6 +110,11 @@ impl GatewayServer {
 
     pub fn with_drain_timeout(mut self, timeout: Duration) -> Self {
         self.drain_timeout = timeout;
+        self
+    }
+
+    pub fn with_limits(mut self, limits: ServerLimits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -95,9 +161,17 @@ impl GatewayServer {
         let active_conns_loop = Arc::clone(&active_conns);
         let drain_notify_loop = Arc::clone(&drain_notify);
         let trace_enabled_loop = Arc::clone(&self.trace_enabled);
+        let limits = self.limits;
+        let max_connections = limits.max_connections.max(1);
+        let conn_semaphore = Arc::new(Semaphore::new(max_connections));
         let mut accept_shutdown_rx = shutdown_rx.clone();
 
-        info!(%local_addr, tls = tls_acceptor.is_some(), "shunt gateway listening");
+        info!(
+            %local_addr,
+            tls = tls_acceptor.is_some(),
+            max_connections,
+            "shunt gateway listening"
+        );
 
         let accept_task = tokio::spawn(async move {
             loop {
@@ -113,9 +187,28 @@ impl GatewayServer {
                         let (tcp, peer_addr) = match accept_res {
                             Ok(pair) => pair,
                             Err(err) => {
-                                warn!(error = %err, "TCP accept error");
+                                warn!(error = %err, "TCP accept error; backing off briefly");
+                                tokio::select! {
+                                    biased;
+                                    _ = accept_shutdown_rx.changed() => {
+                                        if *accept_shutdown_rx.borrow() {
+                                            break;
+                                        }
+                                    }
+                                    _ = tokio::time::sleep(ACCEPT_ERROR_BACKOFF) => {}
+                                }
                                 continue;
                             }
+                        };
+
+                        let Ok(conn_permit) = Arc::clone(&conn_semaphore).try_acquire_owned() else {
+                            debug!(
+                                %peer_addr,
+                                max_connections,
+                                "connection rejected: max_connections reached"
+                            );
+                            drop(tcp);
+                            continue;
                         };
 
                         let _ = tcp.set_nodelay(true);
@@ -133,14 +226,29 @@ impl GatewayServer {
                         active_conns_conn.fetch_add(1, Ordering::SeqCst);
 
                         tokio::spawn(async move {
+                            let _permit = conn_permit;
                             let _guard = ActiveConnGuard {
                                 counter: active_conns_conn,
                                 notify: drain_notify_conn,
                             };
 
                             if let Some(acceptor) = tls_acceptor_conn {
-                                match acceptor.accept(tcp).await {
-                                    Ok(tls_stream) => {
+                                if *conn_shutdown_rx.borrow() {
+                                    return;
+                                }
+                                let handshake = tokio::select! {
+                                    biased;
+                                    _ = conn_shutdown_rx.changed() => {
+                                        debug!(%peer_addr, "TLS handshake cancelled by shutdown");
+                                        return;
+                                    }
+                                    res = tokio::time::timeout(
+                                        limits.tls_handshake_timeout,
+                                        acceptor.accept(tcp),
+                                    ) => res,
+                                };
+                                match handshake {
+                                    Ok(Ok(tls_stream)) => {
                                         let server_conn = tls_stream.get_ref().1;
                                         let tls_sni =
                                             server_conn.server_name().map(str::to_owned);
@@ -150,30 +258,45 @@ impl GatewayServer {
                                             .and_then(|leaf| parse_client_cert_info(leaf.as_ref()))
                                             .map(Arc::new);
                                         serve_connection(
-                                            TokioIo::new(tls_stream),
+                                            TokioIo::new(InitialReadTimeoutIo::new(
+                                                tls_stream,
+                                                limits.header_read_timeout,
+                                            )),
                                             peer_addr,
                                             tls_sni,
                                             client_cert,
                                             snapshot_conn,
                                             next_req_id_conn,
                                             trace_enabled_conn,
+                                            limits,
                                             &mut conn_shutdown_rx,
                                         )
                                         .await;
                                     }
-                                    Err(err) => {
+                                    Ok(Err(err)) => {
                                         debug!(%peer_addr, error = %err, "TLS handshake failed");
+                                    }
+                                    Err(_) => {
+                                        debug!(
+                                            %peer_addr,
+                                            timeout = ?limits.tls_handshake_timeout,
+                                            "TLS handshake timed out"
+                                        );
                                     }
                                 }
                             } else {
                                 serve_connection(
-                                    TokioIo::new(tcp),
+                                    TokioIo::new(InitialReadTimeoutIo::new(
+                                        tcp,
+                                        limits.header_read_timeout,
+                                    )),
                                     peer_addr,
                                     None,
                                     None,
                                     snapshot_conn,
                                     next_req_id_conn,
                                     trace_enabled_conn,
+                                    limits,
                                     &mut conn_shutdown_rx,
                                 )
                                 .await;
@@ -210,10 +333,12 @@ async fn serve_connection<I>(
     snapshot_swap: Arc<ArcSwap<GatewaySnapshot>>,
     next_request_id: Arc<AtomicU64>,
     trace_enabled: Arc<AtomicBool>,
+    limits: ServerLimits,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let request_body_timeout = limits.request_body_timeout;
     let service = service_fn(move |req: Request<hyper::body::Incoming>| {
         // Lock-free atomic load of the active snapshot once per request.
         // In-flight requests finish cleanly on this Arc even if a hot reload swaps in a new snapshot.
@@ -224,13 +349,36 @@ async fn serve_connection<I>(
         let trace = trace_enabled.load(Ordering::Relaxed);
 
         async move {
-            let resp = execute_request(snapshot, req, req_id, peer_addr, sni, cert, trace).await;
+            let resp = execute_request(
+                snapshot,
+                req,
+                RequestMeta {
+                    request_id: req_id,
+                    client_addr: peer_addr,
+                    tls_sni: sni,
+                    client_cert: cert,
+                    trace_enabled: trace,
+                    request_body_timeout,
+                },
+            )
+            .await;
             Ok::<_, Infallible>(resp)
         }
     });
 
     let mut builder = AutoServerBuilder::new(TokioExecutor::new());
-    builder.http1().keep_alive(true);
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(limits.header_read_timeout)
+        .keep_alive(true);
+    builder
+        .http2()
+        .timer(TokioTimer::new())
+        .max_concurrent_streams(limits.http2_max_concurrent_streams)
+        .max_header_list_size(limits.http2_max_header_list_size)
+        .keep_alive_interval(limits.http2_keep_alive_interval)
+        .keep_alive_timeout(limits.http2_keep_alive_timeout);
     let conn = builder.serve_connection_with_upgrades(io, service);
     let mut conn = pin!(conn);
 
@@ -265,6 +413,108 @@ impl Drop for ActiveConnGuard {
         if self.counter.fetch_sub(1, Ordering::SeqCst) == 1 {
             self.notify.notify_waiters();
         }
+    }
+}
+
+/// HTTP/2 connection preface (RFC 9113 §3.4) probed by `hyper_util`'s `AutoServerBuilder::ReadVersion`.
+const H2_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+/// Bounds `AutoServerBuilder::ReadVersion` initial protocol detection with `header_read_timeout`.
+///
+/// `hyper_util::server::conn::auto` reads up to 24 bytes of the HTTP/2 preface without a timer
+/// before entering HTTP/1.1 or HTTP/2, so a client sending 0 bytes or a partial preface
+/// (`"PRI * "`) would otherwise hold a `max_connections` slot indefinitely. This wrapper arms a
+/// single deadline until protocol detection resolves (either a byte mismatches `H2_PREFACE` and
+/// Hyper hands off to HTTP/1.1's `header_read_timeout`, or all 24 bytes of `H2_PREFACE` arrive
+/// and Hyper enters HTTP/2), then disarms itself with zero steady-state overhead.
+struct InitialReadTimeoutIo<I> {
+    inner: I,
+    deadline: Option<Pin<Box<tokio::time::Sleep>>>,
+    preface_matched: usize,
+}
+
+impl<I> InitialReadTimeoutIo<I> {
+    fn new(inner: I, timeout: Duration) -> Self {
+        Self {
+            inner,
+            deadline: Some(Box::pin(tokio::time::sleep(timeout))),
+            preface_matched: 0,
+        }
+    }
+}
+
+impl<I: AsyncRead + Unpin> AsyncRead for InitialReadTimeoutIo<I> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        match Pin::new(&mut self.inner).poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                if self.deadline.is_some() {
+                    let newly_read = &buf.filled()[before..];
+                    for &b in newly_read {
+                        if self.preface_matched < H2_PREFACE.len()
+                            && b == H2_PREFACE[self.preface_matched]
+                        {
+                            self.preface_matched += 1;
+                            if self.preface_matched == H2_PREFACE.len() {
+                                self.deadline = None;
+                                break;
+                            }
+                        } else {
+                            self.deadline = None;
+                            break;
+                        }
+                    }
+                }
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => {
+                if let Some(sleep) = self.deadline.as_mut()
+                    && sleep.as_mut().poll(cx).is_ready()
+                {
+                    self.deadline = None;
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "initial protocol detection timed out",
+                    )));
+                }
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl<I: AsyncWrite + Unpin> AsyncWrite for InitialReadTimeoutIo<I> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
     }
 }
 

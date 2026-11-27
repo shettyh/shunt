@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use http::header::{HeaderName, HeaderValue};
-use http::{Method, Request};
+use http::{Method, Request, StatusCode};
 use regex::{RegexSet, RegexSetBuilder};
 use shunt_plugin_sdk::{HookMask, HttpPlugin};
 use tokio::sync::Semaphore;
@@ -312,6 +312,7 @@ pub struct RouteSpec {
     pub max_attempts: usize,
     pub timeouts: TimeoutConfig,
     pub allow_websockets: bool,
+    pub allow_raw_path: bool,
     pub strip_prefix: Option<String>,
     pub mirrors: Vec<TrafficMirrorSpec>,
 }
@@ -326,7 +327,8 @@ impl RouteSpec {
             max_body_bytes: None,
             max_attempts: 1,
             timeouts: TimeoutConfig::default(),
-            allow_websockets: true,
+            allow_websockets: false,
+            allow_raw_path: false,
             strip_prefix: None,
             mirrors: Vec::new(),
         }
@@ -359,6 +361,11 @@ impl RouteSpec {
 
     pub fn allow_websockets(mut self, allow: bool) -> Self {
         self.allow_websockets = allow;
+        self
+    }
+
+    pub fn allow_raw_path(mut self, allow: bool) -> Self {
+        self.allow_raw_path = allow;
         self
     }
 
@@ -409,9 +416,12 @@ pub struct CompiledRoute {
     /// Explicit request body cap set by route config or a plugin (`max_request_body_bytes`).
     /// Enforced on both buffered and unbuffered streaming requests (`None` = unlimited streaming).
     pub explicit_max_body_bytes: Option<usize>,
+    /// HTTP 4xx status code returned when `max_body_bytes` is exceeded (default: `413`).
+    pub max_body_status: StatusCode,
     pub max_attempts: usize,
     pub timeouts: TimeoutConfig,
     pub allow_websockets: bool,
+    pub allow_raw_path: bool,
     pub strip_prefix: Option<String>,
     pub mirrors: Arc<[Arc<CompiledMirror>]>,
     /// Slot index inside [`GatewaySnapshot`]'s compiled [`RegexSet`], if this route uses `PathMatch::Regex`.
@@ -437,6 +447,7 @@ pub struct GatewaySnapshot {
     pub version: u64,
     pub routes: Vec<Arc<CompiledRoute>>,
     pub upstreams: HashMap<String, Arc<UpstreamPool>>,
+    pub has_raw_path_routes: bool,
     dispatch: RouteDispatch,
 }
 
@@ -735,14 +746,21 @@ impl SnapshotBuilder {
 
             let mut hook_mask = HookMask::EMPTY;
             let mut effective_max_body: Option<usize> = spec.max_body_bytes;
+            let mut max_body_status = StatusCode::PAYLOAD_TOO_LARGE;
 
             for plugin in &chain {
                 hook_mask |= plugin.hook_mask();
                 if let Some(cap) = plugin.max_request_body_bytes() {
-                    effective_max_body = Some(match effective_max_body {
-                        Some(cur) => cur.min(cap),
-                        None => cap,
-                    });
+                    let strictly_tighter = effective_max_body.is_none_or(|cur| cap < cur);
+                    let equal_cap = effective_max_body == Some(cap);
+                    if strictly_tighter {
+                        effective_max_body = Some(cap);
+                        max_body_status = plugin
+                            .max_request_body_status_code()
+                            .unwrap_or(StatusCode::PAYLOAD_TOO_LARGE);
+                    } else if equal_cap && let Some(st) = plugin.max_request_body_status_code() {
+                        max_body_status = st;
+                    }
                 }
             }
 
@@ -772,9 +790,11 @@ impl SnapshotBuilder {
                 hook_mask,
                 max_body_bytes: effective_max_body.unwrap_or(DEFAULT_MAX_BODY_BYTES),
                 explicit_max_body_bytes: effective_max_body,
+                max_body_status,
                 max_attempts: spec.max_attempts.max(1),
                 timeouts: spec.timeouts,
                 allow_websockets: spec.allow_websockets,
+                allow_raw_path: spec.allow_raw_path,
                 strip_prefix: spec.strip_prefix,
                 mirrors: Arc::from(compiled_mirrors),
                 regex_set_slot,
@@ -814,10 +834,13 @@ impl SnapshotBuilder {
             }
         }
 
+        let has_raw_path_routes = compiled_routes.iter().any(|r| r.allow_raw_path);
+
         Ok(Arc::new(GatewaySnapshot {
             version: self.version,
             routes: compiled_routes,
             upstreams: compiled_upstreams,
+            has_raw_path_routes,
             dispatch,
         }))
     }

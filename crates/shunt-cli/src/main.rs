@@ -591,6 +591,7 @@ async fn run_server(
 
     let mut gw = GatewayServer::new(bundle.snapshot)
         .with_drain_timeout(Duration::from_millis(bundle.config.server.drain_timeout_ms))
+        .with_limits(bundle.config.server.server_limits())
         .with_trace_enabled(dev_mode || ui_enabled);
 
     if let Some(certs) = bundle.cert_store {

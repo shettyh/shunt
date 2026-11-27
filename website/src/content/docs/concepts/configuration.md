@@ -91,8 +91,14 @@ Controls the public proxy listener, graceful draining, SNI TLS, and mutual TLS (
 
 ```toml
 [server]
-listen = "0.0.0.0:8080"     # Default: "0.0.0.0:8080"
-drain_timeout_ms = 30000    # Default: 30000 (graceful shutdown / reload drain)
+listen = "0.0.0.0:8080"             # Default: "0.0.0.0:8080"
+drain_timeout_ms = 30000            # Default: 30000 (graceful shutdown / reload drain)
+max_connections = 10000             # Default: 10000 (concurrent TCP connection cap)
+tls_handshake_timeout_ms = 10000    # Default: 10000 (downstream TLS handshake timeout)
+header_read_timeout_ms = 30000      # Default: 30000 (HTTP/1.1 Slowloris header timeout)
+request_body_timeout_ms = 60000     # Default: 60000 (buffered request body timeout; 0 disables)
+http2_max_concurrent_streams = 256  # Default: 256
+http2_max_header_list_size = 65536  # Default: 65536 (64 KiB)
 
 [server.tls]
 cert = "certs/server.crt"           # Default PEM cert chain (relative paths resolve from config dir)
@@ -280,7 +286,7 @@ key = "client_ip"
 | **`hosts`** | Inherited when omitted; if specified on route, every host must be subsumed by `group.hosts` |
 | **`methods`** | Inherited when omitted; if specified on route, every method must be allowed by `group.methods` |
 | **`headers`** | Merged (`group.headers` + `route.headers`); contradictory values for the same header are rejected |
-| **`upstream`, `strip_prefix`, `max_body_bytes`, `max_attempts`, timeouts, `allow_websockets`** | Route overrides group when explicitly set; otherwise falls back to group, then gateway default |
+| **`upstream`, `strip_prefix`, `max_body_bytes`, `max_attempts`, timeouts, `allow_websockets`, `allow_raw_path`** | Route overrides group when explicitly set; otherwise falls back to group, then gateway default |
 | **`mirrors`** | `group.mirrors` followed by `route.mirrors` |
 | **`plugins`** | Deterministic execution order: `global` → `group` (shared `Arc`) → `route` |
 
@@ -312,7 +318,8 @@ max_body_bytes = 2097152            # Optional max buffered body size
 max_attempts = 2                    # Default: 1 (or group default)
 response_headers_timeout_ms = 30000 # TTFB / TTFT timeout (default: 30000)
 idle_chunk_timeout_ms = 60000       # Max gap between stream chunks (default: 60000)
-allow_websockets = true             # Default: true
+allow_websockets = false            # Default: false (opt in per route/group)
+allow_raw_path = false              # Default: false (set true to permit %2F encoded slashes; traversal/control bytes stay blocked)
 
 # Optional fire-and-forget traffic mirroring
 [[routes.mirrors]]

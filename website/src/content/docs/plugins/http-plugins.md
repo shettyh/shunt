@@ -88,7 +88,7 @@ jwks_timeout_ms = 5000
 ```
 
 ### `mtls-auth`
-Requires `[server.tls]` with `client_ca` and `client_auth = "required"` (or `"optional"`):
+Requires `[server.tls]` with `client_ca` and `client_auth = "required"` (or `"optional"`). DNS wildcards (`*.svc.internal`) match a single leftmost label (excluding `.`). URI wildcards use `*` for a single path segment (excluding `/`) and `**` for multi-segment prefixes:
 ```toml
 [[routes.plugins]]
 name = "mtls-auth"
@@ -96,8 +96,9 @@ name = "mtls-auth"
 require_cert = true
 allowed_cns = ["*.svc.internal"]
 allowed_san_dns = ["payments.svc.internal"]
-allowed_san_uris = ["spiffe://prod/ns/payments/*"]
+allowed_san_uris = ["spiffe://prod/ns/payments/**"]
 allowed_fingerprints = []
+denied_fingerprints = []
 subject_header = "x-client-cn"
 dn_header = "x-client-dn"
 fingerprint_header = "x-client-sha256"
@@ -148,6 +149,7 @@ name = "redirect"
 status_code = 301 # 301 | 302 | 303 | 307 | 308
 scheme = "https"
 hostname = "api.example.com"
+# allowed_hosts = ["api.example.com", "www.example.com"] # when reflecting incoming Host
 path_match_prefix = "/legacy"
 path_replace_prefix = "/v2"
 preserve_query = true

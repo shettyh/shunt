@@ -11,6 +11,7 @@ use http_body_util::BodyExt;
 use shunt_plugin_sdk::{
     BufferedResponse, ClientCertInfo, Flow, HookMask, HttpPlugin, RequestCtx, RequestHead,
     RequestSummary, ResponseHead, RouteDecision, StreamFlow, UpstreamRequest, UpstreamSelection,
+    parse_and_validate_content_length,
 };
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -18,6 +19,7 @@ use tracing::warn;
 use crate::body::{IdleTimeoutBody, ShuntBody, TrackedPassthroughBody, collect_body_limited};
 use crate::catch::run_hook_isolated;
 use crate::error::CoreError;
+use crate::path_match::{validate_request_path, validate_request_path_allow_encoded_slashes};
 use crate::snapshot::GatewaySnapshot;
 use crate::upstream::build_target_uri;
 use crate::ws::{handle_websocket_upgrade, is_websocket_upgrade};
@@ -25,22 +27,56 @@ use crate::ws::{handle_websocket_upgrade, is_websocket_upgrade};
 /// Bounded channel capacity for hooked streaming bodies (provides natural backpressure).
 const STREAM_CHANNEL_CAPACITY: usize = 16;
 
+/// Default total timeout when buffering an incoming request body (`60s`).
+pub const DEFAULT_REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Per-request execution metadata supplied by the listener to [`execute_request`].
+pub struct RequestMeta {
+    pub request_id: u64,
+    pub client_addr: SocketAddr,
+    pub tls_sni: Option<String>,
+    pub client_cert: Option<Arc<ClientCertInfo>>,
+    pub trace_enabled: bool,
+    pub request_body_timeout: Option<Duration>,
+}
+
 /// Executes a single incoming HTTP request end-to-end against an immutable [`GatewaySnapshot`].
 pub async fn execute_request(
     snapshot: Arc<GatewaySnapshot>,
     mut req: Request<hyper::body::Incoming>,
-    request_id: u64,
-    client_addr: SocketAddr,
-    tls_sni: Option<String>,
-    client_cert: Option<Arc<ClientCertInfo>>,
-    trace_enabled: bool,
+    meta: RequestMeta,
 ) -> Response<ShuntBody> {
+    let RequestMeta {
+        request_id,
+        client_addr,
+        tls_sni,
+        client_cert,
+        trace_enabled,
+        request_body_timeout,
+    } = meta;
+
+    let raw_path = req.uri().path();
+    let path_valid = validate_request_path(raw_path).is_ok();
+    if !path_valid
+        && (!snapshot.has_raw_path_routes
+            || validate_request_path_allow_encoded_slashes(raw_path).is_err())
+    {
+        return build_error_response(StatusCode::BAD_REQUEST, "invalid request path");
+    }
+
     let mut ctx = RequestCtx::new(request_id, client_addr, tls_sni).with_client_cert(client_cert);
     ctx.trace_enabled = trace_enabled;
 
     let Some(route) = snapshot.match_route(&req).cloned() else {
+        if !path_valid {
+            return build_error_response(StatusCode::BAD_REQUEST, "invalid request path");
+        }
         return build_error_response(StatusCode::NOT_FOUND, "no matching route");
     };
+
+    if !path_valid && !route.allow_raw_path {
+        return build_error_response(StatusCode::BAD_REQUEST, "invalid request path");
+    }
 
     ctx.route_id = Some(route.id.clone());
     if !route.hook_mask.is_empty() && route.matcher.path.has_params() {
@@ -64,6 +100,15 @@ pub async fn execute_request(
         version: parts.version,
         headers: parts.headers,
     };
+
+    // Strip client hop-by-hop and `Connection:`-nominated headers BEFORE Stage 1 so an
+    // untrusted client cannot nominate gateway-injected headers (e.g., `x-forwarded-for`,
+    // `x-jwt-*`, `x-client-cn`, `x-request-id`) for removal.
+    if ws_upgrade.is_some() {
+        strip_ws_hop_by_hop_headers(&mut req_head.headers);
+    } else {
+        strip_hop_by_hop_headers(&mut req_head.headers);
+    }
 
     // -------------------------------------------------------------------------
     // Stage 1: on_request_headers
@@ -135,38 +180,60 @@ pub async fn execute_request(
     let needs_buffer =
         mask.contains(HookMask::REQUEST_BODY_BUFFERED) || !sampled_mirrors.is_empty();
 
-    // Upfront Content-Length enforcement whenever buffering OR an explicit route/plugin cap is set.
+    // Upfront Content-Length validation and cap enforcement whenever buffering OR an explicit
+    // route/plugin cap is set (reject malformed/conflicting Content-Length fail-closed).
     let upfront_cap = if needs_buffer {
         Some(route.max_body_bytes)
     } else {
         route.explicit_max_body_bytes
     };
-    if ws_upgrade.is_none()
-        && let Some(cap) = upfront_cap
-        && let Some(cl) = req_head
-            .headers
-            .get(header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<usize>().ok())
-        && cl > cap
-    {
-        return finish_error(
-            &plugins,
-            mask,
-            ctx,
-            &route.id,
-            None,
-            None,
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "request body too large",
-            CoreError::BodyTooLarge(cap).to_string(),
-            0,
-            None,
-        );
+    if ws_upgrade.is_none() {
+        let parsed_cl = match parse_and_validate_content_length(&req_head.headers) {
+            Ok(cl) => cl,
+            Err(err) => {
+                return finish_error(
+                    &plugins,
+                    mask,
+                    ctx,
+                    &route.id,
+                    None,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "invalid content-length header",
+                    err.message().to_owned(),
+                    0,
+                    None,
+                );
+            }
+        };
+        if let (Some(cap), Some(cl)) = (upfront_cap, parsed_cl)
+            && cl > cap
+        {
+            return finish_error(
+                &plugins,
+                mask,
+                ctx,
+                &route.id,
+                None,
+                None,
+                route.max_body_status,
+                "request body too large",
+                CoreError::BodyTooLarge(cap).to_string(),
+                0,
+                None,
+            );
+        }
     }
 
     if ws_upgrade.is_none() && needs_buffer {
-        let mut body_bytes = match collect_body_limited(incoming_body, route.max_body_bytes).await {
+        let mut body_bytes = match collect_body_limited(
+            incoming_body,
+            route.max_body_bytes,
+            None,
+            request_body_timeout,
+        )
+        .await
+        {
             Ok(b) => b,
             Err(CoreError::BodyTooLarge(cap)) => {
                 return finish_error(
@@ -176,9 +243,24 @@ pub async fn execute_request(
                     &route.id,
                     None,
                     None,
-                    StatusCode::PAYLOAD_TOO_LARGE,
+                    route.max_body_status,
                     "request body too large",
                     CoreError::BodyTooLarge(cap).to_string(),
+                    0,
+                    None,
+                );
+            }
+            Err(CoreError::RequestBodyTimeout(dur)) => {
+                return finish_error(
+                    &plugins,
+                    mask,
+                    ctx,
+                    &route.id,
+                    None,
+                    None,
+                    StatusCode::REQUEST_TIMEOUT,
+                    "request body timed out",
+                    CoreError::RequestBodyTimeout(dur).to_string(),
                     0,
                     None,
                 );
@@ -327,12 +409,30 @@ pub async fn execute_request(
         }
     }
 
-    // Apply optional route strip_prefix on the canonical URI.
+    // Apply optional route strip_prefix on the canonical URI (fail-closed on invalid result).
     if let Some(prefix) = &route.strip_prefix {
-        req_head.uri = strip_uri_prefix(&req_head.uri, prefix);
+        match strip_uri_prefix(&req_head.uri, prefix) {
+            Ok(next_uri) => req_head.uri = next_uri,
+            Err(err) => {
+                return finish_error(
+                    &plugins,
+                    mask,
+                    ctx,
+                    &route.id,
+                    None,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "invalid request path",
+                    err.to_string(),
+                    request_bytes,
+                    None,
+                );
+            }
+        }
     }
 
-    // Append client IP to X-Forwarded-For.
+    // Append client IP to X-Forwarded-For (client `Connection:` headers were already stripped
+    // before Stage 1, so X-Forwarded-For and plugin-injected headers cannot be nominated away).
     append_forwarded_for(&mut req_head.headers, client_addr);
 
     // Delegate WebSocket upgrades to the dedicated H1 upgrade tunnel handler.
@@ -348,8 +448,6 @@ pub async fn execute_request(
         .await;
     }
 
-    // Sanitize hop-by-hop headers once on the canonical request head.
-    strip_hop_by_hop_headers(&mut req_head.headers);
     // Remove downstream Host so hyper derives Host/:authority from the chosen upstream URI
     // (plugins may still set a custom Host header inside `on_upstream_request`).
     req_head.headers.remove(header::HOST);
@@ -650,6 +748,26 @@ pub async fn execute_request(
             .await
         {
             Ok(res) => {
+                let exceeded = streaming_body_exceeded
+                    .as_ref()
+                    .map(|f| f.load(Ordering::Acquire))
+                    .unwrap_or(false);
+                if exceeded {
+                    drop(res);
+                    return finish_error(
+                        &plugins,
+                        mask,
+                        ctx,
+                        &route.id,
+                        Some(selection.upstream),
+                        Some(endpoint_label),
+                        route.max_body_status,
+                        "request body too large",
+                        CoreError::BodyTooLarge(route.max_body_bytes).to_string(),
+                        request_bytes,
+                        None,
+                    );
+                }
                 if let Some(idx) = ep_idx {
                     pool.record_success(idx);
                 }
@@ -666,7 +784,7 @@ pub async fn execute_request(
                     pool.record_failure(idx);
                 }
                 let status = if is_body_too_large {
-                    StatusCode::PAYLOAD_TOO_LARGE
+                    route.max_body_status
                 } else {
                     match &err {
                         CoreError::ConnectTimeout(_) | CoreError::ResponseHeadersTimeout(_) => {
@@ -691,7 +809,7 @@ pub async fn execute_request(
                     Some(selection.upstream),
                     Some(endpoint_label),
                     st,
-                    if st == StatusCode::PAYLOAD_TOO_LARGE {
+                    if is_body_too_large {
                         "request body too large"
                     } else if st == StatusCode::GATEWAY_TIMEOUT {
                         "upstream timed out"
@@ -792,7 +910,14 @@ pub async fn execute_request(
 
         // 4f: Conditional bounded pre-flush response-body inspection
         if let Some(max_bytes) = inspect_max_bytes {
-            let mut inspected_body = match collect_body_limited(res_incoming, max_bytes).await {
+            let mut inspected_body = match collect_body_limited(
+                res_incoming,
+                max_bytes,
+                route.timeouts.idle_chunk_timeout,
+                None,
+            )
+            .await
+            {
                 Ok(b) => b,
                 Err(CoreError::BodyTooLarge(cap)) => {
                     return finish_error(
@@ -805,6 +930,21 @@ pub async fn execute_request(
                         StatusCode::BAD_GATEWAY,
                         "upstream response exceeded inspection limit",
                         CoreError::BodyTooLarge(cap).to_string(),
+                        request_bytes,
+                        ttfb,
+                    );
+                }
+                Err(CoreError::IdleChunkTimeout(dur)) => {
+                    return finish_error(
+                        &plugins,
+                        mask,
+                        ctx,
+                        &route.id,
+                        Some(selection.upstream),
+                        Some(endpoint_label),
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "upstream response timed out during inspection",
+                        CoreError::IdleChunkTimeout(dur).to_string(),
                         request_bytes,
                         ttfb,
                     );
@@ -906,6 +1046,7 @@ pub async fn execute_request(
             // Still pass through any RESPONSE_BODY_STREAM plugins so usage/guardrails see it.
             let mut error_msg: Option<String> = None;
             let mut aborted_mid_stream = false;
+            let mut stream_panicked = false;
             if mask.contains(HookMask::RESPONSE_BODY_STREAM) {
                 for plugin in plugins.iter() {
                     if !plugin.hook_mask().contains(HookMask::RESPONSE_BODY_STREAM) {
@@ -924,6 +1065,7 @@ pub async fn execute_request(
                         }
                         Err(panic_msg) => {
                             aborted_mid_stream = true;
+                            stream_panicked = true;
                             error_msg = Some(format!(
                                 "plugin `{}` panicked in on_response_body_chunk: {panic_msg}",
                                 plugin.name()
@@ -951,6 +1093,7 @@ pub async fn execute_request(
                             }
                             Err(panic_msg) => {
                                 aborted_mid_stream = true;
+                                stream_panicked = true;
                                 error_msg = Some(format!(
                                     "plugin `{}` panicked in on_response_body_chunk: {panic_msg}",
                                     plugin.name()
@@ -959,7 +1102,7 @@ pub async fn execute_request(
                             }
                         }
                     }
-                    if !flush.is_empty() {
+                    if !aborted_mid_stream && !flush.is_empty() {
                         let mut combined =
                             Vec::with_capacity(inspected_body.len().saturating_add(flush.len()));
                         combined.extend_from_slice(&inspected_body);
@@ -967,6 +1110,30 @@ pub async fn execute_request(
                         inspected_body = Bytes::from(combined);
                     }
                 }
+            }
+
+            // Fail closed if any RESPONSE_BODY_STREAM plugin aborted or panicked — never emit
+            // blocked or uninspected content downstream.
+            if aborted_mid_stream {
+                let (status, public_msg) = if stream_panicked {
+                    (StatusCode::INTERNAL_SERVER_ERROR, "internal plugin error")
+                } else {
+                    (StatusCode::BAD_GATEWAY, "response blocked by stream policy")
+                };
+                return finish_error_with_abort(
+                    &plugins,
+                    mask,
+                    ctx,
+                    &route.id,
+                    Some(selection.upstream),
+                    Some(endpoint_label),
+                    status,
+                    public_msg,
+                    error_msg.unwrap_or_else(|| "response stream aborted".to_owned()),
+                    request_bytes,
+                    ttfb,
+                    true,
+                );
             }
 
             let final_status = res_head.status;
@@ -1118,7 +1285,15 @@ fn spawn_request_body_stream_pump(
         ctx.attempt = attempt;
         let mut bytes_read: usize = 0;
 
-        while let Some(frame_res) = incoming.frame().await {
+        loop {
+            let frame_opt = tokio::select! {
+                biased;
+                _ = tx.closed() => return,
+                next = incoming.frame() => next,
+            };
+            let Some(frame_res) = frame_opt else {
+                break;
+            };
             match frame_res {
                 Ok(frame) => {
                     if frame.is_data() {
@@ -1483,6 +1658,37 @@ fn finish_error(
     request_bytes: u64,
     ttfb: Option<Duration>,
 ) -> Response<ShuntBody> {
+    finish_error_with_abort(
+        plugins,
+        mask,
+        ctx,
+        route_id,
+        upstream,
+        endpoint,
+        status,
+        public_message,
+        internal_error,
+        request_bytes,
+        ttfb,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_error_with_abort(
+    plugins: &Arc<[Arc<dyn HttpPlugin>]>,
+    mask: HookMask,
+    ctx: RequestCtx,
+    route_id: &str,
+    upstream: Option<String>,
+    endpoint: Option<String>,
+    status: StatusCode,
+    public_message: &'static str,
+    internal_error: String,
+    request_bytes: u64,
+    ttfb: Option<Duration>,
+    aborted_mid_stream: bool,
+) -> Response<ShuntBody> {
     if mask.contains(HookMask::ON_COMPLETE) {
         let summary = RequestSummary {
             request_id: ctx.request_id,
@@ -1496,7 +1702,7 @@ fn finish_error(
             ttfb,
             total_duration: ctx.started_at.elapsed(),
             error: Some(internal_error),
-            aborted_mid_stream: false,
+            aborted_mid_stream,
             hook_timings: ctx.hook_timings.clone(),
         };
         spawn_on_complete(Arc::clone(plugins), mask, ctx, summary);
@@ -1525,8 +1731,24 @@ pub fn build_error_response(status: StatusCode, message: &'static str) -> Respon
         .unwrap()
 }
 
-/// Strips RFC 9110 hop-by-hop headers (preserving `te: trailers` for gRPC / HTTP/2).
+/// Returns `true` for end-to-end framing headers that a client `Connection:` header must never
+/// be allowed to nominate for stripping.
+#[inline]
+fn is_protected_from_connection_nomination(name: &HeaderName) -> bool {
+    *name == header::CONTENT_LENGTH || *name == header::HOST
+}
+
+/// Strips RFC 9110 hop-by-hop headers (preserving a single `te: trailers` for gRPC / HTTP/2).
 pub fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
+    // RFC 9110 §10.1.4 requires HTTP/1.1 senders of `TE: trailers` to also send `Connection: TE`.
+    // Inspect `TE` before removing `Connection:`-nominated headers so `te: trailers` is preserved.
+    let has_trailers = headers
+        .get_all(header::TE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|s| s.split(','))
+        .any(|tok| tok.trim().eq_ignore_ascii_case("trailers"));
+
     // Collect any extra header names nominated by `Connection: ...`.
     let extra: Vec<HeaderName> = headers
         .get_all(header::CONNECTION)
@@ -1534,6 +1756,7 @@ pub fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
         .filter_map(|v| v.to_str().ok())
         .flat_map(|s| s.split(','))
         .filter_map(|tok| HeaderName::from_bytes(tok.trim().as_bytes()).ok())
+        .filter(|name| !is_protected_from_connection_nomination(name))
         .collect();
 
     for name in extra {
@@ -1548,31 +1771,73 @@ pub fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
         header::TRAILER,
         header::TRANSFER_ENCODING,
         header::UPGRADE,
+        header::TE,
     ];
 
     for h in &hop_by_hop {
         headers.remove(h);
     }
 
-    // Preserve `te: trailers` for gRPC/H2; remove any other `te` values.
-    if let Some(te) = headers.get(header::TE) {
-        let is_trailers = te
-            .to_str()
-            .map(|s| s.eq_ignore_ascii_case("trailers"))
-            .unwrap_or(false);
-        if !is_trailers {
-            headers.remove(header::TE);
-        }
+    if has_trailers {
+        headers.insert(header::TE, HeaderValue::from_static("trailers"));
     }
 }
 
+/// Strips non-WebSocket hop-by-hop and client `Connection:`-nominated headers before Stage 1
+/// while preserving WebSocket upgrade headers (`Connection: Upgrade`, `Upgrade: websocket`,
+/// `Sec-WebSocket-*`).
+fn strip_ws_hop_by_hop_headers(headers: &mut HeaderMap) {
+    let extra: Vec<HeaderName> = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|s| s.split(','))
+        .filter_map(|tok| HeaderName::from_bytes(tok.trim().as_bytes()).ok())
+        .filter(|name| {
+            !is_protected_from_connection_nomination(name)
+                && *name != header::UPGRADE
+                && !name.as_str().starts_with("sec-websocket-")
+        })
+        .collect();
+
+    for name in extra {
+        headers.remove(&name);
+    }
+
+    let non_ws_hop_by_hop = [
+        HeaderName::from_static("keep-alive"),
+        header::PROXY_AUTHENTICATE,
+        header::PROXY_AUTHORIZATION,
+        header::TRAILER,
+        header::TRANSFER_ENCODING,
+        header::TE,
+    ];
+    for h in &non_ws_hop_by_hop {
+        headers.remove(h);
+    }
+    headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+}
+
 fn append_forwarded_for(headers: &mut HeaderMap, client_addr: SocketAddr) {
-    let ip = client_addr.ip().to_string();
+    use std::fmt::Write as _;
+
     let xff_name = HeaderName::from_static("x-forwarded-for");
-    let new_val = match headers.get(&xff_name).and_then(|v| v.to_str().ok()) {
-        Some(existing) if !existing.is_empty() => format!("{existing}, {ip}"),
-        _ => ip,
-    };
+    let mut new_val = String::new();
+    for raw in headers.get_all(&xff_name) {
+        if let Ok(s) = raw.to_str() {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                if !new_val.is_empty() {
+                    new_val.push_str(", ");
+                }
+                new_val.push_str(trimmed);
+            }
+        }
+    }
+    if !new_val.is_empty() {
+        new_val.push_str(", ");
+    }
+    let _ = write!(&mut new_val, "{}", client_addr.ip());
     if let Ok(val) = HeaderValue::from_str(&new_val) {
         headers.insert(xff_name, val);
     }
@@ -1651,23 +1916,37 @@ fn spawn_traffic_mirrors(
 }
 
 /// Strips a leading path segment prefix from `uri`, preserving query strings verbatim
-/// and always producing a path beginning with `/`.
-pub fn strip_uri_prefix(uri: &Uri, prefix: &str) -> Uri {
+/// and always producing a path beginning with `/` (and never `//`).
+///
+/// Fails closed with [`CoreError::InvalidUri`] if stripping produces an ambiguous or
+/// unparseable path-and-query (e.g., `//evil.com`).
+pub fn strip_uri_prefix(uri: &Uri, prefix: &str) -> Result<Uri, CoreError> {
     let trimmed = prefix.trim_end_matches('/');
     if trimmed.is_empty() || trimmed == "/" {
-        return uri.clone();
+        return Ok(uri.clone());
     }
     let path = uri.path();
     let Some(rest) = path.strip_prefix(trimmed) else {
-        return uri.clone();
+        return Ok(uri.clone());
     };
     if !rest.is_empty() && !rest.starts_with('/') {
-        return uri.clone();
+        return Ok(uri.clone());
     }
     let new_path = if rest.is_empty() { "/" } else { rest };
+    if new_path.starts_with("//") {
+        return Err(CoreError::InvalidUri {
+            uri: uri.to_string(),
+            message: "stripped URI path starts with `//`".to_owned(),
+        });
+    }
     let new_pq = match uri.query() {
         Some(q) => format!("{new_path}?{q}"),
         None => new_path.to_owned(),
     };
-    new_pq.parse().unwrap_or_else(|_| uri.clone())
+    new_pq
+        .parse()
+        .map_err(|e: http::uri::InvalidUri| CoreError::InvalidUri {
+            uri: new_pq,
+            message: e.to_string(),
+        })
 }

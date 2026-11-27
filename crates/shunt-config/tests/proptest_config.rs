@@ -634,6 +634,7 @@ proptest! {
                 response_headers_timeout_ms: None,
                 idle_chunk_timeout_ms: None,
                 allow_websockets: None,
+                allow_raw_path: None,
                 mirrors: Vec::new(),
                 plugins: Vec::new(),
             }],

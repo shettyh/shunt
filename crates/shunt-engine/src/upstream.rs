@@ -11,7 +11,7 @@ use http_body_util::BodyExt;
 use hyper::rt::{Read, ReadBufCursor, Write};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::{Connected, Connection};
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use rustls::pki_types::ServerName;
 use shunt_plugin_sdk::{Clock, SystemClock};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -679,6 +679,7 @@ impl UpstreamPool {
 
         let mut builder = Client::builder(TokioExecutor::new());
         builder
+            .pool_timer(TokioTimer::new())
             .pool_idle_timeout(config.pool_idle_timeout)
             .pool_max_idle_per_host(config.pool_max_idle_per_host);
         if config.http2_only {
@@ -1026,7 +1027,14 @@ pub fn build_target_uri(base_uri: &Uri, req_uri: &Uri) -> Result<Uri, CoreError>
         format!("{base_path}/{req_pq}")
     };
 
-    Uri::builder()
+    if combined_pq.starts_with("//") {
+        return Err(CoreError::InvalidUri {
+            uri: format!("{scheme}://{authority}"),
+            message: "target path must not start with `//`".to_owned(),
+        });
+    }
+
+    let built = Uri::builder()
         .scheme(scheme)
         .authority(authority)
         .path_and_query(combined_pq)
@@ -1034,7 +1042,18 @@ pub fn build_target_uri(base_uri: &Uri, req_uri: &Uri) -> Result<Uri, CoreError>
         .map_err(|e| CoreError::InvalidUri {
             uri: format!("{scheme}://{authority}"),
             message: e.to_string(),
-        })
+        })?;
+
+    if built.scheme_str() != Some(scheme)
+        || built.authority().map(|a| a.as_str()) != Some(authority)
+    {
+        return Err(CoreError::InvalidUri {
+            uri: format!("{scheme}://{authority}"),
+            message: "resolved URI authority diverged from upstream base".to_owned(),
+        });
+    }
+
+    Ok(built)
 }
 
 /// TCP or TLS upstream stream.

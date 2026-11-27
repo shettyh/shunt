@@ -3,7 +3,8 @@ use std::sync::Arc;
 use serde::Deserialize;
 use shunt_plugin_sdk::{
     BufferedResponse, BuildContext, Flow, HookMask, HookResult, HttpPlugin, PluginBuildError,
-    PluginConfig, PluginFactory, RequestCtx, RequestHead, StatusCode, header,
+    PluginConfig, PluginFactory, RequestCtx, RequestHead, StatusCode,
+    parse_and_validate_content_length,
 };
 
 #[derive(Debug, Deserialize)]
@@ -73,16 +74,26 @@ impl HttpPlugin for BodyLimitPlugin {
         Some(self.max_bytes)
     }
 
+    fn max_request_body_status_code(&self) -> Option<StatusCode> {
+        Some(self.status)
+    }
+
     fn on_request_headers<'a>(
         &'a self,
         ctx: &'a mut RequestCtx,
         req: &'a mut RequestHead,
     ) -> HookResult<'a, Flow> {
-        if let Some(cl) = req
-            .headers
-            .get(header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<usize>().ok())
+        let resolved_cl = match parse_and_validate_content_length(&req.headers) {
+            Ok(cl) => cl,
+            Err(err) => {
+                return HookResult::Ready(Flow::Respond(BufferedResponse::json(
+                    StatusCode::BAD_REQUEST,
+                    format!(r#"{{"error":"{}"}}"#, err.code()),
+                )));
+            }
+        };
+
+        if let Some(cl) = resolved_cl
             && cl > self.max_bytes
         {
             ctx.annotate_int("http.request.body_limit_bytes", self.max_bytes as i64);
