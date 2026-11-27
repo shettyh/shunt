@@ -332,68 +332,10 @@ fn is_safe_rewritten_path(path: &str) -> bool {
     if bytes.first() != Some(&b'/') {
         return false;
     }
-    if bytes
-        .iter()
-        .any(|&b| b < 0x20 || b == 0x7F || matches!(b, b'\\' | b'?' | b'#'))
-    {
+    if bytes.iter().any(|&b| matches!(b, b'?' | b'#')) {
         return false;
     }
-    shunt_engine_validate_path_segments(bytes)
-}
-
-fn shunt_engine_validate_path_segments(bytes: &[u8]) -> bool {
-    let len = bytes.len();
-    let mut i = 0usize;
-    let mut seg_start = 1usize;
-    while i < len {
-        let b = bytes[i];
-        if b == b'/' {
-            if i > 0 {
-                if bytes[i - 1] == b'/' {
-                    return false;
-                }
-                let seg = &bytes[seg_start..i];
-                if seg == b"." || seg == b".." {
-                    return false;
-                }
-                seg_start = i + 1;
-            }
-            i += 1;
-            continue;
-        }
-        if b == b'%' {
-            if i + 2 >= len {
-                return false;
-            }
-            let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) else {
-                return false;
-            };
-            let decoded = (hi << 4) | lo;
-            if matches!(decoded, 0x00..=0x1F | 0x7F | b'.' | b'/' | b'\\') {
-                return false;
-            }
-            i += 3;
-            continue;
-        }
-        i += 1;
-    }
-    if seg_start < len {
-        let last_seg = &bytes[seg_start..len];
-        if last_seg == b"." || last_seg == b".." {
-            return false;
-        }
-    }
-    true
-}
-
-#[inline]
-fn hex_nibble(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
+    shunt_plugin_sdk::validate_request_path(path).is_ok()
 }
 
 #[cfg(test)]

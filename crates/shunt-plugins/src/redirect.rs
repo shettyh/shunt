@@ -79,11 +79,13 @@ impl PluginFactory for RedirectFactory {
             });
         }
         if let Some(host) = &cfg.hostname
-            && extract_valid_host(host).is_none()
+            && !is_valid_host_without_port(host)
         {
             return Err(PluginBuildError::BuildFailed {
                 plugin: self.name().to_owned(),
-                message: format!("redirect `hostname` `{host}` is not a valid host"),
+                message: format!(
+                    "redirect `hostname` `{host}` must be a valid hostname without port"
+                ),
             });
         }
         if cfg.path_replace_full.is_some() && cfg.path_replace_prefix.is_some() {
@@ -103,12 +105,29 @@ impl PluginFactory for RedirectFactory {
                 ),
             });
         }
-        let allowed_hosts = cfg
-            .allowed_hosts
-            .into_iter()
-            .map(|h| h.trim().to_ascii_lowercase())
-            .filter(|h| !h.is_empty())
-            .collect();
+        if let Some(prefix) = &cfg.path_replace_prefix
+            && !is_safe_relative_location(prefix)
+        {
+            return Err(PluginBuildError::BuildFailed {
+                plugin: self.name().to_owned(),
+                message: format!(
+                    "redirect `path_replace_prefix` `{prefix}` must start with a single `/` and not `//` or `/\\`"
+                ),
+            });
+        }
+        let mut allowed_hosts = Vec::with_capacity(cfg.allowed_hosts.len());
+        for raw in cfg.allowed_hosts {
+            let trimmed = raw.trim();
+            if !is_valid_host_without_port(trimmed) {
+                return Err(PluginBuildError::BuildFailed {
+                    plugin: self.name().to_owned(),
+                    message: format!(
+                        "redirect `allowed_hosts` entry `{raw}` must be a valid hostname without port"
+                    ),
+                });
+            }
+            allowed_hosts.push(trimmed.to_ascii_lowercase());
+        }
         let status = StatusCode::from_u16(cfg.status_code).expect("validated redirect status");
         Ok(Arc::new(RedirectPlugin {
             status,
@@ -167,9 +186,15 @@ impl RedirectPlugin {
             .scheme
             .as_deref()
             .or_else(|| {
-                req.uri
-                    .scheme_str()
-                    .filter(|s| s.eq_ignore_ascii_case("http") || s.eq_ignore_ascii_case("https"))
+                req.uri.scheme_str().and_then(|s| {
+                    if s.eq_ignore_ascii_case("http") {
+                        Some("http")
+                    } else if s.eq_ignore_ascii_case("https") {
+                        Some("https")
+                    } else {
+                        None
+                    }
+                })
             })
             .unwrap_or("https");
 
@@ -177,16 +202,29 @@ impl RedirectPlugin {
             h.to_owned()
         } else {
             let mut host_headers = req.headers.get_all(header::HOST).iter();
-            let reflected = if let Some(first) = host_headers.next() {
+            let hdr_host = if let Some(first) = host_headers.next() {
                 if host_headers.next().is_some() {
                     return Err("duplicate Host header");
                 }
                 let raw = first.to_str().map_err(|_| "invalid Host header")?;
-                extract_valid_host(raw).ok_or("invalid Host header")?
-            } else if let Some(uri_host) = req.uri.host() {
-                extract_valid_host(uri_host).ok_or("invalid URI host")?
+                Some(extract_valid_host(raw).ok_or("invalid Host header")?)
             } else {
-                return Err("missing Host header");
+                None
+            };
+            let uri_host = match req.uri.host() {
+                Some(h) => Some(extract_valid_host(h).ok_or("invalid URI host")?),
+                None => None,
+            };
+            let reflected = match (hdr_host, uri_host) {
+                (Some(h), Some(u)) => {
+                    if !h.eq_ignore_ascii_case(&u) {
+                        return Err("Host header disagrees with request URI authority");
+                    }
+                    h
+                }
+                (Some(h), None) => h,
+                (None, Some(u)) => u,
+                (None, None) => return Err("missing Host header"),
             };
 
             if !self.allowed_hosts.is_empty()
@@ -200,9 +238,10 @@ impl RedirectPlugin {
             reflected
         };
 
-        let include_port = self
-            .port
-            .filter(|&p| !((scheme == "http" && p == 80) || (scheme == "https" && p == 443)));
+        let include_port = self.port.filter(|&p| {
+            !((scheme.eq_ignore_ascii_case("http") && p == 80)
+                || (scheme.eq_ignore_ascii_case("https") && p == 443))
+        });
 
         Ok(match include_port {
             Some(p) => format!("{scheme}://{host}:{p}{path_and_query}"),
@@ -222,6 +261,15 @@ pub(crate) fn is_safe_relative_location(path: &str) -> bool {
         return false;
     }
     !bytes.iter().any(|&b| b < 0x20 || b == 0x7F || b == b'\\')
+}
+
+/// Returns `true` iff `host` is a valid hostname / IP literal with no `:port` suffix.
+fn is_valid_host_without_port(host: &str) -> bool {
+    if host.starts_with('[') {
+        host.ends_with(']') && extract_valid_host(host).is_some()
+    } else {
+        !host.contains(':') && extract_valid_host(host).is_some()
+    }
 }
 
 /// Strictly validates an HTTP `Host` header (optional `:port`) and returns the host portion

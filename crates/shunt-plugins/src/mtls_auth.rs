@@ -308,9 +308,12 @@ pub(crate) fn dns_wildcard_match(pattern: &str, dns: &str) -> bool {
 }
 
 /// Common Name wildcard matching: `*` matches zero or more characters excluding `.`
-/// (and rejects control characters).
+/// (and rejects control characters). Leading `*.` requires a non-empty label.
 pub(crate) fn cn_wildcard_match(pattern: &str, value: &str) -> bool {
-    if value.bytes().any(|b| b < 0x20 || b == 0x7F) {
+    if value.is_empty() || value.bytes().any(|b| b < 0x20 || b == 0x7F) {
+        return false;
+    }
+    if pattern.starts_with("*.") && value.starts_with('.') {
         return false;
     }
     wildcard_match_excluding(pattern.as_bytes(), value.as_bytes(), false, b".")
@@ -326,54 +329,65 @@ pub(crate) fn uri_wildcard_match(pattern: &str, uri: &str) -> bool {
     uri_wildcard_match_bytes(pattern.as_bytes(), uri.as_bytes())
 }
 
+#[derive(Clone, Copy)]
+enum UriPatToken {
+    Byte(u8),
+    SingleStar,
+    DoubleStar,
+}
+
 fn uri_wildcard_match_bytes(pat: &[u8], val: &[u8]) -> bool {
-    let mut pi = 0usize;
-    let mut vi = 0usize;
-    let mut star_pi: Option<usize> = None;
-    let mut star_is_double = false;
-    let mut star_vi = 0usize;
-
-    while vi < val.len() {
-        if pi < pat.len() && pat[pi] == b'*' {
-            let is_double = pi + 1 < pat.len() && pat[pi + 1] == b'*';
-            star_is_double = is_double;
-            pi += if is_double { 2 } else { 1 };
-            // Collapse redundant consecutive stars of the same class.
-            while pi < pat.len() && pat[pi] == b'*' {
-                star_is_double = true;
-                pi += 1;
+    let mut tokens = Vec::with_capacity(pat.len());
+    let mut i = 0usize;
+    while i < pat.len() {
+        if pat[i] == b'*' {
+            let start = i;
+            while i < pat.len() && pat[i] == b'*' {
+                i += 1;
             }
-            star_pi = Some(pi);
-            star_vi = vi;
-            continue;
-        }
-        if pi < pat.len() && pat[pi] == val[vi] {
-            pi += 1;
-            vi += 1;
-            continue;
-        }
-        if let Some(sp) = star_pi {
-            let consumed = val[star_vi];
-            let blocked = if star_is_double {
-                matches!(consumed, b'?' | b'#')
+            if i - start >= 2 {
+                tokens.push(UriPatToken::DoubleStar);
             } else {
-                matches!(consumed, b'/' | b'?' | b'#')
-            };
-            if blocked {
-                return false;
+                tokens.push(UriPatToken::SingleStar);
             }
-            star_vi += 1;
-            vi = star_vi;
-            pi = sp;
-            continue;
+        } else {
+            tokens.push(UriPatToken::Byte(pat[i]));
+            i += 1;
         }
-        return false;
     }
 
-    while pi < pat.len() && pat[pi] == b'*' {
-        pi += 1;
+    let n = val.len();
+    let mut prev = vec![false; n + 1];
+    let mut curr = vec![false; n + 1];
+    prev[0] = true;
+
+    for token in tokens {
+        match token {
+            UriPatToken::Byte(b) => {
+                curr[0] = false;
+                for j in 0..n {
+                    curr[j + 1] = prev[j] && val[j] == b;
+                }
+            }
+            UriPatToken::SingleStar => {
+                curr[0] = prev[0];
+                for j in 0..n {
+                    let allowed = !matches!(val[j], b'/' | b'?' | b'#');
+                    curr[j + 1] = prev[j + 1] || (curr[j] && allowed);
+                }
+            }
+            UriPatToken::DoubleStar => {
+                curr[0] = prev[0];
+                for j in 0..n {
+                    let allowed = !matches!(val[j], b'?' | b'#');
+                    curr[j + 1] = prev[j + 1] || (curr[j] && allowed);
+                }
+            }
+        }
+        std::mem::swap(&mut prev, &mut curr);
     }
-    pi == pat.len()
+
+    prev[n]
 }
 
 fn wildcard_match_excluding(pat: &[u8], val: &[u8], ascii_ci: bool, excluded: &[u8]) -> bool {

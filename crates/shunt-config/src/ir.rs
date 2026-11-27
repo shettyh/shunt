@@ -142,7 +142,7 @@ impl Default for StateConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
     pub listen: String,
     pub drain_timeout_ms: u64,
@@ -170,8 +170,7 @@ impl Default for ServerConfig {
             tls_handshake_timeout_ms: shunt_engine::DEFAULT_TLS_HANDSHAKE_TIMEOUT.as_millis()
                 as u64,
             header_read_timeout_ms: shunt_engine::DEFAULT_HEADER_READ_TIMEOUT.as_millis() as u64,
-            request_body_timeout_ms: shunt_engine::pipeline::DEFAULT_REQUEST_BODY_TIMEOUT
-                .as_millis() as u64,
+            request_body_timeout_ms: shunt_engine::DEFAULT_REQUEST_BODY_TIMEOUT.as_millis() as u64,
             http2_max_concurrent_streams: shunt_engine::DEFAULT_HTTP2_MAX_CONCURRENT_STREAMS,
             http2_max_header_list_size: shunt_engine::DEFAULT_HTTP2_MAX_HEADER_LIST_SIZE,
             tls: None,
@@ -812,6 +811,21 @@ impl GatewayConfig {
                 self.server.listen
             ));
         }
+        if self.server.max_connections == 0 {
+            errors.push("server.max_connections: must be >= 1".into());
+        }
+        if self.server.tls_handshake_timeout_ms == 0 {
+            errors.push("server.tls_handshake_timeout_ms: must be >= 1".into());
+        }
+        if self.server.header_read_timeout_ms == 0 {
+            errors.push("server.header_read_timeout_ms: must be >= 1".into());
+        }
+        if self.server.http2_max_concurrent_streams == 0 {
+            errors.push("server.http2_max_concurrent_streams: must be >= 1".into());
+        }
+        if self.server.http2_max_header_list_size < 1024 {
+            errors.push("server.http2_max_header_list_size: must be >= 1024".into());
+        }
 
         let admin_addr = if self.admin.enabled {
             let parsed = self.admin.listen.parse::<SocketAddr>().ok();
@@ -1387,4 +1401,28 @@ fn is_secret_key(key: &str) -> bool {
         "routing_key",
     ];
     PATTERNS.iter().any(|p| lower.contains(p))
+}
+
+#[cfg(test)]
+mod server_config_validation_tests {
+    use super::*;
+
+    #[test]
+    fn server_config_rejects_unknown_fields_and_invalid_limits() {
+        let err = toml::from_str::<ServerConfig>("listen = \"127.0.0.1:8080\"\nmax_conns = 10\n");
+        assert!(err.is_err(), "expected unknown [server] field to fail");
+
+        let mut cfg = GatewayConfig::default();
+        cfg.server.max_connections = 0;
+        cfg.server.tls_handshake_timeout_ms = 0;
+        cfg.server.header_read_timeout_ms = 0;
+        cfg.server.http2_max_concurrent_streams = 0;
+        cfg.server.http2_max_header_list_size = 512;
+        let msg = cfg.validate().unwrap_err().to_string();
+        assert!(msg.contains("server.max_connections"));
+        assert!(msg.contains("server.tls_handshake_timeout_ms"));
+        assert!(msg.contains("server.header_read_timeout_ms"));
+        assert!(msg.contains("server.http2_max_concurrent_streams"));
+        assert!(msg.contains("server.http2_max_header_list_size"));
+    }
 }

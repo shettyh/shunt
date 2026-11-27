@@ -11,16 +11,15 @@ use http_body_util::BodyExt;
 use shunt_plugin_sdk::{
     BufferedResponse, ClientCertInfo, Flow, HookMask, HttpPlugin, RequestCtx, RequestHead,
     RequestSummary, ResponseHead, RouteDecision, StreamFlow, UpstreamRequest, UpstreamSelection,
+    parse_and_validate_content_length,
 };
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use crate::body::{
-    IdleTimeoutBody, ShuntBody, TrackedPassthroughBody, collect_body_limited_with_timeouts,
-};
+use crate::body::{IdleTimeoutBody, ShuntBody, TrackedPassthroughBody, collect_body_limited};
 use crate::catch::run_hook_isolated;
 use crate::error::CoreError;
-use crate::path_match::{validate_request_path, validate_request_path_control_only};
+use crate::path_match::{validate_request_path, validate_request_path_allow_encoded_slashes};
 use crate::snapshot::GatewaySnapshot;
 use crate::upstream::build_target_uri;
 use crate::ws::{handle_websocket_upgrade, is_websocket_upgrade};
@@ -31,45 +30,36 @@ const STREAM_CHANNEL_CAPACITY: usize = 16;
 /// Default total timeout when buffering an incoming request body (`60s`).
 pub const DEFAULT_REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Per-request execution metadata supplied by the listener to [`execute_request`].
+pub struct RequestMeta {
+    pub request_id: u64,
+    pub client_addr: SocketAddr,
+    pub tls_sni: Option<String>,
+    pub client_cert: Option<Arc<ClientCertInfo>>,
+    pub trace_enabled: bool,
+    pub request_body_timeout: Option<Duration>,
+}
+
 /// Executes a single incoming HTTP request end-to-end against an immutable [`GatewaySnapshot`].
 pub async fn execute_request(
     snapshot: Arc<GatewaySnapshot>,
-    req: Request<hyper::body::Incoming>,
-    request_id: u64,
-    client_addr: SocketAddr,
-    tls_sni: Option<String>,
-    client_cert: Option<Arc<ClientCertInfo>>,
-    trace_enabled: bool,
+    mut req: Request<hyper::body::Incoming>,
+    meta: RequestMeta,
 ) -> Response<ShuntBody> {
-    execute_request_with_body_timeout(
-        snapshot,
-        req,
+    let RequestMeta {
         request_id,
         client_addr,
         tls_sni,
         client_cert,
         trace_enabled,
-        Some(DEFAULT_REQUEST_BODY_TIMEOUT),
-    )
-    .await
-}
+        request_body_timeout,
+    } = meta;
 
-/// Executes a single incoming HTTP request with an explicit buffered request-body read timeout.
-#[allow(clippy::too_many_arguments)]
-pub async fn execute_request_with_body_timeout(
-    snapshot: Arc<GatewaySnapshot>,
-    mut req: Request<hyper::body::Incoming>,
-    request_id: u64,
-    client_addr: SocketAddr,
-    tls_sni: Option<String>,
-    client_cert: Option<Arc<ClientCertInfo>>,
-    trace_enabled: bool,
-    request_body_timeout: Option<Duration>,
-) -> Response<ShuntBody> {
     let raw_path = req.uri().path();
     let path_valid = validate_request_path(raw_path).is_ok();
     if !path_valid
-        && (!snapshot.has_raw_path_routes || validate_request_path_control_only(raw_path).is_err())
+        && (!snapshot.has_raw_path_routes
+            || validate_request_path_allow_encoded_slashes(raw_path).is_err())
     {
         return build_error_response(StatusCode::BAD_REQUEST, "invalid request path");
     }
@@ -200,7 +190,7 @@ pub async fn execute_request_with_body_timeout(
     if ws_upgrade.is_none() {
         let parsed_cl = match parse_and_validate_content_length(&req_head.headers) {
             Ok(cl) => cl,
-            Err(reason) => {
+            Err(err) => {
                 return finish_error(
                     &plugins,
                     mask,
@@ -210,7 +200,7 @@ pub async fn execute_request_with_body_timeout(
                     None,
                     StatusCode::BAD_REQUEST,
                     "invalid content-length header",
-                    reason.to_owned(),
+                    err.message().to_owned(),
                     0,
                     None,
                 );
@@ -236,7 +226,7 @@ pub async fn execute_request_with_body_timeout(
     }
 
     if ws_upgrade.is_none() && needs_buffer {
-        let mut body_bytes = match collect_body_limited_with_timeouts(
+        let mut body_bytes = match collect_body_limited(
             incoming_body,
             route.max_body_bytes,
             None,
@@ -920,7 +910,7 @@ pub async fn execute_request_with_body_timeout(
 
         // 4f: Conditional bounded pre-flush response-body inspection
         if let Some(max_bytes) = inspect_max_bytes {
-            let mut inspected_body = match collect_body_limited_with_timeouts(
+            let mut inspected_body = match collect_body_limited(
                 res_incoming,
                 max_bytes,
                 route.timeouts.idle_chunk_timeout,
@@ -1741,38 +1731,6 @@ pub fn build_error_response(status: StatusCode, message: &'static str) -> Respon
         .unwrap()
 }
 
-/// Validates all `Content-Length` headers on a request.
-///
-/// Rejects non-ASCII, non-digit, negative, overflowing, or conflicting duplicate values so
-/// request-smuggling / `body-limit` fail-open bypasses are blocked with `400 Bad Request`.
-pub fn parse_and_validate_content_length(
-    headers: &HeaderMap,
-) -> Result<Option<usize>, &'static str> {
-    let mut resolved: Option<usize> = None;
-    for raw in headers.get_all(header::CONTENT_LENGTH) {
-        let s = raw
-            .to_str()
-            .map_err(|_| "non-ASCII Content-Length header")?;
-        for part in s.split(',') {
-            let trimmed = part.trim();
-            if trimmed.is_empty() || !trimmed.bytes().all(|b| b.is_ascii_digit()) {
-                return Err("malformed Content-Length header");
-            }
-            let val = trimmed
-                .parse::<usize>()
-                .map_err(|_| "overflowing Content-Length header")?;
-            if let Some(prev) = resolved {
-                if prev != val {
-                    return Err("conflicting Content-Length headers");
-                }
-            } else {
-                resolved = Some(val);
-            }
-        }
-    }
-    Ok(resolved)
-}
-
 /// Returns `true` for end-to-end framing headers that a client `Connection:` header must never
 /// be allowed to nominate for stripping.
 #[inline]
@@ -1782,6 +1740,15 @@ fn is_protected_from_connection_nomination(name: &HeaderName) -> bool {
 
 /// Strips RFC 9110 hop-by-hop headers (preserving a single `te: trailers` for gRPC / HTTP/2).
 pub fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
+    // RFC 9110 §10.1.4 requires HTTP/1.1 senders of `TE: trailers` to also send `Connection: TE`.
+    // Inspect `TE` before removing `Connection:`-nominated headers so `te: trailers` is preserved.
+    let has_trailers = headers
+        .get_all(header::TE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|s| s.split(','))
+        .any(|tok| tok.trim().eq_ignore_ascii_case("trailers"));
+
     // Collect any extra header names nominated by `Connection: ...`.
     let extra: Vec<HeaderName> = headers
         .get_all(header::CONNECTION)
@@ -1804,21 +1771,13 @@ pub fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
         header::TRAILER,
         header::TRANSFER_ENCODING,
         header::UPGRADE,
+        header::TE,
     ];
 
     for h in &hop_by_hop {
         headers.remove(h);
     }
 
-    // Normalize across all `TE` headers: preserve a single `te: trailers` for gRPC/H2 and
-    // strip any other transfer-coding tokens.
-    let has_trailers = headers
-        .get_all(header::TE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|s| s.split(','))
-        .any(|tok| tok.trim().eq_ignore_ascii_case("trailers"));
-    headers.remove(header::TE);
     if has_trailers {
         headers.insert(header::TE, HeaderValue::from_static("trailers"));
     }
@@ -1860,20 +1819,25 @@ fn strip_ws_hop_by_hop_headers(headers: &mut HeaderMap) {
 }
 
 fn append_forwarded_for(headers: &mut HeaderMap, client_addr: SocketAddr) {
-    let ip = client_addr.ip().to_string();
+    use std::fmt::Write as _;
+
     let xff_name = HeaderName::from_static("x-forwarded-for");
-    let existing: Vec<&str> = headers
-        .get_all(&xff_name)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    let new_val = if existing.is_empty() {
-        ip
-    } else {
-        format!("{}, {ip}", existing.join(", "))
-    };
+    let mut new_val = String::new();
+    for raw in headers.get_all(&xff_name) {
+        if let Ok(s) = raw.to_str() {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                if !new_val.is_empty() {
+                    new_val.push_str(", ");
+                }
+                new_val.push_str(trimmed);
+            }
+        }
+    }
+    if !new_val.is_empty() {
+        new_val.push_str(", ");
+    }
+    let _ = write!(&mut new_val, "{}", client_addr.ip());
     if let Ok(val) = HeaderValue::from_str(&new_val) {
         headers.insert(xff_name, val);
     }

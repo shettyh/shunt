@@ -167,6 +167,74 @@ async fn redirect_blocks_open_redirects_malformed_host_and_prefix_boundary_bugs(
         }
         _ => panic!("expected redirect response"),
     }
+
+    // 4) Host vs URI :authority disagreement -> 400 Bad Request (prevents host-route open redirect).
+    let no_allowlist = RedirectFactory
+        .build(
+            &PluginConfig::new(json!({ "scheme": "https" })),
+            &build_ctx(),
+        )
+        .unwrap();
+    let mut ctx = rctx();
+    let mut req = req_head(Method::GET, "https://trusted.example.com/login");
+    req.headers
+        .insert(header::HOST, HeaderValue::from_static("evil.example.com"));
+    let flow = no_allowlist
+        .on_request_headers(&mut ctx, &mut req)
+        .resolve()
+        .await;
+    assert!(matches!(flow, Flow::Respond(r) if r.status == StatusCode::BAD_REQUEST));
+
+    // 5) Build-time validation rejects blank/port allowed_hosts and port-bearing hostname.
+    assert!(
+        RedirectFactory
+            .build(
+                &PluginConfig::new(json!({ "scheme": "https", "allowed_hosts": ["   "] })),
+                &build_ctx(),
+            )
+            .is_err()
+    );
+    assert!(
+        RedirectFactory
+            .build(
+                &PluginConfig::new(
+                    json!({ "scheme": "https", "allowed_hosts": ["app.example.com:8080"] })
+                ),
+                &build_ctx(),
+            )
+            .is_err()
+    );
+    assert!(
+        RedirectFactory
+            .build(
+                &PluginConfig::new(
+                    json!({ "scheme": "https", "hostname": "app.example.com:8080", "port": 8443 })
+                ),
+                &build_ctx(),
+            )
+            .is_err()
+    );
+
+    // 6) Mixed-case URI scheme normalizes cleanly when suppressing default port 443.
+    let port_443 = RedirectFactory
+        .build(&PluginConfig::new(json!({ "port": 443 })), &build_ctx())
+        .unwrap();
+    let mut ctx = rctx();
+    let mut req = req_head(Method::GET, "HTTPS://app.example.com/login");
+    let flow = port_443
+        .on_request_headers(&mut ctx, &mut req)
+        .resolve()
+        .await;
+    match flow {
+        Flow::Respond(r) => {
+            assert_eq!(r.status, StatusCode::FOUND);
+            assert_eq!(
+                r.headers.get(header::LOCATION).unwrap(),
+                "https://app.example.com/login"
+            );
+        }
+        _ => panic!("expected redirect response"),
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -348,6 +416,77 @@ async fn jwt_auth_rejects_duplicate_credentials_and_strips_cookie_and_query() {
         .await;
     assert!(matches!(flow, Flow::Continue));
     assert_eq!(req.uri.to_string(), "/api?foo=1&bar=2");
+
+    // 6) Cross-source credential smuggling (Header + Cookie, or Header + Query) -> 400.
+    let mut ctx = rctx();
+    let mut req = req_head(Method::GET, "/api");
+    req.headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {tok}")).unwrap(),
+    );
+    req.headers.insert(
+        header::COOKIE,
+        HeaderValue::from_static("session_jwt=smuggled-token"),
+    );
+    let flow = plugin
+        .on_request_headers(&mut ctx, &mut req)
+        .resolve()
+        .await;
+    assert!(matches!(flow, Flow::Respond(r) if r.status == StatusCode::BAD_REQUEST));
+
+    let mut ctx = rctx();
+    let mut req = req_head(Method::GET, "/api?access_token=smuggled-token");
+    req.headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {tok}")).unwrap(),
+    );
+    let flow = plugin
+        .on_request_headers(&mut ctx, &mut req)
+        .resolve()
+        .await;
+    assert!(matches!(flow, Flow::Respond(r) if r.status == StatusCode::BAD_REQUEST));
+
+    // 7) Empty duplicate cookie or query param -> 400.
+    let mut ctx = rctx();
+    let mut req = req_head(Method::GET, "/api");
+    req.headers.insert(
+        header::COOKIE,
+        HeaderValue::from_str(&format!("session_jwt=; session_jwt={tok}")).unwrap(),
+    );
+    let flow = plugin
+        .on_request_headers(&mut ctx, &mut req)
+        .resolve()
+        .await;
+    assert!(matches!(flow, Flow::Respond(r) if r.status == StatusCode::BAD_REQUEST));
+
+    let mut ctx = rctx();
+    let mut req = req_head(
+        Method::GET,
+        &format!("/api?access_token=&access_token={tok}"),
+    );
+    let flow = plugin
+        .on_request_headers(&mut ctx, &mut req)
+        .resolve()
+        .await;
+    assert!(matches!(flow, Flow::Respond(r) if r.status == StatusCode::BAD_REQUEST));
+
+    // 8) HTTP/2 / absolute-form URI preserves scheme and :authority when stripping query param.
+    let mut ctx = rctx();
+    let mut req = req_head(
+        Method::GET,
+        &format!("https://api.example.com/v1?foo=1&access_token={tok}&bar=2"),
+    );
+    let flow = plugin
+        .on_request_headers(&mut ctx, &mut req)
+        .resolve()
+        .await;
+    assert!(matches!(flow, Flow::Continue));
+    assert_eq!(req.uri.scheme_str(), Some("https"));
+    assert_eq!(req.uri.host(), Some("api.example.com"));
+    assert_eq!(
+        req.uri.to_string(),
+        "https://api.example.com/v1?foo=1&bar=2"
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -459,6 +598,78 @@ async fn mtls_auth_hardened_wildcards_matched_san_and_revocation() {
     let mut ctx = rctx().with_client_cert(Some(revoked_cert));
     let mut req = req_head(Method::GET, "/");
     let flow = spiffe_plugin
+        .on_request_headers(&mut ctx, &mut req)
+        .resolve()
+        .await;
+    assert!(matches!(flow, Flow::Respond(r) if r.status == StatusCode::FORBIDDEN));
+
+    // 3) `**` followed by `*` backtracks properly across repeated segments.
+    let combo_plugin = MtlsAuthFactory
+        .build(
+            &PluginConfig::new(json!({
+                "allowed_san_uris": ["spiffe://prod/**/sa/*"]
+            })),
+            &build_ctx(),
+        )
+        .unwrap();
+    let nested_sa_cert = Arc::new(ClientCertInfo {
+        subject_cn: None,
+        subject_dn: "O=Acme".to_owned(),
+        issuer_dn: "CN=CA".to_owned(),
+        san_dns: vec![],
+        san_uris: vec!["spiffe://prod/ns/sa/foo/sa/web".to_owned()],
+        san_emails: vec![],
+        serial_hex: "05".to_owned(),
+        sha256_fingerprint: "5".repeat(64),
+    });
+    let mut ctx = rctx().with_client_cert(Some(nested_sa_cert));
+    let mut req = req_head(Method::GET, "/");
+    let flow = combo_plugin
+        .on_request_headers(&mut ctx, &mut req)
+        .resolve()
+        .await;
+    assert!(matches!(flow, Flow::Continue));
+
+    let extra_seg_cert = Arc::new(ClientCertInfo {
+        subject_cn: None,
+        subject_dn: "O=Acme".to_owned(),
+        issuer_dn: "CN=CA".to_owned(),
+        san_dns: vec![],
+        san_uris: vec!["spiffe://prod/ns/sa/foo/sa/web/extra".to_owned()],
+        san_emails: vec![],
+        serial_hex: "06".to_owned(),
+        sha256_fingerprint: "6".repeat(64),
+    });
+    let mut ctx = rctx().with_client_cert(Some(extra_seg_cert));
+    let mut req = req_head(Method::GET, "/");
+    let flow = combo_plugin
+        .on_request_headers(&mut ctx, &mut req)
+        .resolve()
+        .await;
+    assert!(matches!(flow, Flow::Respond(r) if r.status == StatusCode::FORBIDDEN));
+
+    // 4) CN wildcard `*.svc.internal` rejects empty leading label `.svc.internal`.
+    let cn_plugin = MtlsAuthFactory
+        .build(
+            &PluginConfig::new(json!({
+                "allowed_cns": ["*.svc.internal"]
+            })),
+            &build_ctx(),
+        )
+        .unwrap();
+    let empty_label_cn_cert = Arc::new(ClientCertInfo {
+        subject_cn: Some(".svc.internal".to_owned()),
+        subject_dn: "CN=.svc.internal".to_owned(),
+        issuer_dn: "CN=CA".to_owned(),
+        san_dns: vec![],
+        san_uris: vec![],
+        san_emails: vec![],
+        serial_hex: "07".to_owned(),
+        sha256_fingerprint: "7".repeat(64),
+    });
+    let mut ctx = rctx().with_client_cert(Some(empty_label_cn_cert));
+    let mut req = req_head(Method::GET, "/");
+    let flow = cn_plugin
         .on_request_headers(&mut ctx, &mut req)
         .resolve()
         .await;

@@ -779,6 +779,8 @@ impl JwtAuthPlugin {
         &self,
         req: &RequestHead,
     ) -> Result<Option<(String, TokenSource)>, &'static str> {
+        let mut selected: Option<(String, TokenSource)> = None;
+
         if let Some(hdr) = &self.header_name {
             let mut vals = req.headers.get_all(hdr).iter();
             if let Some(first) = vals.next() {
@@ -789,7 +791,7 @@ impl JwtAuthPlugin {
                     let trimmed = raw.trim();
                     let tok = strip_bearer_prefix(trimmed).unwrap_or(trimmed).trim();
                     if !tok.is_empty() {
-                        return Ok(Some((tok.to_owned(), TokenSource::Header)));
+                        selected = Some((tok.to_owned(), TokenSource::Header));
                     }
                 }
             }
@@ -799,16 +801,19 @@ impl JwtAuthPlugin {
                 if vals.next().is_some() {
                     return Err("multiple_authorization_headers");
                 }
-                if let Ok(raw) = first.to_str()
-                    && let Some(tok) = strip_bearer_prefix(raw).map(str::trim)
-                    && !tok.is_empty()
-                {
-                    return Ok(Some((tok.to_owned(), TokenSource::Header)));
+                if let Ok(raw) = first.to_str() {
+                    let trimmed = raw.trim();
+                    if let Some(tok) = strip_bearer_prefix(trimmed).map(str::trim)
+                        && !tok.is_empty()
+                    {
+                        selected = Some((tok.to_owned(), TokenSource::Header));
+                    }
                 }
             }
         }
 
         if let Some(cookie_name) = &self.cookie_name {
+            let mut seen_cookie = false;
             let mut found: Option<String> = None;
             for val in req.headers.get_all(header::COOKIE) {
                 if let Ok(s) = val.to_str() {
@@ -816,11 +821,12 @@ impl JwtAuthPlugin {
                         if let Some((k, v)) = pair.trim().split_once('=')
                             && k.trim() == cookie_name
                         {
+                            if seen_cookie {
+                                return Err("multiple_auth_cookies");
+                            }
+                            seen_cookie = true;
                             let trimmed = v.trim();
                             if !trimmed.is_empty() {
-                                if found.is_some() {
-                                    return Err("multiple_auth_cookies");
-                                }
                                 found = Some(trimmed.to_owned());
                             }
                         }
@@ -828,31 +834,39 @@ impl JwtAuthPlugin {
                 }
             }
             if let Some(tok) = found {
-                return Ok(Some((tok, TokenSource::Cookie)));
+                if selected.is_some() {
+                    return Err("multiple_auth_sources");
+                }
+                selected = Some((tok, TokenSource::Cookie));
             }
         }
 
         if let Some(qp) = &self.query_param
             && let Some(query) = req.uri.query()
         {
+            let mut seen_param = false;
             let mut found: Option<String> = None;
             for pair in query.split('&') {
-                if let Some((k, v)) = pair.split_once('=')
-                    && k == qp
-                    && !v.is_empty()
-                {
-                    if found.is_some() {
+                let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+                if k == qp {
+                    if seen_param {
                         return Err("multiple_auth_query_params");
                     }
-                    found = Some(v.to_owned());
+                    seen_param = true;
+                    if !v.is_empty() {
+                        found = Some(v.to_owned());
+                    }
                 }
             }
             if let Some(tok) = found {
-                return Ok(Some((tok, TokenSource::Query)));
+                if selected.is_some() {
+                    return Err("multiple_auth_sources");
+                }
+                selected = Some((tok, TokenSource::Query));
             }
         }
 
-        Ok(None)
+        Ok(selected)
     }
 
     fn strip_forwarded_claim_headers(&self, req: &mut RequestHead) {
@@ -1026,24 +1040,20 @@ impl JwtAuthPlugin {
         }
 
         if self.strip_header {
-            match source {
-                TokenSource::Header => {
-                    if let Some(hdr) = &self.header_name {
-                        req.headers.remove(hdr);
-                    } else {
-                        req.headers.remove(header::AUTHORIZATION);
-                    }
+            if source == TokenSource::Header {
+                if let Some(hdr) = &self.header_name {
+                    req.headers.remove(hdr);
+                } else {
+                    req.headers.remove(header::AUTHORIZATION);
                 }
-                TokenSource::Cookie => {
-                    if let Some(cookie_name) = &self.cookie_name {
-                        strip_cookie_from_headers(&mut req.headers, cookie_name);
-                    }
-                }
-                TokenSource::Query => {
-                    if let Some(qp) = &self.query_param {
-                        strip_query_param_from_uri(&mut req.uri, qp);
-                    }
-                }
+            } else if let Some(hdr) = &self.header_name {
+                req.headers.remove(hdr);
+            }
+            if let Some(cookie_name) = &self.cookie_name {
+                strip_cookie_from_headers(&mut req.headers, cookie_name);
+            }
+            if let Some(qp) = &self.query_param {
+                strip_query_param_from_uri(&mut req.uri, qp);
             }
         }
 
@@ -1360,8 +1370,12 @@ fn strip_query_param_from_uri(uri: &mut Uri, param: &str) {
     } else {
         format!("{path}?{}", kept.join("&"))
     };
-    if let Ok(parsed) = next_pq.parse() {
-        *uri = parsed;
+    let mut parts = uri.clone().into_parts();
+    if let Ok(pq) = next_pq.parse() {
+        parts.path_and_query = Some(pq);
+        if let Ok(rebuilt) = Uri::from_parts(parts) {
+            *uri = rebuilt;
+        }
     }
 }
 

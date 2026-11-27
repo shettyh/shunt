@@ -428,10 +428,10 @@ fn contains_disallowed_x509_control(s: &str) -> bool {
 /// cannot forge adjacent DN attributes.
 fn escape_rfc4514_value(val: &str) -> String {
     let mut out = String::with_capacity(val.len());
-    let chars: Vec<char> = val.chars().collect();
-    for (idx, &ch) in chars.iter().enumerate() {
-        let is_first = idx == 0;
-        let is_last = idx + 1 == chars.len();
+    let mut chars = val.chars().peekable();
+    let mut is_first = true;
+    while let Some(ch) = chars.next() {
+        let is_last = chars.peek().is_none();
         let needs_escape = matches!(ch, ',' | '+' | '"' | '\\' | '<' | '>' | ';')
             || (is_first && (ch == ' ' || ch == '#'))
             || (is_last && ch == ' ');
@@ -439,6 +439,7 @@ fn escape_rfc4514_value(val: &str) -> String {
             out.push('\\');
         }
         out.push(ch);
+        is_first = false;
     }
     out
 }

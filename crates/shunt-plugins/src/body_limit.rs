@@ -3,7 +3,8 @@ use std::sync::Arc;
 use serde::Deserialize;
 use shunt_plugin_sdk::{
     BufferedResponse, BuildContext, Flow, HookMask, HookResult, HttpPlugin, PluginBuildError,
-    PluginConfig, PluginFactory, RequestCtx, RequestHead, StatusCode, header,
+    PluginConfig, PluginFactory, RequestCtx, RequestHead, StatusCode,
+    parse_and_validate_content_length,
 };
 
 #[derive(Debug, Deserialize)]
@@ -82,40 +83,15 @@ impl HttpPlugin for BodyLimitPlugin {
         ctx: &'a mut RequestCtx,
         req: &'a mut RequestHead,
     ) -> HookResult<'a, Flow> {
-        let mut resolved_cl: Option<usize> = None;
-        for raw in req.headers.get_all(header::CONTENT_LENGTH) {
-            let Ok(s) = raw.to_str() else {
+        let resolved_cl = match parse_and_validate_content_length(&req.headers) {
+            Ok(cl) => cl,
+            Err(err) => {
                 return HookResult::Ready(Flow::Respond(BufferedResponse::json(
                     StatusCode::BAD_REQUEST,
-                    r#"{"error":"invalid_content_length"}"#,
+                    format!(r#"{{"error":"{}"}}"#, err.code()),
                 )));
-            };
-            for part in s.split(',') {
-                let trimmed = part.trim();
-                if trimmed.is_empty() || !trimmed.bytes().all(|b| b.is_ascii_digit()) {
-                    return HookResult::Ready(Flow::Respond(BufferedResponse::json(
-                        StatusCode::BAD_REQUEST,
-                        r#"{"error":"invalid_content_length"}"#,
-                    )));
-                }
-                let Ok(val) = trimmed.parse::<usize>() else {
-                    return HookResult::Ready(Flow::Respond(BufferedResponse::json(
-                        StatusCode::BAD_REQUEST,
-                        r#"{"error":"invalid_content_length"}"#,
-                    )));
-                };
-                if let Some(prev) = resolved_cl {
-                    if prev != val {
-                        return HookResult::Ready(Flow::Respond(BufferedResponse::json(
-                            StatusCode::BAD_REQUEST,
-                            r#"{"error":"conflicting_content_length"}"#,
-                        )));
-                    }
-                } else {
-                    resolved_cl = Some(val);
-                }
             }
-        }
+        };
 
         if let Some(cl) = resolved_cl
             && cl > self.max_bytes

@@ -363,6 +363,7 @@ async fn strict_path_validation_rejects_traversal_and_supports_raw_opt_in() {
         "/api/foo%2Fbar",
         "/api/foo%5cbar",
         "/api/foo%00bar",
+        "/api/%61dmin",
         "/api/%2",
     ];
     for p in hostile_paths {
@@ -390,7 +391,8 @@ async fn strict_path_validation_rejects_traversal_and_supports_raw_opt_in() {
         );
     }
 
-    // Opt-in `allow_raw_path` route allows encoded slashes (`%2F`), still blocks `%00`.
+    // Opt-in `allow_raw_path` route allows encoded slashes (`%2F`), but still blocks traversal,
+    // double slashes, backslashes, encoded control bytes, malformed `%`, and encoded unreserved chars.
     let raw_ok = send_raw_http(
         gw.local_addr(),
         "GET /objects/group%2Frepo HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -398,12 +400,24 @@ async fn strict_path_validation_rejects_traversal_and_supports_raw_opt_in() {
     .await;
     assert!(raw_ok.starts_with("HTTP/1.1 200"), "got: {raw_ok}");
 
-    let raw_nul = send_raw_http(
-        gw.local_addr(),
-        "GET /objects/bad%00id HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-    )
-    .await;
-    assert!(raw_nul.starts_with("HTTP/1.1 400"), "got: {raw_nul}");
+    for raw_bad in [
+        "/objects/bad%00id",
+        "/objects/bad%01id",
+        "/objects/x/../admin",
+        "/objects//admin",
+        "/objects/%2e%2e/admin",
+        "/objects/foo%5cbar",
+        "/objects/%61dmin",
+        "/objects/%2",
+    ] {
+        let req_str =
+            format!("GET {raw_bad} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        let resp = send_raw_http(gw.local_addr(), &req_str).await;
+        assert!(
+            resp.starts_with("HTTP/1.1 400"),
+            "expected 400 on allow_raw_path for `{raw_bad}`, got: {resp}"
+        );
+    }
 
     assert!(gw.shutdown().await);
 }
@@ -515,6 +529,33 @@ async fn slowloris_header_body_tls_inspect_timeouts_and_max_connections() {
         assert!(
             matches!(res, Ok(0) | Err(_)),
             "expected EOF/reset, got {res:?}"
+        );
+    }
+
+    // 1b) 0-byte idle connection (AutoServerBuilder::ReadVersion) -> closed promptly.
+    {
+        let mut zero_bytes = TcpStream::connect(gw.local_addr()).await.unwrap();
+        let mut buf = [0u8; 64];
+        let res = tokio::time::timeout(Duration::from_secs(2), zero_bytes.read(&mut buf))
+            .await
+            .expect("0-byte initial protocol detection timeout did not fire");
+        assert!(
+            matches!(res, Ok(0) | Err(_)),
+            "expected EOF/reset on 0-byte conn, got {res:?}"
+        );
+    }
+
+    // 1c) Partial HTTP/2 preface (`PRI * `) -> closed promptly instead of stalling ReadVersion.
+    {
+        let mut partial_h2 = TcpStream::connect(gw.local_addr()).await.unwrap();
+        partial_h2.write_all(b"PRI * ").await.unwrap();
+        let mut buf = [0u8; 64];
+        let res = tokio::time::timeout(Duration::from_secs(2), partial_h2.read(&mut buf))
+            .await
+            .expect("partial H2 preface initial protocol detection timeout did not fire");
+        assert!(
+            matches!(res, Ok(0) | Err(_)),
+            "expected EOF/reset on partial H2 preface, got {res:?}"
         );
     }
 
@@ -716,5 +757,56 @@ fn x509_dn_escapes_commas_per_rfc4514() {
         info.subject_dn.contains(r"O=Evil\,CN=admin"),
         "expected RFC 4514 escaped comma in subject_dn, got: {}",
         info.subject_dn
+    );
+}
+
+#[test]
+fn strip_hop_by_hop_preserves_te_trailers_with_connection_te() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONNECTION,
+        http::HeaderValue::from_static("TE, keep-alive"),
+    );
+    headers.insert(http::header::TE, http::HeaderValue::from_static("trailers"));
+    shunt_engine::pipeline::strip_hop_by_hop_headers(&mut headers);
+    assert!(!headers.contains_key(http::header::CONNECTION));
+    assert_eq!(headers.get(http::header::TE).unwrap(), "trailers");
+}
+
+struct TighterDefaultStatusBodyLimitPlugin;
+
+impl HttpPlugin for TighterDefaultStatusBodyLimitPlugin {
+    fn name(&self) -> &str {
+        "tighter-default-status"
+    }
+
+    fn hook_mask(&self) -> HookMask {
+        HookMask::EMPTY
+    }
+
+    fn max_request_body_bytes(&self) -> Option<usize> {
+        Some(8)
+    }
+}
+
+#[test]
+fn snapshot_builder_tighter_body_limit_resets_default_413_status() {
+    let registry = RuntimeRegistry::new();
+    let snap = SnapshotBuilder::new(1)
+        .upstream(UpstreamConfig::new(
+            "be",
+            vec!["http://127.0.0.1:9999".to_owned()],
+        ))
+        .route(
+            RouteSpec::new("r", RouteMatch::prefix("/"), "be")
+                .with_plugin(Arc::new(CustomBodyLimitPlugin))
+                .with_plugin(Arc::new(TighterDefaultStatusBodyLimitPlugin)),
+        )
+        .build(&registry, true)
+        .unwrap();
+    assert_eq!(snap.routes[0].max_body_bytes, 8);
+    assert_eq!(
+        snap.routes[0].max_body_status,
+        StatusCode::PAYLOAD_TOO_LARGE
     );
 }

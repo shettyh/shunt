@@ -369,18 +369,9 @@ impl Body for ChannelBody {
     }
 }
 
-/// Buffers an incoming body up to `max_bytes`, failing immediately with
-/// [`CoreError::BodyTooLarge`] if the size hint or streamed bytes exceed `max_bytes`.
-pub async fn collect_body_limited(
-    incoming: hyper::body::Incoming,
-    max_bytes: usize,
-) -> Result<Bytes, CoreError> {
-    collect_body_limited_with_timeouts(incoming, max_bytes, None, None).await
-}
-
 /// Buffers an incoming body up to `max_bytes` while optionally enforcing a per-chunk
 /// `idle_timeout` (`IdleChunkTimeout`) and/or overall `total_timeout` (`RequestBodyTimeout`).
-pub async fn collect_body_limited_with_timeouts(
+pub async fn collect_body_limited(
     mut incoming: hyper::body::Incoming,
     max_bytes: usize,
     idle_timeout: Option<Duration>,

@@ -908,7 +908,7 @@ pub fn compile_k8s_gateway_snapshot(
                         max_attempts: Some(max_attempts),
                         response_headers_timeout_ms,
                         idle_chunk_timeout_ms: Some(60_000),
-                        allow_websockets: Some(true),
+                        allow_websockets: None,
                         allow_raw_path: None,
                         mirrors: mirrors.clone(),
                         plugins: route_plugins,

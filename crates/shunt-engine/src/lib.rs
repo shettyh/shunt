@@ -28,8 +28,9 @@ pub use http_client::{
 pub use otlp::{OtlpExporterConfig, OtlpExporterStats, OtlpHttpExporter, encode_otlp_traces_json};
 pub use path_match::{
     CompiledPathRegex, CompiledPathTemplate, DEFAULT_PATH_REGEX_SIZE_LIMIT, PathMatch,
-    TemplateSegment, validate_request_path, validate_request_path_control_only,
+    TemplateSegment, validate_request_path, validate_request_path_allow_encoded_slashes,
 };
+pub use pipeline::{DEFAULT_REQUEST_BODY_TIMEOUT, RequestMeta};
 pub use probe::ProbeSupervisor;
 pub use redis::{
     RedisStateStore, RedisStoreConfig, RespError, RespValue, decode_resp_frame,

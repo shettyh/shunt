@@ -751,12 +751,14 @@ impl SnapshotBuilder {
             for plugin in &chain {
                 hook_mask |= plugin.hook_mask();
                 if let Some(cap) = plugin.max_request_body_bytes() {
-                    let is_tighter = effective_max_body.is_none_or(|cur| cap <= cur);
-                    effective_max_body = Some(match effective_max_body {
-                        Some(cur) => cur.min(cap),
-                        None => cap,
-                    });
-                    if is_tighter && let Some(st) = plugin.max_request_body_status_code() {
+                    let strictly_tighter = effective_max_body.is_none_or(|cur| cap < cur);
+                    let equal_cap = effective_max_body == Some(cap);
+                    if strictly_tighter {
+                        effective_max_body = Some(cap);
+                        max_body_status = plugin
+                            .max_request_body_status_code()
+                            .unwrap_or(StatusCode::PAYLOAD_TOO_LARGE);
+                    } else if equal_cap && let Some(st) = plugin.max_request_body_status_code() {
                         max_body_status = st;
                     }
                 }

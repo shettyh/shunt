@@ -147,9 +147,10 @@ impl HttpPlugin for BearerAuthPlugin {
         let presented = first_auth
             .and_then(|v| v.to_str().ok())
             .and_then(|s| {
-                let prefix = s.get(..7)?;
+                let trimmed = s.trim();
+                let prefix = trimmed.get(..7)?;
                 if prefix.eq_ignore_ascii_case("bearer ") {
-                    Some(s[7..].trim())
+                    Some(trimmed[7..].trim())
                 } else {
                     None
                 }

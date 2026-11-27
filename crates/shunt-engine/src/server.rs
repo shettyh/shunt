@@ -1,8 +1,11 @@
 use std::convert::Infallible;
+use std::future::Future;
+use std::io;
 use std::net::SocketAddr;
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -11,12 +14,13 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as AutoServerBuilder;
 use shunt_plugin_sdk::ClientCertInfo;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
 use crate::error::CoreError;
-use crate::pipeline::{DEFAULT_REQUEST_BODY_TIMEOUT, execute_request_with_body_timeout};
+use crate::pipeline::{DEFAULT_REQUEST_BODY_TIMEOUT, RequestMeta, execute_request};
 use crate::probe::ProbeSupervisor;
 use crate::snapshot::GatewaySnapshot;
 use crate::tls::{
@@ -158,13 +162,14 @@ impl GatewayServer {
         let drain_notify_loop = Arc::clone(&drain_notify);
         let trace_enabled_loop = Arc::clone(&self.trace_enabled);
         let limits = self.limits;
-        let conn_semaphore = Arc::new(Semaphore::new(limits.max_connections.max(1)));
+        let max_connections = limits.max_connections.max(1);
+        let conn_semaphore = Arc::new(Semaphore::new(max_connections));
         let mut accept_shutdown_rx = shutdown_rx.clone();
 
         info!(
             %local_addr,
             tls = tls_acceptor.is_some(),
-            max_connections = limits.max_connections,
+            max_connections,
             "shunt gateway listening"
         );
 
@@ -199,7 +204,7 @@ impl GatewayServer {
                         let Ok(conn_permit) = Arc::clone(&conn_semaphore).try_acquire_owned() else {
                             debug!(
                                 %peer_addr,
-                                max_connections = limits.max_connections,
+                                max_connections,
                                 "connection rejected: max_connections reached"
                             );
                             drop(tcp);
@@ -234,10 +239,7 @@ impl GatewayServer {
                                 let handshake = tokio::select! {
                                     biased;
                                     _ = conn_shutdown_rx.changed() => {
-                                        if *conn_shutdown_rx.borrow() {
-                                            debug!(%peer_addr, "TLS handshake cancelled by shutdown");
-                                            return;
-                                        }
+                                        debug!(%peer_addr, "TLS handshake cancelled by shutdown");
                                         return;
                                     }
                                     res = tokio::time::timeout(
@@ -256,7 +258,10 @@ impl GatewayServer {
                                             .and_then(|leaf| parse_client_cert_info(leaf.as_ref()))
                                             .map(Arc::new);
                                         serve_connection(
-                                            TokioIo::new(tls_stream),
+                                            TokioIo::new(InitialReadTimeoutIo::new(
+                                                tls_stream,
+                                                limits.header_read_timeout,
+                                            )),
                                             peer_addr,
                                             tls_sni,
                                             client_cert,
@@ -281,7 +286,10 @@ impl GatewayServer {
                                 }
                             } else {
                                 serve_connection(
-                                    TokioIo::new(tcp),
+                                    TokioIo::new(InitialReadTimeoutIo::new(
+                                        tcp,
+                                        limits.header_read_timeout,
+                                    )),
                                     peer_addr,
                                     None,
                                     None,
@@ -341,15 +349,17 @@ async fn serve_connection<I>(
         let trace = trace_enabled.load(Ordering::Relaxed);
 
         async move {
-            let resp = execute_request_with_body_timeout(
+            let resp = execute_request(
                 snapshot,
                 req,
-                req_id,
-                peer_addr,
-                sni,
-                cert,
-                trace,
-                request_body_timeout,
+                RequestMeta {
+                    request_id: req_id,
+                    client_addr: peer_addr,
+                    tls_sni: sni,
+                    client_cert: cert,
+                    trace_enabled: trace,
+                    request_body_timeout,
+                },
             )
             .await;
             Ok::<_, Infallible>(resp)
@@ -403,6 +413,108 @@ impl Drop for ActiveConnGuard {
         if self.counter.fetch_sub(1, Ordering::SeqCst) == 1 {
             self.notify.notify_waiters();
         }
+    }
+}
+
+/// HTTP/2 connection preface (RFC 9113 §3.4) probed by `hyper_util`'s `AutoServerBuilder::ReadVersion`.
+const H2_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+/// Bounds `AutoServerBuilder::ReadVersion` initial protocol detection with `header_read_timeout`.
+///
+/// `hyper_util::server::conn::auto` reads up to 24 bytes of the HTTP/2 preface without a timer
+/// before entering HTTP/1.1 or HTTP/2, so a client sending 0 bytes or a partial preface
+/// (`"PRI * "`) would otherwise hold a `max_connections` slot indefinitely. This wrapper arms a
+/// single deadline until protocol detection resolves (either a byte mismatches `H2_PREFACE` and
+/// Hyper hands off to HTTP/1.1's `header_read_timeout`, or all 24 bytes of `H2_PREFACE` arrive
+/// and Hyper enters HTTP/2), then disarms itself with zero steady-state overhead.
+struct InitialReadTimeoutIo<I> {
+    inner: I,
+    deadline: Option<Pin<Box<tokio::time::Sleep>>>,
+    preface_matched: usize,
+}
+
+impl<I> InitialReadTimeoutIo<I> {
+    fn new(inner: I, timeout: Duration) -> Self {
+        Self {
+            inner,
+            deadline: Some(Box::pin(tokio::time::sleep(timeout))),
+            preface_matched: 0,
+        }
+    }
+}
+
+impl<I: AsyncRead + Unpin> AsyncRead for InitialReadTimeoutIo<I> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        match Pin::new(&mut self.inner).poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                if self.deadline.is_some() {
+                    let newly_read = &buf.filled()[before..];
+                    for &b in newly_read {
+                        if self.preface_matched < H2_PREFACE.len()
+                            && b == H2_PREFACE[self.preface_matched]
+                        {
+                            self.preface_matched += 1;
+                            if self.preface_matched == H2_PREFACE.len() {
+                                self.deadline = None;
+                                break;
+                            }
+                        } else {
+                            self.deadline = None;
+                            break;
+                        }
+                    }
+                }
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => {
+                if let Some(sleep) = self.deadline.as_mut()
+                    && sleep.as_mut().poll(cx).is_ready()
+                {
+                    self.deadline = None;
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "initial protocol detection timed out",
+                    )));
+                }
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl<I: AsyncWrite + Unpin> AsyncWrite for InitialReadTimeoutIo<I> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
     }
 }
 

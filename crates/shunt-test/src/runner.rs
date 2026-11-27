@@ -489,6 +489,7 @@ async fn run_case(
 
     // 3. Bind real GatewayServer + AdminServer on ephemeral 127.0.0.1:0 ports
     let gw_handle = match GatewayServer::new(bundle.snapshot)
+        .with_limits(bundle.config.server.server_limits())
         .with_drain_timeout(Duration::from_secs(2))
         .with_trace_enabled(ui_enabled)
         .bind("127.0.0.1:0".parse().unwrap())
